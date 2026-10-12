@@ -14,11 +14,12 @@
  *   5. remind/index.js   —— DDL 到期提醒：截止时刻合成（北京时间）/ 幂等键 / 提醒窗口 /
  *                            模板字段类型解析（thing / short_thing / date / time /
  *                            character_string …，按 key 前缀）与各自长度格式约束 /
+ *                            **长度按"权重"算（汉字/全角 = 2，真机证实）**及其截断保证 /
  *                            默认映射对齐真实模板（thing2 + date4 + short_thing19）/
- *                            "标题截断但保留（还剩N分钟）尾巴" / 47003 失败留痕能自证
- *                            "哪个字段、发了什么值" / 错误码分类（43101 / 47003 / 40001）/
- *                            额度（quota）绝不超发 / 单用户失败不中断整轮。
- *                            **注意**：真实订阅消息下发与定时触发器在本机无法验证，
+ *                            47003 失败留痕能自证"哪个字段、发了什么值" /
+ *                            配置类失败退回额度（不烧用户授权）/ 错误码分类
+ *                            （43101 / 47003 / 40001）/ 额度绝不超发 / 单用户失败不中断整轮。
+ *                            **注意**：成功路径的真实下发与定时触发器在本机无法验证，
  *                            下发走可替换出口打桩（详见第 10 节开头的边界说明）。
  *
  * 退出码：全部通过 0；有任何失败 1。
@@ -2040,70 +2041,143 @@ testCase('10.7 默认映射对齐真实模板：thing2 / date4 / short_thing19 �
   eq(remind.DEFAULT_FIELD_MAP, { thing2: 'title', date4: 'due', short_thing19: 'category' }, '默认映射内容');
   eq(Object.keys(built.data).sort(), ['date4', 'short_thing19', 'thing2'], '产出的 data 就是这三个 key');
 
-  // ① thing2「提醒内容」= 标题 + 还剩多久的尾巴（时间栏只给时刻，所以尾巴必须在这里）
-  eq(built.data.thing2.value, '提交实验报告（还剩30分钟）', 'thing2 = 标题（带还剩 N 分钟的尾巴）');
+  // ① thing2「提醒内容」= 标题（**不带"（还剩 N 分钟）"尾巴**，理由见 10.8）
+  eq(built.data.thing2.value, '提交实验报告', 'thing2 = 标题原文');
+  ok(remind.fieldUnits(built.data.thing2.value) <= remind.THING_MAX, '权重在 thing 上限内（12 ≤ 20）');
+  eq(built.data.thing2.value.indexOf('还剩'), -1, '标题栏不带"还剩…"（平台字段放不下，见 10.8）');
   // ② date4「日程时间」= 年月日形状、**不补零**、带时刻（与官方示例 2019年10月1日15:01 一致）
   eq(built.data.date4.value, '2026年9月28日12:00', 'date4 = 年月日 + 时刻');
   ok(/^\d{4}年\d{1,2}月\d{1,2}日\d{1,2}:\d{1,2}$/.test(built.data.date4.value),
     'date4 匹配 ^\\d{4}年\\d{1,2}月\\d{1,2}日\\d{1,2}:\\d{1,2}$');
   ok(built.data.date4.value.indexOf('-') === -1, '不带 "2026-09-28" 那种内部格式的连字符');
-  // ③ short_thing19「日程类别」= 中文标签，且**不超过 5 字**（硬约束）
+  // ③ short_thing19「日程类别」= 中文标签，且**权重**不超 5
   eq(built.data.short_thing19.value, '截止', 'ddl 的类别是「截止」');
-  ok(Array.from(built.data.short_thing19.value).length <= 5, '「截止」不超 5 字');
+  eq(remind.fieldUnits(built.data.short_thing19.value), 4, '「截止」权重 = 4 ≤ 5');
   eq(built.truncated, [], '这个长度不该触发截断');
-  eq(built.warnings, [], '默认映射 + 默认模板不该有任何警告');
+
+  // 这个模板 + 默认映射下，**只有**一条"未最终证实"的提醒（date4 的带时刻写法），没有配置错误
+  eq(built.warnings.length, 1, '恰好一条提醒');
+  ok(built.warnings[0].indexOf('date4') !== -1, '提醒针对 date4');
+  ok(built.warnings[0].indexOf('尚未被真机证实') !== -1, '并且照实说是未证实，而不是"错了"');
 
   // 类别标签三类都与前端 utils/periods.js 的 TYPE_LABELS 一致
   eq(remind.typeLabelOf('ddl'), '截止', 'ddl → 截止');
   eq(remind.typeLabelOf('event'), '日程', 'event → 日程');
   eq(remind.typeLabelOf('subtask'), '子任务', 'subtask → 子任务');
-  ok(Array.from(remind.typeLabelOf('subtask')).length <= 5, '最长的类别标签也不超 5 字');
+  // 各标签在权重口径下的实际占用（short_thing 上限 5 权重 = 2 个汉字）
+  eq(remind.fieldUnits('截止'), 4, '截止 = 4 权重（合规）');
+  eq(remind.fieldUnits('日程'), 4, '日程 = 4 权重（合规）');
+  eq(remind.fieldUnits('子任务'), 6, '子任务 = 6 权重（**超** short_thing 的 5 → 必须被截）');
+  // 子任务虽然不会被提醒（只提醒 ddl），但映射一旦指向它也不能发出违规值
+  const subBuilt = remind.buildMessageData({ title: 'x', type: 'subtask' }, dueAt, null, before30);
+  ok(remind.fieldUnits(subBuilt.data.short_thing19.value) <= 5, '子任务标签也会被裁到 5 权重内');
+  eq(subBuilt.data.short_thing19.value, '子…', '裁成「子…」');
 
-  // 留痕必须齐：槽位 → key → 类型 → 最终值（47003 排查就靠它）
+  // 留痕必须齐：槽位 → key → 类型 → 最终值 + 权重（47003 排查就靠它）
   eq(built.fields.map((f) => `${f.slot}:${f.key}:${f.type}`),
     ['title:thing2:thing', 'due:date4:date', 'category:short_thing19:short_thing'],
     'fields 留痕是「槽位 → key → 类型」');
-  eq(built.fields.map((f) => f.value),
-    ['提交实验报告（还剩30分钟）', '2026年9月28日12:00', '截止'], '留痕里带最终值');
+  eq(built.fields.map((f) => f.value), ['提交实验报告', '2026年9月28日12:00', '截止'], '留痕里带最终值');
+  eq(built.fields.map((f) => f.units), [12, 18, 4], '留痕里带权重（date4 = 18 权重）');
   eq(remind.describeMessageFields(built.fields),
-    'thing2=提交实验报告（还剩30分钟） | date4=2026年9月28日12:00 | short_thing19=截止',
+    'thing2=提交实验报告 | date4=2026年9月28日12:00 | short_thing19=截止',
     'describeMessageFields 压成一行可读文本');
 
-  // 空标题不留空 —— 微信不接受空 value（尾巴照旧保留）
+  // 空标题不留空 —— 微信不接受空 value
   eq(remind.buildMessageData({ title: '  ', type: 'ddl' }, dueAt, null, before30).data.thing2.value,
-    '未命名任务（还剩30分钟）', '空标题用占位文字');
+    '未命名任务', '空标题用占位文字（10 权重 ≤ 20）');
 });
 
-testCase('10.8 标题 30 个汉字 → ≤20 码点，且"（还剩30分钟）"必须还在', () => {
+testCase('10.8 【真机证实】长度按权重算：汉字/全角算 2，去掉"还剩 N 分钟"尾巴', () => {
+  // ===== 把真机被拒的那条字符串钉成回归用例 =====
+  // 微信原文：should be 5-20 characters；当时发的是「提交实验报告（还剩30分钟）」，
+  // 按码点只有 14，按权重是 26 → 26 > 20 被拒。以后有人改回按码点数，这条就会红。
+  const rejected = '提交实验报告（还剩30分钟）';
+  eq(Array.from(rejected).length, 14, '按码点数是 14（看着完全没超 20）');
+  eq(remind.fieldUnits(rejected), 26, '按权重是 26 —— 与微信 should be 5-20 characters 吻合');
+  ok(remind.fieldUnits(rejected) > remind.THING_MAX, '所以真机会被拒，这是已被证实的事实');
+
+  // 口径本身：汉字/全角算 2，数字/字母/半角算 1
+  eq(remind.fieldUnits('一'), 2, '汉字 = 2');
+  eq(remind.fieldUnits('（'), 2, '全角括号 = 2');
+  eq(remind.fieldUnits('，'), 2, '全角逗号 = 2');
+  eq(remind.fieldUnits('a'), 1, '半角字母 = 1');
+  eq(remind.fieldUnits('9'), 1, '半角数字 = 1');
+  eq(remind.fieldUnits('a b'), 2, '半角空格**不计**（值的首尾会先 trim，见代码注释）');
+  eq(remind.fieldUnits(' '), 0, '孤立的空格被 trim → 0');
+  eq(remind.fieldUnits('…'), 2, '省略号按 2 权重算（保守口径，预算里必须减掉它）');
+  eq(remind.ELLIPSIS_UNITS, 2, 'ELLIPSIS_UNITS 常量 = 2');
+  eq(remind.fieldUnits('截止'), 4, '截止 = 4');
+  eq(remind.fieldUnits(''), 0, '空串 = 0');
+  eq(remind.fieldUnits(null), 0, 'null 安全');
+
+  // ===== 默认映射下：30 个汉字的标题 → 权重 ≤ 20 且以 … 结尾 =====
   const dueAt = bjMs('2026-09-28', '12:00');
   const before30 = { now: dueAt - 30 * MIN };
-  const longTitle = '一二三四五六七八九十'.repeat(3); // 30 个汉字
-  eq(Array.from(longTitle).length, 30, '素材确认：30 个字');
+  const longTitle = '一二三四五六七八九十'.repeat(3); // 30 个汉字 = 60 权重
+  eq(remind.fieldUnits(longTitle), 60, '30 个汉字 = 60 权重');
   const built = remind.buildMessageData({ title: longTitle, type: 'ddl' }, dueAt, null, before30);
-
-  eq(remind.THING_MAX, 20, 'thing 类上限 20');
-  ok(Array.from(built.data.thing2.value).length <= 20, '结果 ≤ 20 个码点');
-  ok(built.data.thing2.value.indexOf('（还剩30分钟）') !== -1,
-    '尾巴完整保留 —— 截断绝不能把"还剩多久"切掉（那才是这条通知的意义）');
-  eq(built.data.thing2.value, '一二三四五六七八九十一…（还剩30分钟）', '被截的是标题，不是尾巴');
-  eq(built.truncated.length, 1, '返回值里说明了哪条被截断（悄悄截短是不允许的）');
+  const value = built.data.thing2.value;
+  ok(remind.fieldUnits(value) <= remind.THING_MAX, `最终 thing2 权重 ${remind.fieldUnits(value)} ≤ 20`);
+  eq(value.slice(-1), '…', '以省略号结尾（看得见被截了）');
+  eq(value, '一二三四五六七八九十'.repeat(3).slice(0, 9) + '…', '前 9 个汉字 + 省略号');
+  eq(remind.fieldUnits(value), 20, '正好用满 20 权重（不浪费预算）');
+  eq(Array.from(value).length, 10, '10 个码点 —— **不是 20**，这正是权重与字符数的区别');
+  eq(built.truncated.length, 1, 'truncated 里如实上报');
   ok(built.truncated[0].indexOf('thing2') !== -1, '点名 thing2');
-  ok(built.truncated[0].indexOf('先保尾巴') !== -1, '并说清是按什么规则截的');
+  ok(built.truncated[0].indexOf('权重') !== -1, '并说清是按权重口径裁的');
+  ok(built.truncated[0].indexOf('60') !== -1, '带上原始权重（方便判断裁得狠不狠）');
 
-  // 边界：尾巴自己就超上限时（short_thing 的 5 字），只能留尾巴
-  const tiny = remind.composeTitleWithLeft('提交实验报告', 30, 5);
-  eq(tiny.text, '（还剩3…', '上限只有 5 时优先保尾巴');
-  ok(Array.from(tiny.text).length <= 5, '仍然不超 5');
-  eq(tiny.titleTruncated, true, '并且如实标记标题被截了');
+  // ===== 每个字段都要通过本地权重自检（多组脏输入跑一遍）=====
+  const dirty = [
+    '', '  ', '一', '一二三四五', '一'.repeat(30), 'a'.repeat(100),
+    '混合abc中文123', '，。！？（）【】', '🎓'.repeat(30), 'x'.repeat(25) + '汉'.repeat(25),
+    '提交实验报告（还剩30分钟）', 'ＡＢＣ全角字母', 'a b c', '　', '１', 'ｱ',
+  ];
+  let checkedFields = 0;
+  dirty.forEach((title) => {
+    [null, { thing1: 'title', short_thing2: 'title', phrase3: 'title' }].forEach((map) => {
+      const out = remind.buildMessageData({ title, type: 'ddl' }, dueAt, map, before30);
+      Object.keys(out.data).forEach((key) => {
+        const type = remind.fieldTypeOf(key);
+        const rule = remind.ruleForType(type);
+        const check = remind.checkFieldCompliance(key, out.data[key].value, rule.max, type);
+        ok(check.ok, `脏输入 ${JSON.stringify(title).slice(0, 14)} 的 ${key} 自检通过（${check.reason}）`);
+        // 空值也不行：微信不接受空 value（用户没填标题时走占位文字，不会是空串）
+        ok(String(out.data[key].value).length > 0, `${key} 不能是空串`);
+        checkedFields += 1;
+      });
+    });
+  });
+  ok(checkedFields >= 40, `确实跑了多组输入（共检查 ${checkedFields} 个字段）`);
 
-  // emoji 标题截断不能产生半个代理对（落单的 \uD800-\uDBFF）
-  const emojiTitle = '🎓'.repeat(30);
-  const emojiBuilt = remind.buildMessageData({ title: emojiTitle, type: 'ddl' }, dueAt, null, before30);
-  const emojiValue = emojiBuilt.data.thing2.value;
-  ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(emojiValue), '没有落单的高代理（高位）');
+  // ===== emoji 截断不产生半个代理对 =====
+  const emojiValue = remind.buildMessageData({ title: '🎓'.repeat(30), type: 'ddl' }, dueAt, null, before30)
+    .data.thing2.value;
+  ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(emojiValue), '没有落单的高代理');
   ok(!/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(emojiValue), '没有落单的低代理');
-  ok(Array.from(emojiValue).length <= 20, 'emoji 也按码点算长度');
-  ok(emojiValue.indexOf('（还剩30分钟）') !== -1, 'emoji 标题下尾巴同样保得住');
+  ok(remind.fieldUnits(emojiValue) <= remind.THING_MAX, 'emoji 也按权重算且合规');
+
+  // ===== truncateToUnits 的硬保证：任何输入都不会产出超限值 =====
+  const budgets = [5, 6, 20, 32];
+  budgets.forEach((max) => {
+    dirty.forEach((text) => {
+      const fitted = remind.truncateToUnits(text, max);
+      ok(remind.fieldUnits(fitted.text) <= max,
+        `truncateToUnits(${JSON.stringify(text).slice(0, 12)}, ${max}) 结果不超限`);
+    });
+  });
+  // 预算小到放不下省略号时给空串（硬保证优先于"别留空"）
+  eq(remind.truncateToUnits('一', 0).text, '', '预算 0 → 空串');
+  eq(remind.truncateToUnits('一', 2).text, '一', '正好放得下就不截');
+  eq(remind.truncateToUnits('一二', 2).text, '', '截了就会超 → 宁可给空串');
+
+  // ===== 尾巴去掉这件事本身 =====
+  eq(typeof remind.composeTitleWithLeft, 'undefined', '旧的"标题+尾巴"函数已移除（别再请回来）');
+  eq(remind.composeTitle('提交实验报告', remind.THING_MAX).text, '提交实验报告', 'composeTitle 就是按权重收口的标题');
+  // 用同一个输入比较两条路径，否则比的是两个不同字符串（这种"看着对其实没测到"的断言要避免）
+  eq(remind.composeTitle(longTitle, remind.THING_MAX).text, value, 'composeTitle 与 buildMessageData 走同一口径');
+  eq(remind.composeTitle('一'.repeat(30), 20).text, '一一一一一一一一一…', '纯汉字 30 个 → 9 个 + 省略号');
 });
 
 testCase('10.9 buildMessageData / resolveFieldMap：字段名映射与非法映射的容错', () => {
@@ -2114,26 +2188,28 @@ testCase('10.9 buildMessageData / resolveFieldMap：字段名映射与非法映�
   const mapped = remind.buildMessageData({ title: '交报告', type: 'ddl' }, dueAt,
     { thing1: 'title', time2: 'left', phrase3: 'category' }, before30);
   eq(Object.keys(mapped.data).sort(), ['phrase3', 'thing1', 'time2'], '字段名跟着映射变');
-  eq(mapped.data.thing1.value, '交报告（还剩30分钟）', 'thing1 拿标题（带尾巴）');
+  eq(mapped.data.thing1.value, '交报告', 'thing1 拿标题（不带尾巴）');
   // time 类：形状由类型决定（年月日 + 时刻），两种写法都收
   ok(/^\d{4}年\d{1,2}月\d{1,2}日\d{1,2}:\d{1,2}$/.test(mapped.data.time2.value), 'time2 也是年月日形状');
-  // phrase 类只允许 5 个汉字、**不允许空格** —— 所以给紧凑短语而不是整句
-  eq(mapped.data.phrase3.value, '截止', 'phrase3 拿类别的紧凑写法');
+  // phrase 类只允许 5 权重、**不允许空格** —— 给紧凑写法，且放不下就按权重裁
+  eq(mapped.data.phrase3.value, '截止', 'phrase3 拿类别的紧凑写法（4 权重 ≤ 5）');
   eq(mapped.truncated, [], '这些值都没超各自类型的上限');
 
-  // phrase 类长度上限 5 是硬约束：超了必须被我们截掉，而不是等微信回 47003
+  // phrase 类上限 5 权重是硬约束：超了必须被我们截掉，而不是等微信回 47003
   const phraseOver = remind.buildMessageData({ title: '这是一个很长的标题', type: 'ddl' }, dueAt,
     { phrase1: 'title' }, before30);
-  eq(phraseOver.data.phrase1.value, '这是一个…', 'phrase1 被截到 5 字（前 4 字 + 省略号）');
-  ok(Array.from(phraseOver.data.phrase1.value).length <= 5, 'phrase 取值不超 5 字');
+  eq(phraseOver.data.phrase1.value, '这…', 'phrase1 被裁到 5 权重内（1 汉字 + 省略号 = 4）');
+  ok(remind.fieldUnits(phraseOver.data.phrase1.value) <= 5, 'phrase 权重不超 5');
   eq(phraseOver.truncated.length, 1, '并且如实报告"我截了"（悄悄截短是不允许的）');
 
-  // short_thing 超 5 字同样被截（不靠微信报错）
+  // short_thing 上限同样是 5 权重（= 2 个汉字）
   const shortOver = remind.buildMessageData({ title: '这是一个很长的标题', type: 'ddl' }, dueAt,
     { short_thing1: 'title' }, before30);
-  eq(Array.from(shortOver.data.short_thing1.value).length, 5, 'short_thing 被截到 5 字');
-  eq(shortOver.data.short_thing1.value, '这是一个…', '前 4 字 + 省略号');
+  ok(remind.fieldUnits(shortOver.data.short_thing1.value) <= 5, 'short_thing 权重不超 5');
+  eq(shortOver.data.short_thing1.value, '这…', '1 汉字 + 省略号 = 4 权重');
   ok(shortOver.data.short_thing1.value.indexOf(' ') === -1, 'short_thing 里不留空格');
+  // 两个汉字 + 省略号会超（2+2+2=6 > 5），所以只能留一个汉字 —— 这正是权重口径的意义
+  eq(remind.truncateToUnits('两个汉字', 5).text, '两…', '5 权重只放得下 1 个汉字 + 省略号');
 
   // 非法槽位（拼错）→ 忽略该字段 + warning，不静默改成默认语义
   const bad = remind.resolveFieldMap({ thing1: 'titel', time2: 'due' });
@@ -2369,7 +2445,8 @@ testCaseAsync('10.13 端到端：发一条 → 扣额度 → 第二遍不再发�
   eq(sender.calls[0].openid, 'me', '发给谁');
   eq(sender.calls[0].templateId, 'TPL-TEST-0001', '模板 ID 从环境变量来（前端不硬编码）');
   eq(sender.calls[0].page, '/pages/tasks/tasks', '跳转页');
-  eq(sender.calls[0].data.thing2.value, '交实验报告（还剩5分钟）', '模板 data 里的标题（带还剩多久的尾巴）');
+  eq(sender.calls[0].data.thing2.value, '交实验报告', '模板 data 里的标题（不带尾巴）');
+  eq(remind.fieldUnits(sender.calls[0].data.thing2.value) <= remind.THING_MAX, true, '标题权重合规');
   eq(sender.calls[0].data.date4.value, remind.formatDateFieldText(dueAt), 'date4 是截止时刻（年月日形状）');
   eq(sender.calls[0].data.short_thing19.value, '截止', 'short_thing19 是任务类别');
   eq(db.store.settings[0].remind_quota, 2, '发一条扣一条额度');
@@ -2470,7 +2547,7 @@ testCaseAsync('10.16 47003：错误里能看出是模板字段问题', async () 
   ok(recordText.indexOf('thing2=') !== -1, '失败记录里有 thing2 的字段名');
   ok(recordText.indexOf('date4=') !== -1, '失败记录里有 date4 的字段名');
   ok(recordText.indexOf('short_thing19=') !== -1, '失败记录里有 short_thing19 的字段名');
-  ok(recordText.indexOf('任务（还剩5分钟）') !== -1, '失败记录里带上**实际发出去的值**（这才是线索）');
+  ok(recordText.indexOf('任务') !== -1, '失败记录里带上**实际发出去的值**（这才是线索）');
   ok(recordText.indexOf('2026年') !== -1, '日期字段的值也在（能看出格式对不对）');
   ok(recordText.indexOf('本次发出的字段与值') !== -1, '并且明确标出这一段是什么');
 
@@ -2478,7 +2555,7 @@ testCaseAsync('10.16 47003：错误里能看出是模板字段问题', async () 
   ok(Array.isArray(record.sent_fields), 'sent_fields 是数组');
   eq(record.sent_fields.map((f) => `${f.key}:${f.type}`),
     ['thing2:thing', 'date4:date', 'short_thing19:short_thing'], 'sent_fields 含 key 与类型');
-  eq(record.sent_fields[0].value, '任务（还剩5分钟）', 'sent_fields 含最终值');
+  eq(record.sent_fields[0].value, '任务', 'sent_fields 含最终值');
 
   // 安全：不能把 openid 明文或任何密钥带进失败记录 / 错误返回
   // 【注意断言的写法】不能简单找 'me' 子串 —— 任务标题默认就是"任务"，
@@ -2517,6 +2594,61 @@ testCaseAsync('10.16b actionTest 的 47003 失败也能自证：返回与记录�
   } finally {
     remind.sendSubscribeMessage = realSend;
   }
+});
+
+testCaseAsync('10.16c 配置类失败要把额度还回去（否则模板配错会烧光用户授权）', async () => {
+  // 【为什么这条重要】deliverOne 是"先扣额度再发送"。47003 这类参数/配置错误在微信侧
+  // **根本没消耗额度**，扣掉就是白扣；模板配错一次，之后每轮扫描（每 5 分钟）都白扣一次，
+  // 几轮就把用户的授权次数烧光 —— 等配置改对反而发不出去了。
+  const dueAt = R_NOW + 5 * MIN;
+
+  // ① 47003（配置/参数类）→ 还回去
+  const db = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'q1' })] });
+  const sender = stubSender([{ ok: false, errCode: 47003, errMsg: 'thing2 invalid' }]);
+  const result = await runScan(db, sender);
+  eq(result.failed, 1, '记了 1 条失败');
+  eq(result.quota_refunded, 1, 'scan 汇总里报告"退了 1 次"');
+  eq(db.store.settings[0].remind_quota, 3, '额度被退回：还是 3（扣了又还）');
+  const rec = db.store.reminders[0];
+  eq(rec.quota_refunded, true, '失败记录里标明额度已回退（否则"额度为什么没少"会查不出来）');
+  ok(String(rec.error).indexOf('退回') !== -1 || String(result.errors[0]).indexOf('退回') !== -1,
+    '错误文案里也说明了这次没占额度');
+  // 分类函数本身
+  eq(remind.shouldRefundQuota(remind.classifySendError({ errCode: 47003 })), true, '47003 → 退');
+  eq(remind.shouldRefundQuota(remind.classifySendError({ errCode: 43101 })), false, '43101 → 不退（用户确实拒收）');
+  eq(remind.shouldRefundQuota(remind.classifySendError({ errCode: 40001 })), false, '40001 → 不退（可能已消耗）');
+  eq(remind.shouldRefundQuota(remind.classifySendError({ errCode: 99999 })), true, '未知错误 → 退（宁可多还，不白扣）');
+  eq(remind.shouldRefundQuota(remind.classifySendError({ errMsg: '网络断了' })), true, '无码的网络类 → 退');
+
+  // ② 网络/未知类失败**不还**（保持原来的"宁可少算不可多发"）
+  const dbToken = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'q2' })] });
+  const tokenSender = stubSender([{ ok: false, errCode: 40001, errMsg: 'access_token expired' }]);
+  const tokenResult = await runScan(dbToken, tokenSender);
+  eq(tokenResult.failed, 1, 'token 失败也记失败');
+  eq(tokenResult.quota_refunded, 0, 'token 类不退还');
+  eq(dbToken.store.settings[0].remind_quota, 2, '额度保持在扣减后的 2');
+  eq(dbToken.store.reminders[0].quota_refunded, false, '记录里写明没退');
+
+  // ③ 43101 也不退（用户拒收，额度本来就是无效的）
+  const dbRej = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'q3' })] });
+  const rejSender = stubSender([{ ok: false, errCode: 43101, errMsg: 'user refuse' }]);
+  const rejResult = await runScan(dbRej, rejSender);
+  eq(rejResult.quota_refunded, 0, '43101 不退还');
+  eq(dbRej.store.settings[0].remind_quota, 2, '额度保持在 2');
+  eq(dbRej.store.settings[0].remind_enabled, false, '并且照旧关掉该用户的提醒');
+
+  // ④ 退还不能越过总额上限（反复退不会把额度刷上去）
+  const dbCap = remindWorld({ quota: remind.MAX_QUOTA, tasks: [ddlAt(dueAt, { _id: 'q4' })] });
+  const capSender = stubSender([{ ok: false, errCode: 47003, errMsg: 'x' }]);
+  await runScan(dbCap, capSender);
+  eq(dbCap.store.settings[0].remind_quota, remind.MAX_QUOTA, '退回到封顶值就停住，不会越界');
+
+  // ⑤ 连续两轮都失败：额度不减少（这正是"烧光授权"那个 bug 的回归）
+  const dbTwice = remindWorld({ quota: 2, tasks: [ddlAt(dueAt, { _id: 'q5' })] });
+  const twiceSender = stubSender([{ ok: false, errCode: 47003, errMsg: 'x' }]);
+  await runScan(dbTwice, twiceSender);
+  await runScan(dbTwice, twiceSender);
+  eq(dbTwice.store.settings[0].remind_quota, 2, '连跑两轮 47003，额度仍是 2（没有被烧掉）');
 });
 
 testCaseAsync('10.17 未配模板：不扫描、不下发，并说清原因', async () => {
@@ -2695,7 +2827,7 @@ testCaseAsync('10.22 actionTest：测试下发默认不消耗额度，失败时�
     // preview 回的就是真发出去的 data —— 字段对不上时前端拿它逐字对照
     eq(sent.preview, sender.calls[0].data, 'preview 与真发的 data 一致');
     ok(sent.preview.thing2.value.indexOf('测试') !== -1, 'data 里能看出是测试消息');
-    ok(sent.preview.thing2.value.indexOf('还剩') !== -1, '标题里带"还剩多久"的尾巴');
+    eq(sent.preview.thing2.value.indexOf('还剩'), -1, '标题栏不带"还剩…"（权重预算放不下）');
     ok(/^\d{4}年\d{1,2}月\d{1,2}日/.test(sent.preview.date4.value), 'date4 是年月日形状');
     eq(sent.preview.short_thing19.value, '截止', 'short_thing19 是类别');
     // 留痕明细同样回给调用方（比 preview 更适合逐条对照模板）
@@ -2821,7 +2953,7 @@ testCaseAsync('10.25 scan：REMIND_FIELD_MAP 生效（换模板字段名不改�
 
   eq(result.sent, 1, '发了');
   eq(Object.keys(sender.calls[0].data).sort(), ['thing5', 'time6'], 'data 的键按环境变量映射来');
-  eq(sender.calls[0].data.thing5.value, '换模板也要能发（还剩5分钟）', 'thing5 拿标题（带尾巴）');
+  eq(sender.calls[0].data.thing5.value, '换模板也要能发', 'thing5 拿标题');
   eq(sender.calls[0].data.time6.value, remind.formatDateFieldText(dueAt), 'time6 拿时刻（time 类也是年月日形状）');
   eq(result.warnings, [], '合法映射没有警告');
 

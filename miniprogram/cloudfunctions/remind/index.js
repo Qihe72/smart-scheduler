@@ -139,21 +139,35 @@ const ERROR_TOKEN = [40001, 42001];
 /**
  * 模板字段的**长度/格式约束**。
  *
- * 【依据与诚实的边界】微信订阅消息的模板参数按 key 前缀（字段类型）校验，
- * 不合规就返回 47003（`argument invalid! data.xxx.value invalid`）。
- * 下面这套数值来自官方文档示例与通行规则：
- *   * `thing`            —— 20 个字符以内（中文按 1 个字符算）
- *   * `short_thing`      —— **5 个字符以内**（硬约束，超了必 47003）
- *   * `phrase`           —— 5 个汉字以内，**不允许空格**
- *   * `date`             —— 年月日格式，可带时间，官方示例 `2019年10月1日15:01`（**不补零**）
- *   * `time`             —— `12:00` 或 `2026年9月28日12:00`
- *   * `character_string` —— 32 位以内数字/字母/符号
- *   * 其余（number / letter / symbol / amount / name / phone_number / car_number）按各自常识约束
- * 参考：https://developers.weixin.qq.com/miniprogram/dev/server/API/mp-message-management/subscribe-message/api_sendmessage.html
+ * ===========================================================================
+ * 【已由真机证实：长度不是"字符数"，而是"权重"】
+ * ===========================================================================
+ * 2026-10-12 真机点「发一条测试提醒」，微信原样返回：
  *
- * 【为什么明知不确定还要主动截断】不截断就是"整条发不出去 + 只有一行 47003"；
- * 截断了至多难看。**数值本身要等首次真机发送才能最终确认** —— 万一 `date4` 被拒，
- * 第一顺位改法见 docs/到期提醒.md 的「第一次真机发送失败怎么办」。
+ *     openapi.subscribeMessage.send fail: argument invalid data format,
+ *     invalid value of property: data.thing2, should be 5-20 characters
+ *     示例：{"data":{"thing2":"..."}}
+ *
+ * 当时发出去的值是 `提交实验报告（还剩30分钟）`：
+ *   * 按**码点**数：14 个字符 —— 看着完全没超 20；
+ *   * 按**权重**算（汉字/全角算 2）：提交实验报告(12) + （(2) + 还剩(4) + 30(2) + 分钟(4) + ）(2) = **26**。
+ * 26 > 20，与微信那句 "should be 5-20 characters" 完全吻合。
+ *
+ * ⇒ **结论（本文件的长度口径）**：`thing` 类那个 "20" 是**权重**，汉字/全角标点按 2 计，
+ *   数字/字母/半角符号按 1 计。所以 `thing` 的真实预算只有 **≈10 个汉字**，不是 20 个。
+ *   下面所有 `max` 都按这个口径解释；判定与截断统一走 `fieldUnits()`。
+ *
+ * ===========================================================================
+ * 【仍未最终证实的部分（照实写，别过度声明）】
+ * ===========================================================================
+ *   * 这次真机**只报了 `thing2`**，`date4` / `short_thing19` 没被挑错；但整条消息是被
+ *     **整体拒掉**的（一个字段不合法，整条不发），所以它们只能算"没被证伪"，
+ *     不算"已证实"。
+ *   * `date` 的"年月日 + 时刻"（`2026年9月28日12:00`）仍未最终证实。
+ *   * 其它类型的数值沿用官方示例与通行规则，没被真机验证过。
+ *
+ * 参考（官方只给了示例，没有可引用的类型表正文）：
+ * https://developers.weixin.qq.com/miniprogram/dev/server/API/mp-message-management/subscribe-message/api_sendmessage.html
  */
 const THING_MAX = 20;
 const SHORT_THING_MAX = 5;
@@ -167,7 +181,10 @@ const CAR_NUMBER_MAX = 8;
 const LETTER_MAX = 6;
 const SYMBOL_MAX = 5;
 
-/** 未知字段类型的兜底上限（不敢瞎猜就按最保守的 5 截断，并记 warning） */
+/**
+ * 未知字段类型的兜底上限（不敢瞎猜就按最保守的 5 权重截断，并记 warning）。
+ * 5 权重 ≈ 2 个汉字 + 1 个半角字符。
+ */
 const UNKNOWN_FIELD_MAX = SHORT_THING_MAX;
 
 /** `date` 类型的输出形状：年月日，**不补零**，与官方示例 `2019年10月1日15:01` 一致 */
@@ -254,20 +271,20 @@ const FIELD_TYPES = Object.keys(FIELD_TYPE_RULES);
  * 【为什么渲染文本只认槽位】"这个字段放什么数据"由映射的**值**（槽位）决定，
  * "这个字段能放多长/什么格式"由映射的**键**（字段类型）决定 —— 两件事解耦之后，
  * 用户不管选的是 `thing2` 还是 `short_thing19`，`title` 槽位给出的都是标题内容，
- * 只是被各自的规则约束（thing 截 20 字、short_thing 截 5 字）。
+ * 只是被各自的规则约束（thing 20 权重、short_thing 5 权重）。
  *
- * 【几个槽位为什么要"按类型给不同写法"】同一个语义在不同字段类型下可用空间差很多：
- *   * `title`    —— thing 里放得下"提交实验报告（还剩30分钟）"；short_thing 只放得下
- *                   "提交实验…"，所以短类型给纯标题（尾巴由 thing 那栏承担）。
- *   * `left`     —— thing 给整句"还有 30 分钟到期"，短类型给"30分钟"。
- *   * `category` —— 短类型给"截止"（2 字），长类型给完整标签。
- * 判据统一是"这个类型的`max`放不放得下整句"，而不是逐个类型硬编码。
+ * 【`left` 槽位为什么要按类型换写法】`phrase` / `short_thing` 只有 5 权重 =
+ * 2 个汉字 + 1 个半角字符，整句"还有 30 分钟到期"根本放不下，只能给 `30分钟`。
+ * 判据统一是"这个类型的 `max` 放不放得下整句"，而不是逐个类型硬编码。
+ *
+ * 【注意】截断不在这里做 —— 统一在 buildMessageData 里按权重裁，
+ * 保证"渲染"和"裁剪"两条路径不会各算一套。这里只做**长短写法的选择**。
  */
 const SLOT_RENDERERS = {
-  [SLOT_TITLE]: (values, rule) => (rule.max <= SHORT_THING_MAX ? values.titlePlain : values.title),
+  [SLOT_TITLE]: (values) => values.title,
   [SLOT_DUE]: (values) => values.due,
-  [SLOT_LEFT]: (values, rule) => (rule.max <= PHRASE_MAX ? values.leftShort : values.left),
-  [SLOT_CATEGORY]: (values, rule) => (rule.max <= SHORT_THING_MAX ? values.categoryShort : values.category),
+  [SLOT_LEFT]: (values, rule) => (rule.max <= PHRASE_MAX ? values.leftTiny : values.left),
+  [SLOT_CATEGORY]: (values, rule) => (rule.max <= SHORT_THING_MAX ? values.categoryTiny : values.category),
 };
 
 /** 环境变量名 */
@@ -391,12 +408,128 @@ function humanizeLeftPhrase(minutesLeft) {
  * 【为什么不能直接用 slice(0, 20)】`String.prototype.slice` 按 UTF-16 码元切，
  * 一个 emoji（代理对）会被拦腰切断，留下半个代理 → 微信侧校验/显示都会出问题。
  * 任务标题里放 emoji 完全正常，所以这里按码点切。
+ *
+ * 【注意】这是"按字符个数"的旧口径，只用于**不涉及微信长度限制**的地方
+ * （日志摘要、短文本收口）。模板字段一律用 `truncateToUnits`（权重口径）。
  */
 function truncateByCodePoint(text, max) {
   const chars = Array.from(text);
   if (chars.length <= max) return text;
   // 留一个字符给省略号：被截断时总长度仍然是 max，不会因为补省略号又超限
   return `${chars.slice(0, Math.max(1, max - 1)).join('')}…`;
+}
+
+/** 省略号：截断处用它收口。**硬性按 2 权重算**（见 charUnits 里的特例说明） */
+const ELLIPSIS = '…';
+const ELLIPSIS_UNITS = 2;
+
+/**
+ * 一个字符占几个"权重"：**汉字与全角标点算 2，其余算 1**。
+ *
+ * 【依据】真机实测（见文件上方 THING_MAX 处的原始报错）：`thing` 的 "20" 是权重而不是
+ * 字符数 —— 14 个字符的字符串因为含 6 个汉字 + 2 个全角括号而被算成 26 > 20 被拒。
+ * 全角区段的判定沿用 Unicode East Asian Wide/Fullwidth 的常用区间写法。
+ *
+ * 【两个特例】
+ *   1. `…`（U+2026）在 Unicode 里属于"宽度模糊"（East Asian Ambiguous），标准区间
+ *      覆盖不到它。但我们**只在截断处自己产出**这个字符，且按最保守的 2 权重计预算 ——
+ *      宁可少放一个字符，也不要因为一个省略号把整条消息顶超限。
+ *   2. 入参先过 `toStr()`（会 trim），所以孤立的空格会算成 0；字段值本身也都是 trim 过的，
+ *      不存在"值里有前导/尾随空格"的情况。
+ */
+function charUnits(ch) {
+  const text = toStr(ch);
+  if (!text) return 0;
+  if (text === ELLIPSIS) return ELLIPSIS_UNITS;
+  const c = text.codePointAt(0);
+  if (c === undefined) return 0;
+  const wide = (c >= 0x1100 && c <= 0x115f) // 韩文字母
+    || c === 0x2329 || c === 0x232a
+    || (c >= 0x2e80 && c <= 0xa4cf) // CJK 部首、假名、注音、CJK 统一表意文字（含全角标点）
+    || (c >= 0xac00 && c <= 0xd7a3) // 韩文音节
+    || (c >= 0xf900 && c <= 0xfaff) // CJK 兼容表意文字
+    || (c >= 0xfe10 && c <= 0xfe19) // 竖排标点
+    || (c >= 0xfe30 && c <= 0xfe6f) // CJK 兼容形式（含 ！，：；？ 等全角）
+    || (c >= 0xff00 && c <= 0xff60) // 全角字母数字与标点
+    || (c >= 0xffe0 && c <= 0xffe6) // 全角符号
+    || (c >= 0x20000 && c <= 0x3fffd); // CJK 扩展 B 及以后
+  return wide ? 2 : 1;
+}
+
+/**
+ * 一段文本的**权重长度**（微信模板字段真正在数的那个数）。
+ *
+ * ```
+ * fieldUnits('提交实验报告（还剩30分钟）') === 26   // 真机被拒的那条，钉成回归用例
+ * fieldUnits('截止') === 4                        // short_thing 上限 5 → 合规
+ * ```
+ *
+ * 按码点遍历（`Array.from`），所以 emoji（代理对）算 1 个字符、不会切坏。
+ */
+function fieldUnits(text) {
+  let total = 0;
+  Array.from(toStr(text)).forEach((ch) => { total += charUnits(ch); });
+  return total;
+}
+
+/**
+ * 按**权重**截断，超限处补 `…`（省略号也占 2 权重，算进预算）。
+ *
+ * 【为什么要"逐个吃 + 回填"而不是一次算够】一个字符的权重是 1 或 2，光靠除法估不准：
+ *   * 先按 `预算 - 省略号` 把字符一个个吃进去；
+ *   * 过半角字符（1 权重）时还能再塞一个，所以从**放不下的那个字符开始回填** ——
+ *     否则 `子任务`(6) 在 5 预算下会退成 `子…`(3)，白白浪费 2 个权重。
+ * 结果一定满足 `fieldUnits(result) <= max` —— 这是**硬保证**（有 `checkFieldCompliance` 兜底）。
+ * 预算是 0 或放不下省略号时返回空串：宁可不发这一栏，也不要发一个超限的值
+ * （一个字段超限，整条消息都会被微信拒掉）。实际上各类 `max` 最小也是 5，走不到这一步；
+ * 留着是为了让"截断函数自己不会造出违规值"这件事没有例外。
+ *
+ * @returns {{text:string, units:number, truncated:boolean}}
+ */
+function truncateToUnits(text, max) {
+  const src = toStr(text);
+  const budget = Math.max(0, Math.floor(isFiniteNumber(max) ? max : 0));
+  const total = fieldUnits(src);
+  if (total <= budget) return { text: src, units: total, truncated: false };
+  // 连省略号都放不下 → 只能给空串（硬保证优先）
+  if (budget <= ELLIPSIS_UNITS) return { text: '', units: 0, truncated: true };
+
+  // 要截断 → 末尾要放省略号，先把它从预算里扣掉
+  const bodyBudget = budget - ELLIPSIS_UNITS;
+  const chars = Array.from(src);
+  let used = 0;
+  const kept = [];
+  for (let i = 0; i < chars.length; i += 1) {
+    const unit = charUnits(chars[i]);
+    if (used + unit > bodyBudget) break;
+    kept.push(chars[i]);
+    used += unit;
+  }
+  // 回填：剩下的预算还能塞下后续的半角字符（例如 5 预算下"子任"用掉 4，还能再放 1 个）
+  for (let i = kept.length; i < chars.length; i += 1) {
+    if (used + charUnits(chars[i]) + ELLIPSIS_UNITS > budget) break;
+    kept.push(chars[i]);
+    used += charUnits(chars[i]);
+  }
+  return { text: `${kept.join('')}${ELLIPSIS}`, units: used + ELLIPSIS_UNITS, truncated: true };
+}
+
+/**
+ * 字段的**本地合规自检**：权重不超上限，且 date/time 类形状正确。
+ * 放在这里是为了让"我以为合规"和"真的合规"用同一段代码判断。
+ *
+ * @returns {{ok:boolean, reason:string}}
+ */
+function checkFieldCompliance(key, value, max, type) {
+  const units = fieldUnits(value);
+  // date / time 的 max 是 Infinity（格式由 formatter 保证），只查形状
+  if (Number.isFinite(max) && units > max) {
+    return { ok: false, reason: `${key} 权重 ${units} 超过上限 ${max}` };
+  }
+  if ((type === 'date' || type === 'time') && !DATE_TEXT_RE.test(toStr(value))) {
+    return { ok: false, reason: `${key}（${type} 类）值 "${toStr(value)}" 不符合年月日形状` };
+  }
+  return { ok: true, reason: '' };
 }
 
 /** 把配置解析成可用的计划（纯函数，IO 在 planScan 里） */
@@ -675,39 +808,25 @@ function slotValueOf(slot, values, rule) {
 }
 
 /**
- * 「标题 + （还剩 N 分钟）」这一栏怎么截断。
+ * 标题栏的最终取值（**不带"（还剩 N 分钟）"尾巴**）。
  *
- * 【为什么不能直接截整串】标题经常比 20 字长。如果对整串做 `截前 20 字`，
- * 被切掉的恰好是**最后那截尾巴**（"（还剩30分钟）"）—— 而尾巴才是这条通知的意义所在：
- * 用户看到"提交实验报告（还剩30分" 等于没看到还剩多久。
- * 所以先给尾巴预留位置，再拿剩下的额度截标题：
- *     总长 ≤ max，尾巴完整保留，标题该截就截。
+ * ===========================================================================
+ * 【为什么把尾巴去掉了 —— 不是没想到，是平台字段放不下】
+ * ===========================================================================
+ * 原来标题栏发的是 `提交实验报告（还剩30分钟）`。真机实测（见文件上方 THING_MAX 处的
+ * 原始报错）证明 `thing` 的 20 是**权重**：这条字符串权重 = 26 > 20，被微信拒掉。
+ * 也就是说 `thing` 的真实预算只有 ≈10 个汉字 ——
+ *   * 尾巴 `（还剩30分钟）` 自己就占 12 权重，正好吃掉一半以上；
+ *   * 加上尾巴之后，稍微长一点的标题就必然超限，**整条消息发不出去**（不是难看，是发不出）。
+ * 而"还剩多久"其实**已经由 `date4`（日程时间）表达了**：用户看到"2026年9月28日12:00"
+ * 就知道什么时候到期。所以这里做取舍：**保标题完整，把尾巴让出去**。
+ * 真正需要"还剩 N 分钟"这种相对时间的话，应该换一个模板（有 `thing` 之外的富余字段），
+ * 而不是硬塞进标题栏。
  *
- * 【尾巴为什么用紧凑写法】"还剩30分钟" 而不是 "还剩 30 分钟"：尾巴每长一个字，
- * 都是从标题那里抢来的额度；而且不带空格的短句在各种 short 类字段里都更安全。
- *
- * @returns {{text:string, tail:string, titleTruncated:boolean, truncated:boolean}}
- *          `truncated` = 最终值比"原样标题 + 完整尾巴"短（**必须如实报出去**：
- *          悄悄截短会让用户以为提醒内容完整，排查时也无从判断）
+ * @returns {{text:string, units:number, truncated:boolean}}
  */
-function composeTitleWithLeft(title, minutesLeft, max) {
-  const plain = toStr(title);
-  const minutes = Math.max(0, Math.round(isFiniteNumber(minutesLeft) ? minutesLeft : 0));
-  const tail = `还剩${humanizeLeftCompact(minutes)}`;
-  const full = `${plain}（${tail}）`;
-  const tailChars = Array.from(`（${tail}）`);
-  // 尾巴自己就超过上限（例如 short_thing 的 5 字）→ 只能留尾巴，标题彻底让位
-  if (tailChars.length >= max) {
-    const text = truncateByCodePoint(`（${tail}）`, max);
-    return { text, tail, titleTruncated: true, truncated: text !== full };
-  }
-  const titleBudget = max - tailChars.length;
-  const titleChars = Array.from(plain);
-  if (titleChars.length <= titleBudget) {
-    return { text: full, tail, titleTruncated: false, truncated: false };
-  }
-  const text = `${truncateByCodePoint(plain, titleBudget)}（${tail}）`;
-  return { text, tail, titleTruncated: true, truncated: true };
+function composeTitle(title, max) {
+  return truncateToUnits(toStr(title) || '未命名任务', max);
 }
 
 /**
@@ -758,22 +877,21 @@ function buildMessageData(task, dueAt, fieldMap, options) {
 
   const minutesLeft = Math.max(0, Math.round((dueAt - now) / 60000));
   const leftText = humanizeLeft(minutesLeft);
-  const titleComposed = composeTitleWithLeft(toStr(task && task.title) || '未命名任务', minutesLeft, THING_MAX);
+  // 标题不预截断：预算由**目标字段的类型**决定（thing 是 20 权重，short_thing 只有 5），
+  // 所以截断放在下面的字段循环里，跟其它槽位走同一条路径。
+  const titleText = toStr(task && task.title) || '未命名任务';
+  const categoryText = typeLabelOf(task && task.type);
   const values = {
-    // 标题带"还剩 N 分钟"的尾巴：模板里"提醒内容"和"日程时间"是两栏，
-    // 时间栏只给时刻，不写还剩多久 —— 所以"还剩多久"必须在标题栏里说清楚。
-    title: titleComposed.text,
-    tail: titleComposed.tail,
-    titleTruncated: titleComposed.titleTruncated || titleComposed.truncated,
-    // 短类型放不下整句，给纯标题（尾巴由 thing 那栏承担）
-    titlePlain: toStr(task && task.title) || '未命名任务',
+    title: titleText,
+    // short_thing 只有 5 权重 = 2 个汉字，`子任务`（6 权重）会被截成 `子任…` —— 这是对的：
+    // 不发出去比发一条超限被整条拒掉好。
+    categoryTiny: truncateToUnits(categoryText, SHORT_THING_MAX).text,
     due: formatDueText(dueAt), // 内部形状（日志/自测用）
     dueDateText: formatDateFieldText(dueAt), // date / time 类模板字段要的形状
     left: `还有 ${leftText}到期`,
-    leftShort: humanizeLeftPhrase(minutesLeft),
+    leftTiny: truncateToUnits(`还有${humanizeLeftPhrase(minutesLeft)}`, SHORT_THING_MAX).text,
     minutesLeftText: String(minutesLeft),
-    category: typeLabelOf(task && task.type),
-    categoryShort: typeLabelOf(task && task.type),
+    category: categoryText,
   };
 
   const data = {};
@@ -784,7 +902,7 @@ function buildMessageData(task, dueAt, fieldMap, options) {
     const type = fieldTypeOf(field);
     const rule = ruleForType(type);
     if (rule.unknown) {
-      warnings.push(`字段 "${field}" 的类型 "${type}" 不在已知清单里，已按"原样 + 只限长度(${rule.max})"处理；`
+      warnings.push(`字段 "${field}" 的类型 "${type}" 不在已知清单里，已按"原样 + 只限长度(${rule.max} 权重)"处理；`
         + '如果微信回 47003，请照 docs/到期提醒.md 的类型表核对这个字段');
     }
     const renderer = SLOT_RENDERERS[slot];
@@ -799,23 +917,27 @@ function buildMessageData(task, dueAt, fieldMap, options) {
       : slotValueOf(slot, values, rule);
     // ② 不允许空格的类型：换成间隔号保住可读性（不换的话大概率被判参数不合法）
     if (!rule.allowSpace) rendered = rendered.replace(/\s+/g, '·');
-    // ③ 最后按长度截断（按码点，emoji 不会被切一半）
-    const value = Number.isFinite(rule.max) ? truncateByCodePoint(rendered, rule.max) : rendered;
-    if (value !== rendered) {
-      truncated.push(`${field}（${type}）超长或不合格式，已调整到 ${rule.max} 个字符以内`);
-    }
-    // 标题的截断发生在 composeTitleWithLeft 里（要先给"还剩多久"的尾巴留位置），
-    // 所以它不会在上面这条通用判断里出现 —— 这里单独补一条，不能让"悄悄截短"不留痕。
-    if (slot === SLOT_TITLE && values.titleTruncated) {
-      truncated.push(`${field}（${type}）标题过长，已按"先保尾巴、再截标题"的规则裁到 ${rule.max} 个字符以内`);
+    // ③ 按**权重**截断（汉字/全角算 2；emoji 按码点算，不会被切一半）
+    const fitted = Number.isFinite(rule.max)
+      ? truncateToUnits(rendered, rule.max)
+      : { text: rendered, units: fieldUnits(rendered), truncated: false };
+    const value = fitted.text;
+    if (fitted.truncated) {
+      truncated.push(`${field}（${type}）超长，已按权重口径裁到 ${rule.max} 以内`
+        + `（原 ${fieldUnits(rendered)} → 现 ${fitted.units}）`);
     }
     data[field] = { value };
-    // 留痕：槽位 → key → 类型 → 最终值（自测断言 & 47003 排查都靠它）
-    fields.push({ slot, key: field, type, value, max: rule.max });
-    // ④ 自检：date / time 类的形状**我们本地能验**，别等微信回 47003 才发现
-    if ((type === 'date' || type === 'time') && !DATE_TEXT_RE.test(value)) {
-      warnings.push(`字段 "${field}"（${type} 类）的值 "${value}" 不符合年月日形状，`
-        + '微信可能回 47003；若真被拒，第一顺位改法是只给日期（见 docs/到期提醒.md）');
+    // 留痕：槽位 → key → 类型 → 最终值 + 权重（自测断言 & 47003 排查都靠它）
+    fields.push({ slot, key: field, type, value, max: rule.max, units: fitted.units });
+    // ④ **本地合规自检**：跟"我以为合规"用同一段代码判断，别等微信回 47003 才发现
+    const check = checkFieldCompliance(field, value, rule.max, type);
+    if (!check.ok) {
+      // 走到这里说明我们自己的截断/整形有 bug（理论上不该发生）—— 必须大声报出来
+      warnings.push(`字段 "${field}" 本地自检未通过（${check.reason}），微信很可能回 47003`);
+    } else if (type === 'date' || type === 'time') {
+      // 形状对了也要留一句：date 的"年月日+时刻"是**仍未最终证实**的写法
+      warnings.push(`字段 "${field}"（${type} 类）形状已通过本地校验，但"年月日+时刻"这种写法`
+        + '尚未被真机证实（见 docs/到期提醒.md §9）；若被拒，第一顺位改法是只给日期');
     }
   });
 
@@ -976,6 +1098,54 @@ function classifySendError(error) {
     checkFieldMap: false,
     hint: `未知错误（错误码 ${code}）。原文：${detail}`,
   };
+}
+
+/**
+ * 这个失败该不该**把刚扣掉的额度还回去**？
+ *
+ * 【为什么必须区分】`deliverOne` 是"先扣额度再发送"，本意是"宁可少算不可多发"。
+ * 但**配置/参数类**错误（47003 字段不合规、模板不存在…）在微信侧**根本没消耗额度** ——
+ * 消息压根没发出去，用户的订阅授权是一次都没用掉的。这种情况下扣掉就是白扣：
+ * 模板配错一次，接下来每一轮扫描（每 5 分钟）都会扣一次，
+ * **几轮下来就把用户的授权次数烧光了**，等配置改对反而发不出去。
+ *
+ * 所以：
+ *   * 配置/参数类（`checkFieldMap`：47003）→ **还**。
+ *   * 未知类（含"模板不存在"这类也是 47003/47004 家族，统一按 checkFieldMap 或 unknown 看）→
+ *     也**还**。理由：未知错误里绝大多数同样是"没发出去"，而多给用户一条额度只是
+ *     多一次机会（前端会引导授权），远好过把授权烧光。**宁多还，不白扣。**
+ *   * `user_rejected`（43101）→ **不还**：用户侧确实拒收，额度本来就是无效的。
+ *   * `token`（40001/42001）→ **不还**：云调用已重试一次，属于"可能已消耗"的模糊地带，
+ *     按"宁可少算"处理（这也是原设计里那条红线的方向）。
+ *
+ * @param {object} classified classifySendError 的产物
+ * @returns {boolean}
+ */
+function shouldRefundQuota(classified) {
+  if (!classified) return false;
+  if (classified.disableUser) return false; // 43101：用户拒收
+  if (classified.kind === 'token') return false; // 40001/42001：可能已消耗
+  // 配置/参数类 + 未知类：都没真正发出去 → 还回去
+  return true;
+}
+
+/**
+ * 把 1 次额度还回去（并把"已还"写进返回，便于排查"为什么额度没少"）。
+ * 任何异常都不往外抛：还款失败不该盖过"发送失败"这个主要事实。
+ *
+ * @returns {Promise<boolean>} 是否真的还成功
+ */
+async function refundQuotaOnce(db, openid, now) {
+  try {
+    const row = await loadSettingsRow(db, openid);
+    const current = Math.max(0, Math.floor(Number(row && row.remind_quota) || 0));
+    // 封顶同上限：还也不能越过总额上限
+    await writeSettingsFields(db, openid, { remind_quota: Math.min(MAX_QUOTA, current + 1) }, now);
+    return true;
+  } catch (error) {
+    console.error('[remind] 额度回退失败（不影响主流程）：', scrubSecrets((error && error.message) || error));
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,6 +1342,7 @@ async function planScan(input) {
   let sent = 0;
   let skipped = 0;
   let failed = 0;
+  let quotaRefunded = 0;
 
   const countSkip = (reason) => {
     skipped += 1;
@@ -1269,6 +1440,8 @@ async function planScan(input) {
         } else {
           failed += 1;
           if (outcome.error) errors.push(outcome.error);
+          // 配置/参数类失败会把额度退回去 —— 汇总出来，便于确认"模板配错不烧额度"
+          if (outcome.quota_refunded) quotaRefunded += 1;
         }
         // 成功/失败都留明细：这张表就是"为什么这条没收到提醒"的答案
         if (outcome.detail) details.push(outcome.detail);
@@ -1286,6 +1459,7 @@ async function planScan(input) {
     sent, // 成功下发几条
     skipped, // 跳过几条（含 no_quota / already_sent / too_early …）
     failed, // 失败几条（含业务失败与异常）
+    quota_refunded: quotaRefunded, // 其中有几次把占用的额度退回去了（配置类失败）
     errors, // 失败原因（已脱敏）
     warnings, // 配置类提醒（字段映射、截断等）
     skipped_reasons: skippedReasons,
@@ -1386,6 +1560,12 @@ async function deliverOne(db, info, now) {
   // describeMessageFields 的注释）。
   const fieldTrace = describeMessageFields(fields);
   const failureText = fieldTrace ? `${classified.hint} 本次发出的字段与值：${fieldTrace}` : classified.hint;
+
+  // --- 配置/参数类失败：把刚才扣掉的额度还回去 ---
+  // 【为什么】这类错误在微信侧**根本没消耗额度**（消息没发出去），扣掉就是白扣；
+  // 模板配错一次会让接下来每轮扫描都白扣一次，几轮就把用户的授权烧光。
+  const refunded = shouldRefundQuota(classified) ? await refundQuotaOnce(db, openid, now) : false;
+
   await safeRecord(db, {
     _openid: openid,
     task_id: taskId,
@@ -1396,6 +1576,8 @@ async function deliverOne(db, info, now) {
     ok: false,
     error: failureText,
     err_code: classified.code,
+    // 额度有没有还回去，记在案上（否则"为什么额度没少"会变成一个查不出来的谜）
+    quota_refunded: refunded,
     // 单独存一份结构化的，便于在控制台里逐字段核对（比在长字符串里找更省事）
     sent_fields: (Array.isArray(fields) ? fields : []).map((item) => ({
       key: item.key, type: item.type, slot: item.slot, value: toStr(item.value).slice(0, FIELD_VALUE_LOG_MAX),
@@ -1403,7 +1585,8 @@ async function deliverOne(db, info, now) {
   });
   // 日志里也打一份：47003 排查时通常先看云函数日志，而不是先去翻数据库
   if (fieldTrace) {
-    console.warn(`[remind] 下发失败（err_code=${classified.code}），本次字段与值：${fieldTrace}`);
+    console.warn(`[remind] 下发失败（err_code=${classified.code}，额度已回退=${refunded}），`
+      + `本次字段与值：${fieldTrace}`);
   }
 
   if (classified.disableUser) {
@@ -1430,13 +1613,17 @@ async function deliverOne(db, info, now) {
   return {
     status: 'failed',
     error: `${describeTask(task)}：${classified.hint}`
-      + (fieldTrace ? `；本次发出的字段与值：${fieldTrace}` : ''),
+      + (fieldTrace ? `；本次发出的字段与值：${fieldTrace}` : '')
+      + (refunded ? '；已把这次占用的额度退回' : ''),
+    // quota_refunded 让调用方（scan）能汇总"这轮退了几次"，便于确认"模板配错不会烧额度"
+    quota_refunded: refunded,
     detail: {
       openid,
       task_id: taskId,
       action: classified.disableUser ? 'user_disabled' : 'failed',
       err_code: classified.code,
       due_key: dueKey,
+      quota_refunded: refunded,
     },
   };
 }
@@ -1724,7 +1911,7 @@ async function actionTest(db, openid, payload, deps) {
     done: false,
   };
   const dueAt = now + leadMin * 60 * 1000;
-  // now 传进去，测试消息才会显示"还剩 30 分钟"这种真实文案
+  // 用 now 算"还剩多久"（测试消息的剩余时间是固定的 30 分钟，便于对照）
   const built = buildMessageData(task, dueAt, fieldMapResolved.fieldMap, { now });
   const fieldTrace = describeMessageFields(built.fields);
 
@@ -1752,6 +1939,9 @@ async function actionTest(db, openid, payload, deps) {
   if (!result.ok) {
     // 测试失败**照样落记录**：这正是排查模板字段问题最需要的线索。
     // 记录里必须带上"哪个字段、发了什么值"——这是 47003 唯一的自证手段。
+    //
+    // 注意这里**没有**先扣额度（测试路径是"发送成功后才扣"），所以不需要回退；
+    // 真机第一次 47003 那次的经验已经写进 shouldRefundQuota 的注释里。
     await safeRecord(db, {
       _openid: openid,
       task_id: task._id,
@@ -1911,6 +2101,11 @@ Object.assign(exports, {
   humanizeLeftPhrase,
   humanizeLeftCompact,
   truncateByCodePoint,
+  // 长度口径（真机证实：汉字/全角算 2 权重）
+  charUnits,
+  fieldUnits,
+  truncateToUnits,
+  checkFieldCompliance,
   formatDueText,
   formatDateFieldText,
   typeLabelOf,
@@ -1918,8 +2113,10 @@ Object.assign(exports, {
   isAwkwardField,
   ruleForType,
   slotValueOf,
-  composeTitleWithLeft,
+  composeTitle,
   describeMessageFields,
+  shouldRefundQuota,
+  refundQuotaOnce,
   beijingIso,
   desiredQuota,
   normalizeClockText,
@@ -1968,6 +2165,7 @@ Object.assign(exports, {
   CHARACTER_STRING_MAX,
   UNKNOWN_FIELD_MAX,
   FIELD_VALUE_LOG_MAX,
+  ELLIPSIS_UNITS,
   ENV_TEMPLATE_ID,
   ENV_FIELD_MAP,
   ENV_PAGE,
