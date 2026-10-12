@@ -238,14 +238,6 @@ function resolveProviderConfig(env) {
   return { ok: true, provider: chosen, model, reason: '', notices };
 }
 
-/**
- * 判断「当前是否具备调用 AI 的条件」（只看有没有可用的 Key）。
- * 注意：它**不保证**服务商名 / 模型名正确 —— 那些问题会在真正调用时以日志形式暴露。
- */
-function hasApiKey() {
-  return resolveProviderConfig().ok;
-}
-
 // ---------------------------------------------------------------------------
 // 用户自填 Key（存在 settings 集合里，按 openid 读）
 // ---------------------------------------------------------------------------
