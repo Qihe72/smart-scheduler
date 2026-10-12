@@ -129,3 +129,77 @@
   background-color: #FFF5E6;
   color: #E8963C;
 }
+
+/* 中性提示（例如"作息校准未保存"）：它不是成功也不是失败，别用红黄吓人 */
+.tip-muted {
+  background-color: #F2F4F7;
+  color: #6B7280;
+}
+
+/* ---------------------------------------------------------------------------
+ * 课表截图识别
+ * ------------------------------------------------------------------------- */
+
+/* 模型提示行：选图之前就要看到，三种口径三种颜色 */
+.vision-hint {
+  margin-top: 14rpx;
+  padding: 14rpx 18rpx;
+  border-radius: 10rpx;
+  font-size: 24rpx;
+  line-height: 1.6;
+}
+
+.vision-hint-danger {
+  background-color: #FDECEC;
+  color: #F26D6D;
+}
+
+.vision-hint-muted {
+  background-color: #F2F4F7;
+  color: #6B7280;
+}
+
+.vision-hint-ok {
+  background-color: #EAF7EF;
+  color: #2FA96B;
+}
+
+/* 缩略图 + 体积说明 */
+.vision-preview {
+  display: flex;
+  align-items: center;
+}
+
+.vision-thumb {
+  width: 160rpx;
+  height: 160rpx;
+  flex-shrink: 0;
+  margin-right: 20rpx;
+  border-radius: 12rpx;
+  background-color: #F7F9FC;
+}
+
+/* 识别提示（模型自己说哪里没看清）：蓝色竖条，和"错误"区分开 */
+.ai-notes {
+  border-left: 8rpx solid #4F7FFF;
+}
+
+.ai-note-item {
+  font-size: 25rpx;
+  color: #6B7280;
+  line-height: 1.7;
+  margin-bottom: 6rpx;
+}
+
+/* app.wxss 只给 .btn-primary 定义了 btn-block，这里补上 ghost 的整行按钮 */
+.btn-ghost.btn-block {
+  width: 100%;
+  display: block;
+  box-sizing: border-box;
+}
+
+/* 禁用态（提交中）也给 ghost 按钮一个视觉反馈 */
+.btn-ghost.btn-disabled {
+  color: #9AA3B2;
+  border-color: #D7DEEA;
+}

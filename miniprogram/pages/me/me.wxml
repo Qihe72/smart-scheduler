@@ -4,14 +4,21 @@
   【原则】每一项要么真能用、要么明说"暂不支持"，不放点了没反应的按钮。
     1. 学期设置      → 能改（picker 选日期 + 保存按钮）
     2. 节次作息      → **只读**，卡片里明确写了"本版只读"
-    3. 导入课表      → 能用的完整流程；若解析器不可用则显示"当前版本不可用"并禁用按钮
-    4. 导出备份      → 能用的（复制到剪贴板）
-    5. 关于 / 数据说明 → 静态文案
+    3. AI 设置       → 能改（下拉选服务商 + 填自己的 Key）
+    3.5 到期提醒     → 能开（弹一次微信订阅授权 → ack +1 次）；平台限制写在卡片正文里
+    4. 导入课表      → 能用的完整流程；若解析器不可用则显示"当前版本不可用"并禁用按钮
+    5. 导出备份      → 能用的（复制到剪贴板）
+    6. 关于 / 数据说明 → 静态文案
 
   【字段来源】用到字段都在 me.js 的 data 里初始化过：
     loading / errorText /
     semesterStart / datePicker / savingSemester / currentWeekNo / currentWeekText /
     periodRows / periodSourceText / periodOverrideText /
+    remindLoading / remindReadFailed / remindReady / remindEnabled / remindQuota /
+    remindMaxQuota / remindQuotaText / remindLeadMin / remindLeadIndex /
+    remindLeadOptions / remindLeadTexts / remindLeadText / remindReadyReason /
+    remindStatusType / remindStatusText / remindConfigError / remindHint /
+    remindBusy / remindResultText / remindResultType / remindTestAvailable /
     icsAvailable / icsUnavailableText / importing / submitting / pickedFileName /
     parsedCount / taskCount / warnings / previewItems / previewMore / importResultText /
     exporting / exportTaskCount / exportPreview / exportHint /
@@ -185,6 +192,92 @@
       </block>
     </view>
 
+    <!-- ================= 三点五、到期提醒（微信订阅消息） ================= -->
+    <!--
+      【这一块为什么长这样】微信的订阅消息有两条绕不过去的平台限制，
+      必须**在界面上讲清楚**，否则用户会以为功能坏了：
+        1. 订阅消息是一次性的 —— 用户授权一次，服务端只能下发一条。
+           所以每点一次按钮只 +1 次机会（ack count 恒为 1），要多几条就多点几次。
+        2. 模板 ID 只在服务端（云函数环境变量 REMIND_TEMPLATE_ID），前端**不硬编码**：
+           换模板只改那一个环境变量，不用重新提审小程序。所以这里一个字都不显示模板 ID，
+           只显示"配没配好"这个结论；真没配就用 ready_reason 指向 docs/到期提醒.md。
+    -->
+    <view class="card">
+      <view class="card-title">到期提醒</view>
+      <view class="card-sub">截止事项到期前，让微信给你发一条「服务通知」。</view>
+
+      <!-- 状态行：开关 / 剩余次数 / 提前量 -->
+      <view class="remind-status remind-status-{{remindStatusType}}" wx:if="{{remindStatusText}}">
+        <text class="remind-status-text">{{remindStatusText}}</text>
+        <text class="remind-status-quota" wx:if="{{remindQuotaText}}">{{remindQuotaText}}</text>
+      </view>
+      <view class="remind-status" wx:elif="{{remindLoading}}">
+        <text class="remind-status-text">正在读取提醒设置…</text>
+      </view>
+      <!-- 读失败：只有这一行灰字，**不弹 toast**（用户可能只是想来看学期设置） -->
+      <view class="note" wx:if="{{remindHint}}">{{remindHint}}</view>
+
+      <!-- ready=false 时把服务端那句人话原样显示（它已经指明了下一步该做什么） -->
+      <view class="note note-warn" wx:if="{{remindReadyReason && !remindReady}}">{{remindReadyReason}}</view>
+      <view class="note note-ok" wx:elif="{{remindReady && remindReadyReason}}">{{remindReadyReason}}</view>
+
+      <!-- 提前量：候选档位来自服务端（lead_options），不在前端写死 -->
+      <view class="row">
+        <text class="row-label">提前量</text>
+        <picker
+          class="row-right"
+          mode="selector"
+          range="{{remindLeadTexts}}"
+          value="{{remindLeadIndex}}"
+          bindchange="onRemindLeadChange"
+        >
+          <view class="picker-value">
+            <text class="picker-value-text">{{remindLeadText || '未设置'}}</text>
+            <text class="picker-arrow">▾</text>
+          </view>
+        </picker>
+      </view>
+
+      <!-- 【本功能最关键的交互】开启 / 补充授权 -->
+      <view class="btn-row">
+        <view
+          class="primary-btn {{(remindBusy || remindLoading) ? 'btn-disabled' : ''}}"
+          hover-class="primary-btn-hover"
+          bindtap="onRemindEnable"
+        >{{remindConfigError ? '看看该怎么配置' : (remindEnabled ? '补充授权 +1 次' : '开启并授权 +1 次')}}</view>
+        <view
+          class="ghost-btn {{(!remindTestAvailable || remindBusy || remindLoading) ? 'btn-disabled' : ''}}"
+          hover-class="ghost-btn-hover"
+          bindtap="onRemindTest"
+        >发一条测试提醒</view>
+      </view>
+
+      <!-- 平台限制的解释 —— 少了这一行，用户会觉得"怎么又要授权"是 bug -->
+      <view class="note">
+        <text class="note-strong">一次性订阅：授权一次只能收到一条提醒，多攒几次更保险。</text>
+        所以每点一次「补充授权」只会 +1 次，微信每次都会弹一次授权窗。
+      </view>
+      <view class="note" wx:if="{{remindReadFailed}}">
+        需要重试时下拉刷新本页即可。
+      </view>
+
+      <!-- 结果行：成功 / 失败 / 拒绝 / 未消耗额度，都如实写在这里 -->
+      <view
+        class="result-line {{remindResultType === 'warn' ? 'result-line-warn' : ''}}"
+        wx:if="{{remindResultText}}"
+      >{{remindResultText}}</view>
+
+      <view class="note">
+        「发一条测试提醒」需要① 服务端配好了模板、② 你至少授权过一次；
+        它默认<text class="note-strong">不消耗</text>可提醒次数，用来先确认微信能不能收到。
+      </view>
+      <view class="note">
+        收不到提醒？依次看三件事：手机微信的「服务通知」有没有被关掉、
+        模板字段名与微信后台是否一致（见 {{'docs/到期提醒.md'}} 第 7 节）、
+        以及上面「剩余可提醒次数」是不是 0 了。
+      </view>
+    </view>
+
     <!-- ================= 四、导入课表 ================= -->
     <view class="card">
       <view class="card-title">导入课表（.ics）</view>
@@ -239,6 +332,13 @@
             <text class="row-value-plain">{{pickedFileName}}</text>
           </view>
           <view class="result-line" wx:if="{{importResultText}}">{{importResultText}}</view>
+          <!-- 从文件里校准出的作息：导入成功后会一并存回 settings -->
+          <view class="note" wx:if="{{calibratedText}}">{{calibratedText}}</view>
+          <!-- 作息保存这一路的**独立**结果：导入成功文案不受它影响 -->
+          <view
+            class="note {{periodSaveFailed ? 'note-warn' : 'note-ok'}}"
+            wx:if="{{periodSaveText}}"
+          >{{periodSaveText}}</view>
 
           <!-- 警告必须显示，不能吞掉 -->
           <view class="warn-box" wx:if="{{warnings.length}}">

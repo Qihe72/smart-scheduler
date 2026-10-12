@@ -115,6 +115,16 @@ const PROVIDERS = {
     authCodes: ['1000', '1001', '1003', '1005'], // 身份验证失败
     modelMissingCodes: ['1211'], // 模型不存在，请检查模型代码
     paramCodes: ['1210', '1212', '1213', '1214', '1215', '1221', '1222', '1261'],
+    // 【识图能力】这两个字段 aiDecompose **自己不用**（它只做文字拆解），留在这里是为了
+    // 让两边的 PROVIDERS 表逐字一致 —— _selftest 的 8b.1 有一条断言把两张表 JSON 深比较，
+    // 只往 aiParse 那份加字段会让那条断言变红。改识图名单时请**同时改 aiParse**。
+    // 语义见 aiParse 的 visionSupportOf()：true / false / 'unknown' 三态。
+    visionModels: [
+      'glm-5.3-flash', 'glm-5.3-flashx', 'glm-ocr',
+      'glm-4v', 'glm-4v-plus', 'glm-4v-flash',
+      'glm-4.1v-thinking-flash', 'glm-4.5v', 'glm-4.6v',
+    ],
+    textOnlyModels: ['glm-4.7-flash'],
   },
   deepseek: {
     name: 'deepseek',
@@ -127,6 +137,9 @@ const PROVIDERS = {
     authCodes: [],
     modelMissingCodes: [],
     paramCodes: [],
+    // 同 zhipu：占位以保持两边 PROVIDERS 一致；DeepSeek 目前没有多模态模型
+    visionModels: [],
+    textOnlyModels: ['deepseek-chat', 'deepseek-reasoner'],
   },
 };
 

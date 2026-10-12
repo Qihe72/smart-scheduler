@@ -369,6 +369,317 @@ function run() {
     '**日期列的竖向 padding 是 0**（否则卡片与行高对不上）：' + (paddingDecl ? show(paddingDecl[1].trim()) : '无'));
 
   // -------------------------------------------------------------------------
+  // 「其他时段」兜底行的位置与下标对应（真机上它原本在最下面 → 等于"没显示"）
+  // -------------------------------------------------------------------------
+  block('兜底行位置 —— 必须在表头正下方第一行');
+  var otherTask = { _id: 'o1', title: '没落在课节里的截止', type: 'ddl', date: WEEK_MONDAY,
+    priority: 'high', repeat: 'none', done: false, periods: '', start_time: '', end_time: '' };
+  var builtOther = T.buildGrid(perDayOf({ 0: [course('g1', '正常课', '3-4'), otherTask] }), null, WEEK_MONDAY);
+
+  eq(builtOther.rows[0].key, 'other', '**兜底行在 rows[0]**（以前在最后一行，要滑到底才看得见）');
+  eq(builtOther.rows[0].label, '其他时段', '它的显示名');
+  isTrue(builtOther.rows[0].isFallback === true, '并打了 isFallback 标记（供模板加样式）');
+  eq(builtOther.rows[1].key, '1', '它后面紧跟第 1 节（行顺序没错位）');
+  eq(builtOther.rows.length, DEFAULT_ROWS + 1, '总行数 = 13 节 + 1 兜底行');
+
+  // 同下标一一对应：rows[i] 与 days[d].cells[i] 的 key 必须逐项相同
+  for (var dd = 0; dd < 7; dd += 1) {
+    eq(builtOther.days[dd].cells.length, builtOther.rows.length,
+      '第' + (dd + 1) + '天：cells 数与 rows 数相同');
+    var keysMatch = builtOther.rows.every(function (row, i) {
+      return builtOther.days[dd].cells[i].key === row.key;
+    });
+    isTrue(keysMatch, '第' + (dd + 1) + '天：**每个 cell 的 key 与 rows 逐项对应**（错位就会画到别的行）');
+  }
+
+  isTrue(titlesAt(builtOther, 0, 'other').indexOf('没落在课节里的截止') !== -1,
+    '兜底任务画在兜底行的格子里');
+  isTrue(titlesAt(builtOther, 0, '3').indexOf('正常课') !== -1,
+    '**第 3 节的课仍然在第 3 节行**（说明 rowIndexOfPeriod 的偏移跟着一起改了）');
+
+  eq(countableRows(builtOther.rows), DEFAULT_ROWS, '计入空闲的行数 = 13（兜底行不算进去）');
+  eq(builtOther.freeCounts[0], DEFAULT_ROWS - 2, '周一被占 3-4 两节 → 空闲 11');
+
+  // 空兜底行不出现（既有规则）
+  var builtNoOther = T.buildGrid(perDayOf({ 0: [course('g2', '只有课', '3-4')] }), null, WEEK_MONDAY);
+  eq(builtNoOther.rows.length, DEFAULT_ROWS, '全部任务都能落进课节时，**兜底行不出现**');
+  eq(builtNoOther.rows[0].key, '1', '此时第一行就是第 1 节（没有多余的空行）');
+
+  // 兜底行与午休行同时存在
+  var builtBoth = T.buildGrid(perDayOf({
+    0: [course('g3', '课', '1'), otherTask]
+  }), OVERRIDE_BREAK, WEEK_MONDAY);
+  eq(builtBoth.rows[0].key, 'other', '有午休行时兜底行依然在最前');
+  isTrue(builtBoth.rows.some(function (r) { return r.isBreak; }), '午休行也在');
+  eq(countableRows(builtBoth.rows), DEFAULT_ROWS - 1,
+    '计入空闲的行数 = 13 − 1（午休）—— 兜底行与午休行都被排除');
+
+  // -------------------------------------------------------------------------
+  // 截止（ddl）不占节次 —— 与 utils/planner.js 的 busyRangesOfDay 同一口径
+  // （编辑页的占用提示早就说"ddl 只有截止时刻 → 不占时间段"，
+  //   课表页如果把它算成占了一节，同一个问题两个页面会给出相反答案）
+  // -------------------------------------------------------------------------
+  block('截止不占节次 —— 卡片照旧画出来，但不扣空闲');
+  var CAL5 = {
+    '1': ['08:30', '09:10'], '2': ['09:15', '09:55'], '3': ['10:15', '10:55'],
+    '4': ['11:00', '11:40'], '5': ['11:45', '12:25']
+  };
+
+  // ① 一条 12:00 的 ddl（校准作息 → 第 5 节行）：卡片在第 5 节行，但空闲仍是 13
+  var ddl1200b = { _id: 'ddl12b', title: '提交材料', type: 'ddl', date: WEEK_MONDAY,
+    priority: 'high', repeat: 'none', done: false, periods: '', start_time: '', end_time: '12:00' };
+  var builtDdl = T.buildGrid(perDayOf({ 0: [ddl1200b] }), CAL5, WEEK_MONDAY);
+  isTrue(titlesAt(builtDdl, 0, '5').indexOf('提交材料') !== -1,
+    '**ddl 的卡片照旧画在第 5 节行**（可见性不能退）');
+  eq(builtDdl.freeCounts[0], DEFAULT_ROWS,
+    '**空闲仍是 13，不是 12** —— 截止不占节次');
+  isFalse(builtDdl.freeCounts[0] === DEFAULT_ROWS - 1,
+    '反面对照：不能被当成占了一节');
+  eq(rowIndexOf(builtDdl.rows, 'other'), -1, '它也照样定位到了课节行（没被推进兜底行）');
+
+  // ② 同一天既有 ddl 又有 event（第 3-4 节）→ 空闲 = 13 − 2 = 11（ddl 不额外扣）
+  var event34 = course('e34', '专业课', '3-4');
+  var builtMix = T.buildGrid(perDayOf({ 0: [event34, ddl1200b] }), CAL5, WEEK_MONDAY);
+  eq(builtMix.freeCounts[0], DEFAULT_ROWS - 2,
+    '**同一天 event(3-4) + ddl → 空闲 11**（只扣 event 占的 2 节，ddl 不额外扣）');
+  isFalse(builtMix.freeCounts[0] === DEFAULT_ROWS - 3, '反面对照：不是 10（那样就是 ddl 也被扣了）');
+  isTrue(titlesAt(builtMix, 0, '3').indexOf('专业课') !== -1, 'event 照旧画在第 3 节行');
+  isTrue(titlesAt(builtMix, 0, '5').indexOf('提交材料') !== -1, 'ddl 照旧画在第 5 节行');
+
+  // ③ ddl 与 event 落在**同一行**时：空闲只扣 1
+  var ddlSameRow = { _id: 'ddlSame', title: '同一节交材料', type: 'ddl', date: WEEK_MONDAY,
+    priority: 'high', repeat: 'none', done: false, periods: '3-4', start_time: '', end_time: '11:40' };
+  var event34b = course('e34b', '同一节的专业课', '3-4');
+  var builtSameRow = T.buildGrid(perDayOf({ 0: [event34b, ddlSameRow] }), CAL5, WEEK_MONDAY);
+  eq(builtSameRow.days[0].cells[rowIndexOf(builtSameRow.rows, '3')].tasks.length, 2,
+    '两张卡都画在第 3 节那一格里（并排/竖排，都不消失）');
+  eq(builtSameRow.freeCounts[0], DEFAULT_ROWS - 2,
+    '**空闲只扣 1 行 × 2 节 = 11**（第 3-4 节被 event 占了；ddl 与之同行，不再多扣）');
+
+  // ④ 一条 ddl 落进兜底行时：空闲仍是 13（兜底行本来就不计）
+  //    注意时间要选**真的落在所有课节之外**的：默认作息最后一节是 22:30-23:15，
+  //    所以 23:00 仍属第 13 节（periodNumberAt 取"结束时间最贴近"），23:30 才落空。
+  var ddlLoose = { _id: 'ddlLoose', title: '很晚的截止', type: 'ddl', date: WEEK_MONDAY,
+    priority: 'mid', repeat: 'none', done: false, periods: '', start_time: '', end_time: '23:30' };
+  var builtDdlOther = T.buildGrid(perDayOf({ 0: [ddlLoose] }), null, WEEK_MONDAY);
+  eq(rowIndexOf(builtDdlOther.rows, 'other'), 0, '23:30 落在兜底行（rows[0]）');
+  eq(builtDdlOther.freeCounts[0], DEFAULT_ROWS, '**空闲仍是 13**（兜底行与 ddl 都不占节次）');
+
+  // ⑤ 不变式：既有两类排除规则与连堂口径都没被这次改动破坏
+  block('截止口径改动后 —— 既有不变式仍然成立');
+  eq(countableRows(builtBoth.rows), DEFAULT_ROWS - 1, '计入行数仍是 13 − 1（午休被排除）');
+  // builtBoth = [第 1 节的 event, 一条无 span 的 event（落兜底行）]
+  // 无 span 的任务不占任何课节行（既有口径），所以被占的是"第 1 节"那 1 行。
+  eq(builtBoth.freeCounts[0], countableRows(builtBoth.rows) - 1,
+    '空闲 = 计入行数(12) − 被占行数(1) = 11（走任务的 event 占第 1 节；'
+    + '落兜底行的那条无 span，不占课节）');
+  var builtSpanAgain = T.buildGrid(perDayOf({ 0: [course('sp', '三连堂', '7-9')] }), null, WEEK_MONDAY);
+  eq(builtSpanAgain.freeCounts[0], DEFAULT_ROWS - 3,
+    '连堂仍按跨的节数算（13 − 3 = 10）—— 没有被 ddl 的改动带偏');
+  var builtSub = T.buildGrid(perDayOf({
+    0: [{ _id: 'sub1', title: '子任务', type: 'subtask', date: WEEK_MONDAY, priority: 'mid',
+      repeat: 'none', done: false, periods: '3-4', start_time: '', end_time: '' }]
+  }), CAL5, WEEK_MONDAY);
+  eq(builtSub.freeCounts[0], DEFAULT_ROWS - 2,
+    '**子任务仍然占节次**（只有 ddl 不占；子任务是有工作量的，不能一起放过）');
+  eq(builtSpanAgain.freeCounts[0] === DEFAULT_ROWS - 2, false,
+    '反面对照：连堂没被当成只占 1 节');
+
+  // -------------------------------------------------------------------------
+  // 落点选择：没有 periods 的任务按「与哪一节重叠最多」定行
+  // （原来是 periodSpanFromTimes 的就位吸附，会把 0 重叠的一节当成落点，
+  //   于是"时间写着 09:55-10:55、卡片却在第 4 节行"，又是一次时间与显示对不上）
+  // -------------------------------------------------------------------------
+  block('落点选择 —— 按"最大重叠"定行（无 periods 的任务）');
+  isTrue(typeof T.bestOverlapPeriod === 'function', '__test.bestOverlapPeriod 暴露出来了');
+
+  /** 造一条"只写起止时间、没有 periods"的任务（模拟手工/拆解生成的那种） */
+  function timedTask(id, title, start, end, type) {
+    return { _id: id, title: title, type: type || 'event', date: WEEK_MONDAY,
+      priority: 'mid', repeat: 'none', done: false,
+      periods: '', start_time: start, end_time: end };
+  }
+  /** 直接问页面：这条任务会被放到哪一行（-1 = 兜底行） */
+  function rowKeyFor(task, override) {
+    var built = T.buildGrid(perDayOf({ 0: [task] }), override, WEEK_MONDAY);
+    var idx = -1;
+    built.days[0].cells.forEach(function (cell, i) {
+      if (cell.tasks.length) idx = i;
+    });
+    return idx === -1 ? '(没画出来)' : built.rows[idx].key;
+  }
+
+  // ①「09:55-10:55」默认作息：与第 3 节重叠 45 分钟、与第 4 节 0 分钟 → 第 3 节
+  eq(rowKeyFor(timedTask('t1', '中间那件事', '09:55', '10:55'), null), '3',
+    '**「09:55-10:55」落第 3 节行**（与第 3 节重叠 45 分钟；旧实现会错落第 4 节）');
+  isFalse(rowKeyFor(timedTask('t1', '中间那件事', '09:55', '10:55'), null) === '4',
+    '反面对照：不等于第 4 节（那是 0 重叠的吸附结果）');
+  isFalse(rowKeyFor(timedTask('t1', '中间那件事', '09:55', '10:55'), null) === 'other',
+    '反面对照：也不等于兜底行（它对第 3 节有 45 分钟真实重叠）');
+
+  // ②「09:40-10:40」：起点被第 2 节包含（含端点）但重叠 0，第 3 节有 40 分钟 → 第 3 节
+  eq(rowKeyFor(timedTask('t2', '跨课间的事', '09:40', '10:40'), null), '3',
+    '**「09:40-10:40」落第 3 节行**（第 3 节 40 分钟 > 第 2 节 0 分钟 —— '
+    + '按"起点所在节必须有重叠"判会把它误伤进兜底行）');
+  isFalse(rowKeyFor(timedTask('t2', '跨课间的事', '09:40', '10:40'), null) === 'other',
+    '反面对照：不进兜底行（它有 40 分钟实实在在落在第 3 节里）');
+
+  // ③「12:25-13:25」校准作息：与第 6 节**午休行**（12:25-14:15）重叠 60 分钟 → 落午休行
+  //    （空档行也是有真实区间的可见行，可以接任务 —— 见 bestOverlapPeriod 的注释。
+  //      第 5 节 11:45-12:25 的重叠是 0，所以不该吸附到第 5 节。）
+  var CAL_B = { '5': ['11:45', '12:25'], '7': ['14:15', '15:00'] };
+  eq(rowKeyFor(timedTask('t3', '午休里的事', '12:25', '13:25'), CAL_B), '6',
+    '**「12:25-13:25」落第 6 节（午休行）**（与午休区间 12:25-14:15 重叠 60 分钟）');
+  isFalse(rowKeyFor(timedTask('t3', '午休里的事', '12:25', '13:25'), CAL_B) === '5',
+    '反面对照：不等于第 5 节（与它的重叠是 0，那是就位吸附的结果）');
+  isFalse(rowKeyFor(timedTask('t3', '午休里的事', '12:25', '13:25'), CAL_B) === 'other',
+    '反面对照：不等于兜底行（它有一行真实区间可落，兜底行是"连行都没有"时才用）');
+
+  // ④「12:00-13:00」默认作息（11:40–14:00 之间没有课）→ 兜底行
+  eq(rowKeyFor(timedTask('t4', '午休里的事', '12:00', '13:00'), null), 'other',
+    '**「12:00-13:00」默认作息落兜底行**（与任何一节都没有交集）');
+
+  // ⑤「08:00-09:40」→ 第 1 节行（既有行为不变）
+  eq(rowKeyFor(timedTask('t5', '早课', '08:00', '09:40'), null), '1',
+    '「08:00-09:40」仍落第 1 节行（重叠 100%，既有行为不变）');
+
+  // ⑥ 回归护栏（最大风险点）：只有 end_time 的 ddl **不走**最大重叠这条路
+  var ddlOnlyEnd = { _id: 'ddlEnd', title: '提交材料', type: 'ddl', date: WEEK_MONDAY,
+    priority: 'high', repeat: 'none', done: false, periods: '', start_time: '', end_time: '12:00' };
+  eq(rowKeyFor(ddlOnlyEnd, CAL5), '5',
+    '**只有 end_time 的截止仍落第 5 节行**（走的是"结束时刻包含判定"，'
+    + '零长区间也照样吸附 —— 用户报的问题2 靠这条活着）');
+  isFalse(rowKeyFor(ddlOnlyEnd, CAL5) === 'other',
+    '反面对照：**绝不进兜底行**（这条一破，"截止与子任务不显示"就复活了）');
+
+  // ⑦ 有 periods 的任务完全不经过这条路径
+  eq(rowKeyFor(course('p1', '写了节次的课', '7-9'), null), '7',
+    '有 periods 的照旧按 periods 定位（连堂仍落起始行）');
+  eq(rowKeyFor(course('p2', '写了节次的课', '7-9'), null) === 'other', false,
+    '有 periods 的**完全不过**最大重叠那道守卫');
+
+  // ⑧ bestOverlapPeriod 自身的口径
+  eq(T.bestOverlapPeriod('09:55', '10:55', null), 3, 'bestOverlapPeriod：45 分钟那节胜出');
+  eq(T.bestOverlapPeriod('09:40', '10:40', null), 3, 'bestOverlapPeriod：0 分钟的那节不算命中');
+  eq(T.bestOverlapPeriod('12:00', '13:00', null), null, 'bestOverlapPeriod：都不相交 → null');
+  eq(T.bestOverlapPeriod('09:00', '', null), 2,
+    'end 缺失时按零长区间处理（09:00 在第 2 节 08:55-09:40 内 → 第 2 节）');
+  eq(T.bestOverlapPeriod('10:45', '10:00', null), 3,
+    'end 早于 start 的脏数据按零长区间处理（10:45 在第 3 节内 → 第 3 节）');
+  eq(T.bestOverlapPeriod('', '12:00', null), null, 'start 为空 → null（那条路径不归它管）');
+
+  // ⑨ 卡片高度：没有 periods 的任务仍是一格高（高度由 periodSpanOf 决定，与落点无关）
+  var builtTimed = T.buildGrid(perDayOf({
+    0: [timedTask('t6', '中间那件事', '09:55', '10:55')]
+  }), null, WEEK_MONDAY);
+  eq(builtTimed.days[0].cells[rowIndexOf(builtTimed.rows, '3')].tasks[0].spanCount, 1,
+    '没有 periods 的任务 spanCount 仍是 1（**一格高**）');
+  eq(builtTimed.freeCounts[0], DEFAULT_ROWS - 1,
+    '它占第 3 节那一行 → 空闲 12（落点变了，统计口径没变 —— '
+    + '排版与统计共用 resolveSpan，不会出现"画在某行却没被算占用"）');
+
+  // ⑩ 空档行**可以接任务** —— 保留 Python 版原意（config.py:225-234
+  //    "让这段时间真的能接住任务"）。判据：午休行是 periodRows 生成的一行、
+  //    有真实区间（12:25-14:15）、真的画在网格里；而且它不计入空闲，
+  //    所以往里面放卡片不会污染「空闲 N 节」。
+  //    （曾一度按"只考虑真实课节"的思路把它排除过，经复核已回退 —— 见
+  //      bestOverlapPeriod 的注释里写的那段判据。）
+  var lunchTask = timedTask('lunch', '午休里的事', '12:30', '13:10');
+  var builtLunch = T.buildGrid(perDayOf({ 0: [lunchTask] }),
+    { '5': ['11:45', '12:25'], '7': ['14:15', '15:00'] }, WEEK_MONDAY);
+  var lunchBreakIdx = -1;
+  builtLunch.rows.forEach(function (r, i) { if (r.isBreak) lunchBreakIdx = i; });
+  isTrue(lunchBreakIdx !== -1, '第 6 节仍是「午休」空档行');
+  eq(builtLunch.days[0].cells[lunchBreakIdx].tasks.length, 1,
+    '**「12:30-13:10」的卡片就在午休行里**（这一行有真实区间、也真的画在网格上）');
+  eq(builtLunch.rows[lunchBreakIdx].key, '6', '午休行就是第 6 节那一行');
+  isTrue(titlesAt(builtLunch, 0, '6').indexOf('午休里的事') !== -1,
+    '按 key 取也是同一张卡（确认没画错行）');
+  eq(rowKeyFor(lunchTask, { '5': ['11:45', '12:25'], '7': ['14:15', '15:00'] }), '6',
+    '落点就是午休行');
+  isFalse(rowKeyFor(lunchTask, { '5': ['11:45', '12:25'], '7': ['14:15', '15:00'] }) === 'other',
+    '反面对照：**≠ 兜底行**（有行可落就不该进兜底）');
+  isFalse(rowKeyFor(lunchTask, { '5': ['11:45', '12:25'], '7': ['14:15', '15:00'] }) === '5',
+    '反面对照：≠ 第 5 节');
+  // ⚠️ 空闲是 12 而不是 13 —— 这不是"空档行被算法占用了"，而是：
+  //   这条任务落在**第 6 节**那一行，而第 6 节本身就是"午休"（不是课）→ 不计入空闲。
+  //   所以分母是 12（13 行里剔掉午休行），而那 12 行没有任何一行被占 → 空闲 12。
+  //   13 那个数只在"默认作息（13 行全是课）"下才成立。
+  eq(builtLunch.freeCounts[0], countableRows(builtLunch.rows),
+    '**空闲 = 计入空闲的行数(12)** —— 任务落在午休行不额外扣任何课节');
+  eq(builtLunch.freeCounts[0], DEFAULT_ROWS - 1,
+    '数值上就是 13 − 1（那一行本身是午休，不是课）');
+  isFalse(builtLunch.freeCounts[0] === DEFAULT_ROWS - 2,
+    '反面对照：不是 11（那才说明它把某个**课节**也扣掉了）');
+  eq(countableRows(builtLunch.rows), DEFAULT_ROWS - 1,
+    '计入空闲的行数 = 13 − 1（午休行被排除）—— 与上面互为印证');
+
+  // 对照：同样一条任务，若落在**真正的课节**行上，空闲就要少 1
+  var onClassRow = timedTask('onclass', '落在第5节的事', '12:00', '12:20');
+  var builtOnClass = T.buildGrid(perDayOf({ 0: [onClassRow] }),
+    { '5': ['11:45', '12:25'], '7': ['14:15', '15:00'] }, WEEK_MONDAY);
+  eq(rowKeyFor(onClassRow, { '5': ['11:45', '12:25'], '7': ['14:15', '15:00'] }), '5',
+    '12:00-12:20 与第 5 节重叠 20 分钟 → 落第 5 节');
+  eq(builtOnClass.freeCounts[0], DEFAULT_ROWS - 2,
+    '**落在真课节上才扣空闲**：13 − 1（午休不计）− 1（第 5 节被占）= 11');
+
+  // ⑪ 不变式复述：落点与统计同源，7 天都不会出现"画了却没算占用"
+  var builtMixed = T.buildGrid(perDayOf({
+    0: [timedTask('m1', '按时段的事', '09:55', '10:55'), course('m2', '有节次的课', '1-2')]
+  }), null, WEEK_MONDAY);
+  eq(builtMixed.freeCounts[0], DEFAULT_ROWS - 3,
+    '按时段的占第 3 节 + 课程的占第 1-2 节 → 空闲 10（两件都被算进占用）');
+
+  // -------------------------------------------------------------------------
+  // 根因回归：12:00 的截止在两种作息下落在不同的行
+  // （这正是"截止与子任务不出现在时间表里"那个真机问题）
+  // -------------------------------------------------------------------------
+  block('根因回归 —— 12:00 的截止：校准作息 → 第5节；默认作息 → 兜底行');
+  // 真机导入课表时校准出的作息（用户 data/app.db 里那份的前 5 节）
+  var CALIBRATED = {
+    '1': ['08:30', '09:10'], '2': ['09:15', '09:55'], '3': ['10:15', '10:55'],
+    '4': ['11:00', '11:40'], '5': ['11:45', '12:25']
+  };
+  // ddl「提交材料」：只填了截止时间 12:00
+  var ddl1200 = { _id: 'ddl12', title: '提交材料', type: 'ddl', date: WEEK_MONDAY,
+    priority: 'high', repeat: 'none', done: false, periods: '', start_time: '', end_time: '12:00' };
+
+  var builtCal = T.buildGrid(perDayOf({ 0: [ddl1200] }), CALIBRATED, WEEK_MONDAY);
+  eq(rowIndexOf(builtCal.rows, 'other'), -1,
+    '**校准作息下压根没有兜底行**（12:00 落进第 5 节 11:45-12:25）');
+  isTrue(titlesAt(builtCal, 0, '5').indexOf('提交材料') !== -1, '它落在**第 5 节行**');
+  eq(builtCal.rows.length, DEFAULT_ROWS, '行数 = 13（没有多出兜底行）');
+
+  var builtDef = T.buildGrid(perDayOf({ 0: [ddl1200] }), null, WEEK_MONDAY);
+  eq(rowIndexOf(builtDef.rows, 'other'), 0,
+    '**默认作息下落进兜底行**（12:00 在 11:40–14:00 之间没有课，定位不到节次）');
+  isTrue(titlesAt(builtDef, 0, 'other').indexOf('提交材料') !== -1, '它出现在兜底行的格子里');
+  eq(titlesAt(builtDef, 0, '5').length, 0, '默认作息下第 5 节行是空的');
+
+  // 另一条真机任务：16:00-17:00 的子任务
+  var sub1617 = { _id: 's1617', title: '写实验报告', type: 'subtask', date: WEEK_MONDAY,
+    priority: 'mid', repeat: 'none', done: false, periods: '', start_time: '16:00', end_time: '17:00' };
+  var builtSubCal = T.buildGrid(perDayOf({ 0: [sub1617] }), CALIBRATED, WEEK_MONDAY);
+  var builtSubDef = T.buildGrid(perDayOf({ 0: [sub1617] }), null, WEEK_MONDAY);
+  isTrue(titlesAt(builtSubDef, 0, '7').indexOf('写实验报告') !== -1,
+    '默认作息下 16:00 落**第 7 节**（默认第 7 节 = 16:00-16:45）');
+  // 校准作息里只给了第 1~5 节，16:00 不在任何校准区间内，
+  // 于是退回默认作息的第 7 节 —— 同一个"第 7 节"在两种作息下含义不同：
+  // 校准后第 9 节才是 16:00，这正是用户看到的"时间与自己导入的文件不符"。
+  isTrue(titlesAt(builtSubCal, 0, '7').indexOf('写实验报告') !== -1,
+    '只校准了前 5 节时，16:00 仍靠默认作息落到第 7 节（口径一致，没有凭空乱跳）');
+  eq(builtSubCal.rows.length, DEFAULT_ROWS, '校准作息下同样是 13 行（没有兜底行）');
+  // 全量校准（真机那份完整作息）下，16:00 应该落到第 9 节
+  var FULL_CALIBRATED = {
+    '1': ['08:30', '09:10'], '2': ['09:15', '09:55'], '3': ['10:15', '10:55'],
+    '4': ['11:00', '11:40'], '5': ['11:45', '12:25'], '7': ['14:15', '15:00'],
+    '8': ['15:05', '15:40'], '9': ['16:00', '16:40'], '10': ['16:45', '17:25']
+  };
+  var builtSubFull = T.buildGrid(perDayOf({ 0: [sub1617] }), FULL_CALIBRATED, WEEK_MONDAY);
+  isTrue(titlesAt(builtSubFull, 0, '9').indexOf('写实验报告') !== -1,
+    '**全量校准下 16:00 落第 9 节**（校准第 9 节 = 16:00-16:40）—— 与默认作息的第 7 节不同');
+
+  // -------------------------------------------------------------------------
   // 回归：行数与"每节课一行"这条基本结构没被改坏
   // -------------------------------------------------------------------------
   block('回归 —— 行结构');

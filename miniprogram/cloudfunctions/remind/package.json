@@ -1,0 +1,13 @@
+{
+  "name": "remind",
+  "version": "1.0.0",
+  "description": "智能日程管家 - DDL 到期提醒云函数（定时扫描 + 微信订阅消息下发）",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "test": "node ../_selftest.js"
+  },
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

@@ -11,6 +11,15 @@
  *                           并验证"前端伪造 openid 无效"
  *   3. aiParse/index.js  —— 脏 JSON 容错解析、结果归一化
  *   4. aiDecompose/index.js —— 子任务归一化 + estimate_min 容错
+ *   5. remind/index.js   —— DDL 到期提醒：截止时刻合成（北京时间）/ 幂等键 / 提醒窗口 /
+ *                            模板字段类型解析（thing / short_thing / date / time /
+ *                            character_string …，按 key 前缀）与各自长度格式约束 /
+ *                            默认映射对齐真实模板（thing2 + date4 + short_thing19）/
+ *                            "标题截断但保留（还剩N分钟）尾巴" / 47003 失败留痕能自证
+ *                            "哪个字段、发了什么值" / 错误码分类（43101 / 47003 / 40001）/
+ *                            额度（quota）绝不超发 / 单用户失败不中断整轮。
+ *                            **注意**：真实订阅消息下发与定时触发器在本机无法验证，
+ *                            下发走可替换出口打桩（详见第 10 节开头的边界说明）。
  *
  * 退出码：全部通过 0；有任何失败 1。
  */
@@ -24,6 +33,7 @@ const N = require(path.join(__dirname, 'tasks', 'lib', 'normalize.js'));
 const tasksFn = require(path.join(__dirname, 'tasks', 'index.js'));
 const aiParse = require(path.join(__dirname, 'aiParse', 'index.js'));
 const aiDecompose = require(path.join(__dirname, 'aiDecompose', 'index.js'));
+const remind = require(path.join(__dirname, 'remind', 'index.js'));
 
 // ---------------------------------------------------------------------------
 // 迷你测试框架
@@ -1834,6 +1844,997 @@ testCase('9.11 scrubSecret：万一服务商回显了请求头，日志里也要
   );
   ok(aiParse.scrubSecret(leaked).indexOf('SECRETVALUE123456') === -1,
     '即使服务商回显请求头，最终日志文本里也没有 Key');
+});
+
+// ===========================================================================
+// 10. remind/index.js —— DDL 到期提醒（订阅消息）
+// ===========================================================================
+// 【本节的边界，先说清楚】
+//   1. 真实下发**没测**：本机没有 templateId，也没有云环境。所有下发都走
+//      `remind.sendSubscribeMessage` 这个可替换出口，测的是「拿到什么返回就怎么处理」。
+//   2. 定时触发器与云调用权限（config.json）**没测**：那是微信侧的东西，
+//      本地 node 里没有任何东西能验证它。
+//   3. 测的是三件最要紧的事：**什么时候该发**（纯函数）、**绝不重复发**（幂等）、
+//      **没额度/被拒收时绝不硬发**（额度与错误分类）。
+
+/** 北京时间 `YYYY-MM-DD` + `HH:MM` → 绝对毫秒（口径与 remind 云函数一致） */
+function bjMs(day, clock) {
+  const d = day.split('-').map(Number);
+  const t = clock.split(':').map(Number);
+  return Date.UTC(d[0], d[1] - 1, d[2], t[0], t[1], 0, 0) - remind.BEIJING_OFFSET_MS;
+}
+
+/** 绝对毫秒 → 北京时间的日期 / 时分（用来构造"相对 now"的测试数据，避免测试依赖当天几点） */
+function bjDay(ms) {
+  const s = new Date(ms + remind.BEIJING_OFFSET_MS);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${s.getUTCFullYear()}-${p(s.getUTCMonth() + 1)}-${p(s.getUTCDate())}`;
+}
+function bjClock(ms) {
+  const s = new Date(ms + remind.BEIJING_OFFSET_MS);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(s.getUTCHours())}:${p(s.getUTCMinutes())}`;
+}
+
+/** 造一条 DDL（date / end_time 都由调用方给绝对毫秒，省得手算日期） */
+function ddlAt(ms, overrides) {
+  return makeTask(Object.assign({
+    type: 'ddl',
+    date: bjDay(ms),
+    start_time: '', // ddl 的 start_time 永远是空串（见 normalize.js 的 2.3）
+    end_time: bjClock(ms),
+    done: false,
+  }, overrides || {}));
+}
+
+/** 固定的"现在"：2026-10-16（周五）10:00 北京时间。固定住时间，断言才可复现 */
+const R_NOW = bjMs('2026-10-16', '10:00');
+const MIN = 60 * 1000;
+
+// --- 10.1 截止时刻 ---------------------------------------------------------
+testCase('10.1 dueInstantOf：合法 ddl 按北京时间合成绝对时刻', () => {
+  const task = makeTask({ type: 'ddl', date: '2026-10-16', start_time: '', end_time: '12:00' });
+  eq(remind.dueInstantOf(task), bjMs('2026-10-16', '12:00'), 'date + end_time 按 UTC+8 合成');
+  // 手算一遍，防止"两边都用同一个错公式"导致断言自洽却全错：
+  // 北京 2026-10-16 12:00 = UTC 2026-10-16 04:00
+  eq(remind.dueInstantOf(task), Date.UTC(2026, 9, 16, 4, 0, 0, 0), '等于 UTC 04:00（北京 -8h）');
+  eq(new Date(remind.dueInstantOf(task)).toISOString(), '2026-10-16T04:00:00.000Z', 'ISO 串能对上');
+
+  // H:MM 也认（与 normalize.js 的 isTime 口径一致）
+  eq(remind.dueInstantOf(makeTask({ type: 'ddl', date: '2026-10-16', end_time: '9:05' })),
+    bjMs('2026-10-16', '09:05'), '9:05 与 09:05 等价');
+});
+
+testCase('10.2 dueInstantOf：不该提醒的四种情况一律返回 null', () => {
+  // ① 已完成
+  eq(remind.dueInstantOf(makeTask({ type: 'ddl', date: '2026-10-16', end_time: '12:00', done: true })),
+    null, 'done=true 不提醒');
+  // ② 非 ddl（event 有明确时间也不算"到期"）
+  eq(remind.dueInstantOf(makeTask({ type: 'event', date: '2026-10-16', end_time: '12:00' })),
+    null, 'event 不提醒');
+  eq(remind.dueInstantOf(makeTask({ type: 'subtask', date: '2026-10-16', end_time: '12:00' })),
+    null, 'subtask 不提醒');
+  // ③ 缺 end_time（ddl 的截止时刻只在 end_time 里，缺了不瞎猜 23:59）
+  eq(remind.dueInstantOf(makeTask({ type: 'ddl', date: '2026-10-16', end_time: '' })),
+    null, '缺 end_time → null');
+  // ④ 缺 date
+  eq(remind.dueInstantOf(makeTask({ type: 'ddl', date: '', end_time: '12:00' })),
+    null, '缺 date → null');
+  // 垃圾输入
+  eq(remind.dueInstantOf(null), null, 'null → null');
+  eq(remind.dueInstantOf('字符串'), null, '非对象 → null');
+});
+
+testCase('10.3 dueInstantOf：非法时间给 null 并记 warning（不瞎猜、不静默）', () => {
+  const w1 = [];
+  eq(remind.dueInstantOf(makeTask({ _id: 't1', type: 'ddl', date: '2026-10-16', end_time: '25:00' }), { warnings: w1 }),
+    null, '25:00 越界 → null');
+  ok(w1.length === 1, '记了 1 条 warning');
+  ok(w1[0].indexOf('t1') !== -1, 'warning 里点名是哪条任务');
+  ok(w1[0].indexOf('end_time') !== -1, 'warning 里点名是 end_time 的问题');
+
+  const w2 = [];
+  eq(remind.dueInstantOf(makeTask({ type: 'ddl', date: '2026-10-16', end_time: '12:60' }), { warnings: w2 }),
+    null, '12:60 越界 → null');
+  eq(w2.length, 1, '同样记 warning');
+
+  // 日期非法 / 不存在的日期：Date.UTC 会把 02-30 静默进位成 03-02，必须自己挡住
+  const w3 = [];
+  eq(remind.dueInstantOf(makeTask({ type: 'ddl', date: '2026-02-30', end_time: '12:00' }), { warnings: w3 }),
+    null, '2026-02-30 不是真实日期 → null');
+  eq(w3.length, 1, '记 warning');
+
+  const w4 = [];
+  eq(remind.dueInstantOf(makeTask({ type: 'ddl', date: '2026/10/16', end_time: '12:00' }), { warnings: w4 }),
+    null, '斜杠日期 → null');
+
+  // 非 ddl 的脏数据**不**记 warning（那不是错误，是设计如此：我们不提醒 event）
+  const w5 = [];
+  eq(remind.dueInstantOf(makeTask({ type: 'event', date: '2026-13-99', end_time: '99:99' }), { warnings: w5 }),
+    null, '非 ddl → null');
+  eq(w5.length, 0, '非 ddl 不产生 warning（避免日志被无关数据刷屏）');
+});
+
+// --- 10.2 幂等键 -----------------------------------------------------------
+testCase('10.4 dueKeyOf：幂等键 = 任务 id @ 日期 时刻', () => {
+  const task = makeTask({ _id: 'abc', type: 'ddl', date: '2026-10-16', end_time: '12:00' });
+  eq(remind.dueKeyOf(task), 'abc@2026-10-16 12:00', '键的格式');
+  // 9:05 与 09:05 必须归一成同一个键，否则同一个截止时刻会有两个键 → 提醒两次
+  eq(remind.dueKeyOf(makeTask({ _id: 'abc', date: '2026-10-16', end_time: '9:05' })),
+    remind.dueKeyOf(makeTask({ _id: 'abc', date: '2026-10-16', end_time: '09:05' })),
+    '9:05 与 09:05 归一到同一个键');
+  // 改了截止时间 → 新键 → 允许再提醒（这是想要的语义：改期后要重新提醒）
+  ok(remind.dueKeyOf(makeTask({ _id: 'abc', date: '2026-10-16', end_time: '13:00' }))
+    !== remind.dueKeyOf(task), '改了时间就是新键');
+  eq(remind.dueKeyOf(makeTask({ _id: '', date: '2026-10-16', end_time: '12:00' })), '', '缺 id → 空键（空键不进 sentKeys）');
+});
+
+// --- 10.3 计划（什么时候该发） ---------------------------------------------
+testCase('10.5 planReminders：窗口内才进，按截止时刻升序，已提醒的排除', () => {
+  const tasks = [
+    ddlAt(R_NOW + 5 * MIN, { _id: 'in5' }), // 还剩 5 分钟 → 进
+    ddlAt(R_NOW + 30 * MIN, { _id: 'in30' }), // 还剩 30 分钟（lead=60）→ 进
+    ddlAt(R_NOW + 90 * MIN, { _id: 'in90' }), // 还剩 90 分钟（lead=60）→ 不进
+    ddlAt(R_NOW - 3 * MIN, { _id: 'grace' }), // 刚过期 3 分钟，在 10 分钟宽限内 → 进
+    ddlAt(R_NOW - 30 * MIN, { _id: 'stale' }), // 过期 30 分钟，超出宽限 → 不进
+    makeTask({ _id: 'done1', type: 'ddl', date: bjDay(R_NOW), end_time: bjClock(R_NOW + 5 * MIN), done: true }),
+    makeTask({ _id: 'ev1', type: 'event', date: bjDay(R_NOW), start_time: bjClock(R_NOW + 5 * MIN) }),
+  ];
+  const result = remind.planReminders({ now: R_NOW, tasks, sentKeys: [], leadMin: 60 });
+
+  eq(result.items.map((item) => item.task._id), ['grace', 'in5', 'in30'], '入选的按截止时刻升序');
+  eq(result.items.map((item) => item.minutesLeft), [-3, 5, 30], 'minutesLeft 如实给出（负数=刚过期）');
+  eq(result.items[0].dueKey, `grace@${bjDay(R_NOW - 3 * MIN)} ${bjClock(R_NOW - 3 * MIN)}`, '每条都带幂等键');
+  eq(result.items[0].dueAt, R_NOW - 3 * MIN, 'dueAt 就是截止时刻');
+
+  const reasons = {};
+  result.skipped.forEach((s) => { reasons[s.task._id] = s.reason; });
+  eq(reasons.in90, 'too_early', '90 分钟 > lead 60 → too_early');
+  eq(reasons.stale, 'too_late', '过期超宽限 → too_late（不补发"你早就过期了"）');
+  eq(reasons.done1, 'no_due_instant', '已完成 → no_due_instant');
+  eq(reasons.ev1, 'no_due_instant', '非 ddl → no_due_instant');
+
+  // 幂等：把 in5 的键放进 sentKeys，它就必须被排除
+  const again = remind.planReminders({
+    now: R_NOW, tasks, sentKeys: [result.items[1].dueKey], leadMin: 60,
+  });
+  eq(again.items.map((item) => item.task._id), ['grace', 'in30'], 'sentKeys 命中的不再入选');
+  eq(again.skipped.filter((s) => s.reason === 'already_sent').length, 1, '已提醒过的记为 already_sent');
+
+  // sentKeys 也接受 Set（调用方手边有什么就给什么）
+  const asSet = remind.planReminders({ now: R_NOW, tasks, sentKeys: new Set([result.items[1].dueKey]), leadMin: 60 });
+  eq(asSet.items.map((item) => item.task._id), ['grace', 'in30'], '传 Set 结果一致');
+});
+
+testCase('10.6 planReminders：lead 精确边界 + 超过 MAX_PER_SCAN 时按时间升序截断', () => {
+  // 边界：正好 60 分钟 → 进；61 分钟 → 不进（窗口是 <= leadMin 的闭区间）
+  const edge = remind.planReminders({
+    now: R_NOW,
+    leadMin: 60,
+    tasks: [ddlAt(R_NOW + 60 * MIN, { _id: 'exact' }), ddlAt(R_NOW + 61 * MIN, { _id: 'over' })],
+  });
+  eq(edge.items.map((item) => item.task._id), ['exact'], '正好 60 分钟的进，61 分钟的不进');
+
+  // 5 条都符合条件 → 只发最急的 3 条（MAX_PER_SCAN），其余记 over_scan_limit
+  const many = [];
+  for (let i = 1; i <= 5; i += 1) many.push(ddlAt(R_NOW + i * MIN, { _id: `m${i}` }));
+  const capped = remind.planReminders({ now: R_NOW, tasks: many, leadMin: 60 });
+  eq(remind.MAX_PER_SCAN, 3, 'MAX_PER_SCAN 就是 3');
+  eq(capped.items.map((item) => item.task._id), ['m1', 'm2', 'm3'], '最急的 3 条');
+  eq(capped.skipped.filter((s) => s.reason === 'over_scan_limit').length, 2, '被截断的 2 条记为 over_scan_limit');
+
+  // 显式传 max 可以覆盖（自测与调参用）
+  eq(remind.planReminders({ now: R_NOW, tasks: many, leadMin: 60, max: 1 }).items.length, 1, 'max 可覆盖');
+});
+
+// --- 10.4 模板消息体 -------------------------------------------------------
+testCase('10.7 默认映射对齐真实模板：thing2 / date4 / short_thing19 与各自类型约束', () => {
+  const dueAt = bjMs('2026-09-28', '12:00');
+  // now 显式注入（= 到期前 30 分钟）：让"还剩多久"这一栏可断言，而不是跟着当天时间跑
+  const before30 = { now: dueAt - 30 * MIN };
+  const built = remind.buildMessageData({ title: '提交实验报告', type: 'ddl' }, dueAt, null, before30);
+
+  // 【关键回归】默认映射必须对齐用户实际申请到的模板，改回 thing1/time2/thing3 就是必 47003
+  eq(Object.keys(remind.DEFAULT_FIELD_MAP).sort(), ['date4', 'short_thing19', 'thing2'],
+    '默认映射的 key 恰好是 thing2 / date4 / short_thing19');
+  eq(remind.DEFAULT_FIELD_MAP, { thing2: 'title', date4: 'due', short_thing19: 'category' }, '默认映射内容');
+  eq(Object.keys(built.data).sort(), ['date4', 'short_thing19', 'thing2'], '产出的 data 就是这三个 key');
+
+  // ① thing2「提醒内容」= 标题 + 还剩多久的尾巴（时间栏只给时刻，所以尾巴必须在这里）
+  eq(built.data.thing2.value, '提交实验报告（还剩30分钟）', 'thing2 = 标题（带还剩 N 分钟的尾巴）');
+  // ② date4「日程时间」= 年月日形状、**不补零**、带时刻（与官方示例 2019年10月1日15:01 一致）
+  eq(built.data.date4.value, '2026年9月28日12:00', 'date4 = 年月日 + 时刻');
+  ok(/^\d{4}年\d{1,2}月\d{1,2}日\d{1,2}:\d{1,2}$/.test(built.data.date4.value),
+    'date4 匹配 ^\\d{4}年\\d{1,2}月\\d{1,2}日\\d{1,2}:\\d{1,2}$');
+  ok(built.data.date4.value.indexOf('-') === -1, '不带 "2026-09-28" 那种内部格式的连字符');
+  // ③ short_thing19「日程类别」= 中文标签，且**不超过 5 字**（硬约束）
+  eq(built.data.short_thing19.value, '截止', 'ddl 的类别是「截止」');
+  ok(Array.from(built.data.short_thing19.value).length <= 5, '「截止」不超 5 字');
+  eq(built.truncated, [], '这个长度不该触发截断');
+  eq(built.warnings, [], '默认映射 + 默认模板不该有任何警告');
+
+  // 类别标签三类都与前端 utils/periods.js 的 TYPE_LABELS 一致
+  eq(remind.typeLabelOf('ddl'), '截止', 'ddl → 截止');
+  eq(remind.typeLabelOf('event'), '日程', 'event → 日程');
+  eq(remind.typeLabelOf('subtask'), '子任务', 'subtask → 子任务');
+  ok(Array.from(remind.typeLabelOf('subtask')).length <= 5, '最长的类别标签也不超 5 字');
+
+  // 留痕必须齐：槽位 → key → 类型 → 最终值（47003 排查就靠它）
+  eq(built.fields.map((f) => `${f.slot}:${f.key}:${f.type}`),
+    ['title:thing2:thing', 'due:date4:date', 'category:short_thing19:short_thing'],
+    'fields 留痕是「槽位 → key → 类型」');
+  eq(built.fields.map((f) => f.value),
+    ['提交实验报告（还剩30分钟）', '2026年9月28日12:00', '截止'], '留痕里带最终值');
+  eq(remind.describeMessageFields(built.fields),
+    'thing2=提交实验报告（还剩30分钟） | date4=2026年9月28日12:00 | short_thing19=截止',
+    'describeMessageFields 压成一行可读文本');
+
+  // 空标题不留空 —— 微信不接受空 value（尾巴照旧保留）
+  eq(remind.buildMessageData({ title: '  ', type: 'ddl' }, dueAt, null, before30).data.thing2.value,
+    '未命名任务（还剩30分钟）', '空标题用占位文字');
+});
+
+testCase('10.8 标题 30 个汉字 → ≤20 码点，且"（还剩30分钟）"必须还在', () => {
+  const dueAt = bjMs('2026-09-28', '12:00');
+  const before30 = { now: dueAt - 30 * MIN };
+  const longTitle = '一二三四五六七八九十'.repeat(3); // 30 个汉字
+  eq(Array.from(longTitle).length, 30, '素材确认：30 个字');
+  const built = remind.buildMessageData({ title: longTitle, type: 'ddl' }, dueAt, null, before30);
+
+  eq(remind.THING_MAX, 20, 'thing 类上限 20');
+  ok(Array.from(built.data.thing2.value).length <= 20, '结果 ≤ 20 个码点');
+  ok(built.data.thing2.value.indexOf('（还剩30分钟）') !== -1,
+    '尾巴完整保留 —— 截断绝不能把"还剩多久"切掉（那才是这条通知的意义）');
+  eq(built.data.thing2.value, '一二三四五六七八九十一…（还剩30分钟）', '被截的是标题，不是尾巴');
+  eq(built.truncated.length, 1, '返回值里说明了哪条被截断（悄悄截短是不允许的）');
+  ok(built.truncated[0].indexOf('thing2') !== -1, '点名 thing2');
+  ok(built.truncated[0].indexOf('先保尾巴') !== -1, '并说清是按什么规则截的');
+
+  // 边界：尾巴自己就超上限时（short_thing 的 5 字），只能留尾巴
+  const tiny = remind.composeTitleWithLeft('提交实验报告', 30, 5);
+  eq(tiny.text, '（还剩3…', '上限只有 5 时优先保尾巴');
+  ok(Array.from(tiny.text).length <= 5, '仍然不超 5');
+  eq(tiny.titleTruncated, true, '并且如实标记标题被截了');
+
+  // emoji 标题截断不能产生半个代理对（落单的 \uD800-\uDBFF）
+  const emojiTitle = '🎓'.repeat(30);
+  const emojiBuilt = remind.buildMessageData({ title: emojiTitle, type: 'ddl' }, dueAt, null, before30);
+  const emojiValue = emojiBuilt.data.thing2.value;
+  ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(emojiValue), '没有落单的高代理（高位）');
+  ok(!/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(emojiValue), '没有落单的低代理');
+  ok(Array.from(emojiValue).length <= 20, 'emoji 也按码点算长度');
+  ok(emojiValue.indexOf('（还剩30分钟）') !== -1, 'emoji 标题下尾巴同样保得住');
+});
+
+testCase('10.9 buildMessageData / resolveFieldMap：字段名映射与非法映射的容错', () => {
+  const dueAt = bjMs('2026-09-28', '12:00');
+  const before30 = { now: dueAt - 30 * MIN };
+
+  // REMIND_FIELD_MAP 覆盖能力**保留**：换模板时只改这个环境变量
+  const mapped = remind.buildMessageData({ title: '交报告', type: 'ddl' }, dueAt,
+    { thing1: 'title', time2: 'left', phrase3: 'category' }, before30);
+  eq(Object.keys(mapped.data).sort(), ['phrase3', 'thing1', 'time2'], '字段名跟着映射变');
+  eq(mapped.data.thing1.value, '交报告（还剩30分钟）', 'thing1 拿标题（带尾巴）');
+  // time 类：形状由类型决定（年月日 + 时刻），两种写法都收
+  ok(/^\d{4}年\d{1,2}月\d{1,2}日\d{1,2}:\d{1,2}$/.test(mapped.data.time2.value), 'time2 也是年月日形状');
+  // phrase 类只允许 5 个汉字、**不允许空格** —— 所以给紧凑短语而不是整句
+  eq(mapped.data.phrase3.value, '截止', 'phrase3 拿类别的紧凑写法');
+  eq(mapped.truncated, [], '这些值都没超各自类型的上限');
+
+  // phrase 类长度上限 5 是硬约束：超了必须被我们截掉，而不是等微信回 47003
+  const phraseOver = remind.buildMessageData({ title: '这是一个很长的标题', type: 'ddl' }, dueAt,
+    { phrase1: 'title' }, before30);
+  eq(phraseOver.data.phrase1.value, '这是一个…', 'phrase1 被截到 5 字（前 4 字 + 省略号）');
+  ok(Array.from(phraseOver.data.phrase1.value).length <= 5, 'phrase 取值不超 5 字');
+  eq(phraseOver.truncated.length, 1, '并且如实报告"我截了"（悄悄截短是不允许的）');
+
+  // short_thing 超 5 字同样被截（不靠微信报错）
+  const shortOver = remind.buildMessageData({ title: '这是一个很长的标题', type: 'ddl' }, dueAt,
+    { short_thing1: 'title' }, before30);
+  eq(Array.from(shortOver.data.short_thing1.value).length, 5, 'short_thing 被截到 5 字');
+  eq(shortOver.data.short_thing1.value, '这是一个…', '前 4 字 + 省略号');
+  ok(shortOver.data.short_thing1.value.indexOf(' ') === -1, 'short_thing 里不留空格');
+
+  // 非法槽位（拼错）→ 忽略该字段 + warning，不静默改成默认语义
+  const bad = remind.resolveFieldMap({ thing1: 'titel', time2: 'due' });
+  eq(Object.keys(bad.fieldMap), ['time2'], '槽位写错的字段被忽略');
+  ok(bad.warnings.length === 1, '给了一条 warning');
+  ok(bad.warnings[0].indexOf('titel') !== -1, 'warning 点名那个不认识的槽位');
+
+  // 字段名形状不对 → 忽略；全无效时回退默认映射（功能不整体挂掉）
+  const badName = remind.resolveFieldMap({ 'thing-1': 'title' });
+  eq(badName.fieldMap, remind.DEFAULT_FIELD_MAP, '全部无效时回退默认映射');
+  eq(badName.warnings.length, 2, '一条说明字段名形状不对，一条说明已回退');
+  ok(badName.warnings[0].indexOf('thing-1') !== -1, '警告里点名那个写错的字段');
+
+  // JSON 串（环境变量只能是字符串）能解析
+  eq(remind.resolveFieldMap('{"thing2":"title"}').fieldMap, { thing2: 'title' }, 'JSON 字符串可解析');
+  // JSON 写坏了 → 回退默认 + warning
+  const broken = remind.resolveFieldMap('{不是 JSON');
+  eq(broken.fieldMap, remind.DEFAULT_FIELD_MAP, '坏 JSON 回退到默认映射');
+  ok(broken.warnings.length === 1, '并且说明为什么');
+  eq(remind.resolveFieldMap('').warnings, [], '空配置不产生警告');
+
+  // 换成"不合适"的字段类型要给警告（character_string 放标题是典型的选错字段）
+  const awkward = remind.resolveFieldMap({ character_string1: 'title' });
+  ok(awkward.warnings.length === 1, 'character_string 放标题 → 一条警告');
+  ok(awkward.warnings[0].indexOf('character_string1') !== -1, '点名那个字段');
+});
+
+// --- 10.5 错误分类 ---------------------------------------------------------
+testCase('10.9 classifySendError：43101 / 47003 / 40001 / 42001 / 未知', () => {
+  const rejected = remind.classifySendError({ errCode: 43101, errMsg: 'user refuse to accept the msg' });
+  eq(rejected.kind, 'user_rejected', '43101 = 用户拒收');
+  eq(rejected.disableUser, true, '43101 必须关掉该用户的提醒（否则每 5 分钟白跑）');
+  eq(rejected.retry, false, '不重试');
+  ok(rejected.hint.indexOf('43101') !== -1, '提示里带错误码，便于对照排查');
+
+  const field = remind.classifySendError({ errCode: 47003, errMsg: 'argument invalid! data.thing1.value invalid' });
+  eq(field.kind, 'invalid_field', '47003 = 模板参数不合规');
+  eq(field.checkFieldMap, true, '47003 要提示去核对字段映射');
+  eq(field.disableUser, false, '47003 是配置问题，不能关用户');
+  ok(field.hint.indexOf('REMIND_FIELD_MAP') !== -1, '提示直指字段映射');
+  ok(field.hint.indexOf('argument invalid') !== -1, '原文保留（这是唯一的线索）');
+
+  const token = remind.classifySendError({ errCode: 40001 });
+  eq(token.kind, 'token', '40001 = token 问题');
+  eq(token.retry, true, '40001 要求重试一次');
+  eq(remind.classifySendError({ errCode: 42001 }).kind, 'token', '42001 同类');
+  eq(remind.classifySendError({ errCode: 42001 }).retry, true, '42001 同样重试');
+
+  const unknown = remind.classifySendError({ errCode: 99999, errMsg: '某个没见过的错' });
+  eq(unknown.kind, 'unknown', '其它码归为未知');
+  eq(unknown.disableUser, false, '未知错误不关用户（不放大故障）');
+  eq(unknown.retry, false, '未知错误不重试');
+  ok(unknown.hint.indexOf('99999') !== -1, '原文与码都记下来');
+
+  // 连码都拿不到（云调用不可用 / 网络断）→ 走 unknown，且原文是唯一线索
+  const noCode = remind.classifySendError({ errMsg: 'connect ECONNREFUSED' });
+  eq(noCode.code, null, '拿不到码');
+  eq(noCode.kind, 'unknown', '也算未知');
+  ok(noCode.hint.indexOf('ECONNREFUSED') !== -1, '保留原文');
+});
+
+testCase('10.10 extractErrCode / scrubSecrets：错误码形状与脱敏', () => {
+  // 微信云调用的错误码可能藏在 errMsg 里，四种形状都要认得
+  eq(remind.extractErrCode({ errCode: 43101 }), 43101, 'errCode');
+  eq(remind.extractErrCode({ errcode: '47003' }), 47003, 'errcode 字符串');
+  eq(remind.extractErrCode({ data: { errcode: 40001 } }), 40001, '嵌在 data 里');
+  eq(remind.extractErrCode({ errMsg: 'errCode: 43101, errMsg: fail' }), 43101, '藏在 errMsg 文本里');
+  eq(remind.extractErrCode({ errMsg: '没有数字' }), null, '挖不到就是 null');
+  eq(remind.extractErrCode(null), null, 'null 安全');
+
+  // 脱敏：错误信息会返回给前端展示，不能把任务标题 / 用户标识带出去
+  ok(remind.scrubSecrets('access_token=abcdefghijklmn').indexOf('abcdefghijklmn') === -1, '抹掉 access_token');
+  ok(remind.scrubSecrets('touser=oABCDEFGHIJKLMN').indexOf('oABCDEFGHIJKLMN') === -1, '抹掉 touser');
+  const scrubbed = remind.scrubSecrets('argument invalid! data.thing1.value=保密标题');
+  ok(scrubbed.indexOf('保密标题') === -1, '抹掉模板内容');
+  ok(scrubbed.indexOf('thing1') !== -1, '但保留字段名（排查要用）');
+  eq(remind.scrubSecrets('普通错误，没有凭证'), '普通错误，没有凭证', '正常文本不受影响');
+});
+
+testCase('10.11 sentKeysFromRows：只有**成功**的记录算"已提醒"', () => {
+  const rows = [
+    { due_key: 'a@1', ok: true },
+    { due_key: 'b@2', ok: false, err_code: 47003 }, // 失败：用户改好模板后应该还能再发
+    { due_key: 'c@3', ok: true },
+    { due_key: '', ok: true },
+    null,
+  ];
+  const keys = remind.sentKeysFromRows(rows);
+  eq(keys.size, 2, '只收 ok:true 的 2 条');
+  ok(keys.has('a@1') && keys.has('c@3'), '成功的在里面');
+  ok(!keys.has('b@2'), '失败的**不**在里面（否则改好模板后这条提醒永远发不出去）');
+  eq(remind.sentKeysFromRows(null).size, 0, 'null 安全');
+});
+
+// --- 10.6 纯函数小件 -------------------------------------------------------
+testCase('10.12 humanizeLeft / formatDueText / truncateByCodePoint', () => {
+  eq(remind.humanizeLeft(0), '不到 1 分钟', '0 分钟');
+  eq(remind.humanizeLeft(5), '5 分钟', '分钟');
+  eq(remind.humanizeLeft(60), '1 小时', '整小时不带 0 分钟');
+  eq(remind.humanizeLeft(90), '1 小时 30 分钟', '小时 + 分钟');
+  eq(remind.humanizeLeft(1440), '1 天', '24 小时进成 1 天');
+  eq(remind.humanizeLeft(-5), '不到 1 分钟', '负数不出现"-5 分钟"');
+  eq(remind.formatDueText(bjMs('2026-10-16', '09:05')), '2026-10-16 09:05', '补零');
+  // emoji 不能被 slice 拦腰切断（半个代理对会让微信侧校验/显示出问题）
+  const emoji = '🎓🎓🎓🎓🎓';
+  eq(Array.from(remind.truncateByCodePoint(emoji, 3)).length, 3, '按码点截断');
+  eq(remind.truncateByCodePoint(emoji, 3), '🎓🎓…', 'emoji 完整保留');
+  eq(remind.truncateByCodePoint('abc', 20), 'abc', '没超长就不动它');
+});
+
+// --- 10.8 字段类型解析（微信订阅消息的 key 前缀决定类型） -------------------
+testCase('10.12b fieldTypeOf：按 key 前缀解析类型（含带下划线的多词类型）', () => {
+  // 【为什么这条单独立一个用例】类型由**前缀**决定，而前缀里有下划线
+  // （short_thing19 / character_string1）—— 用 `[a-z]+` 去切会把它们切错，
+  // 于是走错长度约束（5 字 vs 32 字），最后以 47003 的形式暴露在真机上。
+  eq(remind.fieldTypeOf('thing2'), 'thing', 'thing2 → thing');
+  eq(remind.fieldTypeOf('short_thing19'), 'short_thing', 'short_thing19 → short_thing');
+  eq(remind.fieldTypeOf('date4'), 'date', 'date4 → date');
+  eq(remind.fieldTypeOf('time2'), 'time', 'time2 → time');
+  eq(remind.fieldTypeOf('character_string1'), 'character_string', 'character_string1 → character_string');
+  eq(remind.fieldTypeOf('phrase5'), 'phrase', 'phrase5 → phrase');
+  eq(remind.fieldTypeOf('number3'), 'number', 'number3 → number');
+  eq(remind.fieldTypeOf('amount1'), 'amount', 'amount1 → amount');
+  eq(remind.fieldTypeOf('name1'), 'name', 'name1 → name');
+  eq(remind.fieldTypeOf('phone_number1'), 'phone_number', 'phone_number1 → phone_number');
+  eq(remind.fieldTypeOf('car_number1'), 'car_number', 'car_number1 → car_number');
+  eq(remind.fieldTypeOf('letter1'), 'letter', 'letter1 → letter');
+  eq(remind.fieldTypeOf('symbol1'), 'symbol', 'symbol1 → symbol');
+
+  // 各类型的长度上限（数值来自官方示例与通行规则，见代码注释里的诚实标注）
+  eq(remind.THING_MAX, 20, 'thing ≤ 20');
+  eq(remind.SHORT_THING_MAX, 5, 'short_thing ≤ 5');
+  eq(remind.PHRASE_MAX, 5, 'phrase ≤ 5');
+  eq(remind.CHARACTER_STRING_MAX, 32, 'character_string ≤ 32');
+  eq(remind.ruleForType('thing').max, 20, 'thing 规则的 max');
+  eq(remind.ruleForType('short_thing').max, 5, 'short_thing 规则的 max');
+  eq(remind.ruleForType('short_thing').allowSpace, false, 'short_thing 不允许空格');
+  eq(remind.ruleForType('thing').allowSpace, true, 'thing 允许空格');
+
+  // 未知类型：**不抛错**，按"原样 + 只限长度"处理
+  // 【为什么要直接测 ruleForType 而不是拼一个假字段名】resolveFieldMap 白名单在前，
+  // "能过白名单但类型未知"这条路径在真实调用里到不了 —— 留 ruleForType 的兜底是为了
+  // 将来有人往 FIELD_TYPE_RULES 里加类型时不会因为漏了分支而抛错。这里直接测这层兜底。
+  const unknown = remind.ruleForType('some_future_type');
+  eq(unknown.unknown, true, '未知类型被标记（调用方据此记 warning）');
+  eq(unknown.max, remind.UNKNOWN_FIELD_MAX, '未知类型给保守上限，而不是不截断');
+  eq(remind.UNKNOWN_FIELD_MAX, 5, '保守上限就是最严的 5');
+  eq(remind.ruleForType('thing').unknown, undefined, '已知类型不会被标成 unknown');
+
+  // 冷门但合法的类型（phone_number / car_number …）必须被正常接受，不能当成未知类型
+  eq(remind.fieldTypeOf('phone_number1'), 'phone_number', 'phone_number1 解析正确');
+  ok(!remind.ruleForType('phone_number').unknown, 'phone_number 是已知类型');
+  ok(!remind.ruleForType('car_number').unknown, 'car_number 是已知类型');
+  ok(!remind.ruleForType('amount').unknown, 'amount 是已知类型');
+  const cold = remind.buildMessageData(
+    { title: '提交实验报告', type: 'ddl' }, bjMs('2026-09-28', '12:00'),
+    { thing1: 'title', phone_number1: 'title' }, { now: bjMs('2026-09-28', '12:00') }
+  );
+  eq(Object.keys(cold.data).sort(), ['phone_number1', 'thing1'], '冷门类型字段照样产出，不抛错');
+  eq(cold.warnings, [], '冷门但合法的类型不该产生警告');
+  // 每个类型都有自己的上限，逐条对一遍（数值错了就会在真机上以 47003 暴露）
+  eq(remind.ruleForType('character_string').max, 32, 'character_string ≤ 32');
+  eq(remind.ruleForType('number').max, 32, 'number ≤ 32');
+  eq(remind.ruleForType('amount').max, 12, 'amount ≤ 12');
+  eq(remind.ruleForType('name').max, 10, 'name ≤ 10');
+  eq(remind.ruleForType('car_number').max, 8, 'car_number ≤ 8');
+  eq(remind.ruleForType('letter').max, 6, 'letter ≤ 6');
+  eq(remind.ruleForType('symbol').max, 5, 'symbol ≤ 5');
+});
+
+// --- 10.9 端到端（内存假数据库 + 打桩出口） --------------------------------
+
+// --- 10.7 端到端（内存假数据库 + 打桩出口） --------------------------------
+/**
+ * 造一份"开好了提醒"的假库。
+ *
+ * @param {object} cfg { tasks, quota, leadMin, enabled, reminders }
+ */
+function remindWorld(cfg) {
+  const c = cfg || {};
+  const db = createFakeDb({
+    settings: [Object.assign({
+      _openid: 'me',
+      remind_enabled: c.enabled === undefined ? true : c.enabled,
+      remind_quota: c.quota === undefined ? 3 : c.quota,
+      lead_min: c.leadMin === undefined ? 60 : c.leadMin,
+    })],
+    tasks: c.tasks || [],
+  });
+  db.store.reminders = c.reminders || []; // 幂等记录表（集合名与云函数里的常量一致）
+  return db;
+}
+
+/** 打桩发送出口：把每次"发出去什么"记下来，并返回调用方指定的结果 */
+function stubSender(outcomes) {
+  const calls = [];
+  const queue = Array.isArray(outcomes) ? outcomes.slice() : [{ ok: true }];
+  const fn = async (openid, templateId, page, data) => {
+    calls.push({ openid, templateId, page, data });
+    const next = queue.length > 1 ? queue.shift() : queue[0];
+    return Object.assign({ ok: true, errCode: null, errMsg: '', raw: null }, next || {});
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+/** 跑一轮扫描（固定 now，注入模板 ID 与打桩出口） */
+async function runScan(db, sender, extra) {
+  const realSend = remind.sendSubscribeMessage;
+  remind.sendSubscribeMessage = sender;
+  try {
+    return await remind.actionScan(db, '', {}, Object.assign({
+      now: R_NOW,
+      env: { REMIND_TEMPLATE_ID: 'TPL-TEST-0001', REMIND_PAGE: '/pages/tasks/tasks' },
+    }, extra || {}));
+  } finally {
+    remind.sendSubscribeMessage = realSend;
+  }
+}
+
+testCaseAsync('10.13 端到端：发一条 → 扣额度 → 第二遍不再发（幂等）', async () => {
+  const dueAt = R_NOW + 5 * MIN;
+  const db = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'tk1', title: '交实验报告' })] });
+  const sender = stubSender([{ ok: true }]);
+
+  const first = await runScan(db, sender);
+  eq(first.ok, true, '第一轮成功');
+  eq(first.scanned, 1, '扫了 1 个开了提醒的用户');
+  eq(first.sent, 1, '发了 1 条');
+  eq(first.failed, 0, '没有失败');
+  eq(first.errors, [], 'errors 为空');
+  eq(sender.calls.length, 1, '真的调了下发出口');
+  eq(sender.calls[0].openid, 'me', '发给谁');
+  eq(sender.calls[0].templateId, 'TPL-TEST-0001', '模板 ID 从环境变量来（前端不硬编码）');
+  eq(sender.calls[0].page, '/pages/tasks/tasks', '跳转页');
+  eq(sender.calls[0].data.thing2.value, '交实验报告（还剩5分钟）', '模板 data 里的标题（带还剩多久的尾巴）');
+  eq(sender.calls[0].data.date4.value, remind.formatDateFieldText(dueAt), 'date4 是截止时刻（年月日形状）');
+  eq(sender.calls[0].data.short_thing19.value, '截止', 'short_thing19 是任务类别');
+  eq(db.store.settings[0].remind_quota, 2, '发一条扣一条额度');
+  eq(db.store.reminders.length, 1, '落了一条已发记录');
+  eq(db.store.reminders[0].ok, true, '记的是成功');
+  eq(db.store.reminders[0].due_key, `tk1@${bjDay(dueAt)} ${bjClock(dueAt)}`, '记的键就是幂等键');
+  eq(db.store.reminders[0]._openid, 'me', '记录带 _openid（服务端显式写入）');
+
+  // 第二遍：同一批任务、同一个 now —— 幂等必须生效
+  const second = await runScan(db, sender);
+  eq(second.sent, 0, '第二遍 sent 必须为 0');
+  eq(second.skipped_reasons.already_sent, 1, '唯一的候选被记为 already_sent');
+  eq(sender.calls.length, 1, '没有第二次下发调用');
+  eq(db.store.settings[0].remind_quota, 2, '额度没有再被扣');
+  eq(db.store.reminders.length, 1, '没有重复落记录');
+});
+
+testCaseAsync('10.14 额度：quota=0 不发送；quota=1 发一条后变 0，第二条被跳过', async () => {
+  // ① quota = 0：**绝不能**调用下发接口（调了会把用户的授权打穿）
+  const zeroDue = R_NOW + 5 * MIN;
+  const dbZero = remindWorld({ quota: 0, tasks: [ddlAt(zeroDue, { _id: 'z1' })] });
+  const senderZero = stubSender([{ ok: true }]);
+  const rZero = await runScan(dbZero, senderZero);
+  eq(senderZero.calls.length, 0, 'quota=0 时一次都没调微信');
+  eq(rZero.sent, 0, 'sent 为 0');
+  eq(rZero.skipped_reasons.no_quota, 1, '如实记成 no_quota');
+  eq(rZero.failed, 0, '这不算失败（是预期内的额度用完）');
+  eq(dbZero.store.settings[0].remind_quota, 0, '额度没被扣成负数');
+  eq(dbZero.store.reminders.length, 0, '不发送就不落"已发"记录（下次还有机会）');
+
+  // ② quota = 1，两条候选：发第一条，第二条因额度耗尽被跳过
+  const dbOne = remindWorld({
+    quota: 1,
+    tasks: [ddlAt(R_NOW + 5 * MIN, { _id: 'q1' }), ddlAt(R_NOW + 10 * MIN, { _id: 'q2' })],
+  });
+  const senderOne = stubSender([{ ok: true }]);
+  const rOne = await runScan(dbOne, senderOne);
+  eq(rOne.sent, 1, '只发出去 1 条');
+  eq(senderOne.calls.length, 1, '只调了一次微信');
+  eq(senderOne.calls[0].data.thing2.value.indexOf('任务') === 0, true, '发的是最急的那条');
+  eq(rOne.skipped_reasons.no_quota, 1, '第二条记 no_quota');
+  eq(dbOne.store.settings[0].remind_quota, 0, '额度归零');
+  eq(dbOne.store.reminders.length, 1, '只落一条记录');
+});
+
+testCaseAsync('10.15 43101：用户拒收 → 关掉该用户的提醒、不抛异常、错误可读', async () => {
+  const dueAt = R_NOW + 5 * MIN;
+  const db = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'r1' })] });
+  const sender = stubSender([{ ok: false, errCode: 43101, errMsg: 'user refuse to accept the msg' }]);
+
+  const result = await runScan(db, sender); // 不抛异常就是通过（抛了会被 testCaseAsync 记成失败）
+  eq(result.ok, true, '整轮不炸');
+  eq(result.sent, 0, '没发成功');
+  eq(result.failed, 1, '记了 1 条失败');
+  ok(result.errors.length === 1, 'errors 里有 1 条');
+  ok(result.errors[0].indexOf('43101') !== -1, '错误里能看出是 43101');
+  eq(db.store.settings[0].remind_enabled, false, '已把该用户的提醒关掉（否则每 5 分钟白跑一次）');
+  ok(String(db.store.settings[0].remind_disabled_reason).indexOf('43101') !== -1, '关掉的原因写进库里，用户问起来有据可查');
+  eq(db.store.reminders.length, 1, '失败也落记录');
+  eq(db.store.reminders[0].ok, false, '记的是 failed');
+  eq(db.store.reminders[0].err_code, 43101, '记下错误码');
+
+  // 关掉之后下一轮不该再扫这个人（连查任务都省了）
+  const sender2 = stubSender([{ ok: true }]);
+  const second = await runScan(db, sender2);
+  eq(second.scanned, 0, '被关掉的用户不再被扫描');
+  eq(sender2.calls.length, 0, '不会再打扰微信');
+
+  // 用户重新授权后应能再收到这条提醒：失败记录**不能**算作"已提醒"
+  db.store.settings[0].remind_enabled = true;
+  db.store.settings[0].remind_quota = 1;
+  const sender3 = stubSender([{ ok: true }]);
+  const third = await runScan(db, sender3);
+  eq(third.sent, 1, '重新授权后这条提醒还能发出去（失败记录不挡幂等）');
+});
+
+testCaseAsync('10.16 47003：错误里能看出是模板字段问题', async () => {
+  const db = remindWorld({ quota: 3, tasks: [ddlAt(R_NOW + 5 * MIN, { _id: 'f1' })] });
+  const sender = stubSender([{
+    ok: false,
+    errCode: 47003,
+    errMsg: 'argument invalid! data.thing3.value invalid rid: xxxxx',
+  }]);
+
+  const result = await runScan(db, sender);
+  eq(result.ok, true, '整轮不炸');
+  eq(result.failed, 1, '记了失败');
+  const text = result.errors.join(' | ');
+  ok(text.indexOf('47003') !== -1, '错误里带 47003');
+  ok(text.indexOf('REMIND_FIELD_MAP') !== -1, '提示去核对字段映射');
+  eq(db.store.settings[0].remind_enabled, true, '47003 是配置问题，**不**关用户的提醒');
+  eq(db.store.reminders[0].err_code, 47003, '失败也留痕，便于事后排查');
+
+  // ===== 核心：47003 必须能自证"哪个字段、发了什么值" =====
+  // 模板字段的长度/格式约束是平台侧规则，本地无法完全预演 —— 这条留痕是唯一的自证手段。
+  const record = db.store.reminders[0];
+  const recordText = String(record.error);
+  ok(recordText.indexOf('thing2=') !== -1, '失败记录里有 thing2 的字段名');
+  ok(recordText.indexOf('date4=') !== -1, '失败记录里有 date4 的字段名');
+  ok(recordText.indexOf('short_thing19=') !== -1, '失败记录里有 short_thing19 的字段名');
+  ok(recordText.indexOf('任务（还剩5分钟）') !== -1, '失败记录里带上**实际发出去的值**（这才是线索）');
+  ok(recordText.indexOf('2026年') !== -1, '日期字段的值也在（能看出格式对不对）');
+  ok(recordText.indexOf('本次发出的字段与值') !== -1, '并且明确标出这一段是什么');
+
+  // 结构化留痕：逐字段列出，控制台里好核对
+  ok(Array.isArray(record.sent_fields), 'sent_fields 是数组');
+  eq(record.sent_fields.map((f) => `${f.key}:${f.type}`),
+    ['thing2:thing', 'date4:date', 'short_thing19:short_thing'], 'sent_fields 含 key 与类型');
+  eq(record.sent_fields[0].value, '任务（还剩5分钟）', 'sent_fields 含最终值');
+
+  // 安全：不能把 openid 明文或任何密钥带进失败记录 / 错误返回
+  // 【注意断言的写法】不能简单找 'me' 子串 —— 任务标题默认就是"任务"，
+  // 而 'me' 会撞上英文单词。这里直接找"身份字段"的形状。
+  ok(recordText.indexOf('openid') === -1 && recordText.indexOf('_openid') === -1,
+    '失败记录文本里不出现身份字段名，更不会有它的值');
+  ok(recordText.indexOf('Tie4p47PRO5I8cuu8LktzXgjgfvTJL4HrkAXiZwHY2s') === -1, '失败记录里不含真实模板 ID 之外的任何密钥');
+  ok(recordText.indexOf('access_token') === -1, '不含凭证字段');
+  ok(String(record._openid) === 'me', 'openid 只出现在 _openid 字段（那是必需的归属字段，不是日志文本）');
+  ok(text.indexOf('openid=me') === -1 && text.indexOf('_openid') === -1, '错误文本里不拼 openid');
+  // 错误返回里也带上字段与值，用户在控制台点一次测试就能看到
+  ok(text.indexOf('thing2=') !== -1, 'scan 的 errors 里同样带字段与值');
+});
+
+testCaseAsync('10.16b actionTest 的 47003 失败也能自证：返回与记录里都有字段与值', async () => {
+  const deps = { env: { REMIND_TEMPLATE_ID: 'TPL-REAL' }, now: R_NOW };
+  const realSend = remind.sendSubscribeMessage;
+  try {
+    const db = remindWorld({ quota: 2, tasks: [] });
+    remind.sendSubscribeMessage = stubSender([{
+      ok: false,
+      errCode: 47003,
+      errMsg: 'argument invalid! data.date4.value invalid rid: abcdef',
+    }]);
+    const failed = await remind.actionTest(db, 'me', {}, deps);
+    eq(failed.ok, false, '如实报失败');
+    ok(failed.error.indexOf('thing2=') !== -1, '失败返回里带 thing2 的值');
+    ok(failed.error.indexOf('date4=') !== -1, '并且带 date4 的值（模板字段对照全靠它）');
+    ok(/^\d{4}年\d{1,2}月\d{1,2}日/.test(String(failed.error).split('date4=')[1] || ''), 'date4 的值是年月日形状');
+
+    const record = db.store.reminders[0];
+    eq(record.ok, false, '失败记录');
+    eq(record.type, 'test', '标明是测试');
+    ok(String(record.error).indexOf('date4=') !== -1, '记录里也有字段与值');
+    ok(Array.isArray(record.sent_fields) && record.sent_fields.length === 3, 'sent_fields 三个字段都在');
+  } finally {
+    remind.sendSubscribeMessage = realSend;
+  }
+});
+
+testCaseAsync('10.17 未配模板：不扫描、不下发，并说清原因', async () => {
+  const db = remindWorld({ quota: 3, tasks: [ddlAt(R_NOW + 5 * MIN, { _id: 'n1' })] });
+  const sender = stubSender([{ ok: true }]);
+  const result = await runScan(db, sender, { env: {} }); // 环境变量里没有模板 ID
+
+  eq(result.ok, false, '如实返回不作为');
+  ok(result.error.indexOf('REMIND_TEMPLATE_ID') !== -1, '说清是缺哪个环境变量');
+  eq(sender.calls.length, 0, '没配模板时不去调用微信（避免无谓的失败日志）');
+  eq(result.scanned, 0, '连用户表都没扫');
+  eq(db.store.settings[0].remind_quota, 3, '额度没被动过');
+});
+
+testCaseAsync('10.18 单个用户失败不中断整轮：坏用户之后的好用户照样收到', async () => {
+  const dueAt = R_NOW + 5 * MIN;
+  const db = createFakeDb({
+    settings: [
+      { _openid: 'bad', remind_enabled: true, remind_quota: 2, lead_min: 60 },
+      { _openid: 'good', remind_enabled: true, remind_quota: 2, lead_min: 60 },
+    ],
+    tasks: [ddlAt(dueAt, { _id: 'g1', _openid: 'good', title: '好用户的任务' })],
+  });
+  db.store.reminders = [];
+  // 让第一个用户的查询抛错（删掉他的集合入口 → 用 get 抛错的桩不好做，
+  // 这里改成：损坏 bad 用户那条任务数据之后仍然要能继续 —— 用"读库抛错"的桩更直接）
+  const realCollection = db.collection;
+  let firstTasksRead = true;
+  db.collection = (name) => {
+    const col = realCollection(name);
+    if (name === 'tasks' && firstTasksRead) {
+      firstTasksRead = false;
+      return Object.assign({}, col, {
+        where() { throw new Error('模拟某个用户读库失败'); },
+      });
+    }
+    return col;
+  };
+
+  const sender = stubSender([{ ok: true }]);
+  const result = await runScan(db, sender);
+  eq(result.failed, 1, '坏用户记 1 条失败');
+  ok(result.errors.join(' ').indexOf('模拟某个用户读库失败') !== -1, '失败原因如实带出来');
+  eq(result.sent, 1, '排在后面的好用户照样收到（整轮没被打断）');
+  eq(sender.calls.length, 1, '下发出口被调了一次');
+  eq(sender.calls[0].data.thing2.value.indexOf('好用户的任务') !== -1, true, '发的确实是好用户那条');
+});
+
+testCaseAsync('10.19 actionStatus：没配模板 → ready=false 且理由是**人话**；配了就把 template_id 透出来', async () => {
+  const db = remindWorld({ quota: 2, tasks: [] });
+
+  // ① 没配模板
+  const notReady = await remind.actionStatus(db, 'me', { env: {} });
+  eq(notReady.ok, true, 'status 本身是成功的');
+  eq(notReady.ready, false, '没配模板 → 不能发');
+  eq(notReady.template_id, '', 'template_id 为空（前端据此判断"服务端没配"）');
+  ok(/[\u4e00-\u9fa5]/.test(notReady.ready_reason), 'ready_reason 是中文人话');
+  ok(notReady.ready_reason.indexOf('REMIND_TEMPLATE_ID') !== -1, '并且指出缺哪个环境变量（照着做就能修）');
+
+  // ② 配了模板、开着、有额度
+  const ready = await remind.actionStatus(db, 'me', { env: { REMIND_TEMPLATE_ID: 'TPL-9' } });
+  eq(ready.ready, true, '三个条件都满足 → ready');
+  eq(ready.template_id, 'TPL-9', 'template_id 必须透出来（前端靠它弹授权窗，不硬编码）');
+  eq(ready.enabled, true, '开关状态');
+  eq(ready.quota, 2, '剩余可下发次数');
+  eq(ready.lead_min, 60, '提前量');
+  eq(ready.page, remind.DEFAULT_PAGE, '没配 REMIND_PAGE 时用默认页');
+  ok(ready.lead_options.indexOf(1440) !== -1, '把允许的提前量一并给前端（前端不用自己写死选项）');
+
+  // ③ 模板配了但额度为 0 → 仍要提醒用户"去补授权"
+  const empty = await remind.actionStatus(remindWorld({ quota: 0 }), 'me', { env: { REMIND_TEMPLATE_ID: 'TPL-9' } });
+  eq(empty.ready, false, '没额度 → 发不出去');
+  ok(empty.ready_reason.indexOf('授权') !== -1, '理由说的是"授权"这件事');
+  ok(empty.ready_reason.indexOf('一次性订阅') !== -1, '并解释一次性订阅的规则（用户看得懂为什么）');
+
+  // ④ 开关关着
+  const off = await remind.actionStatus(remindWorld({ enabled: false }), 'me', { env: { REMIND_TEMPLATE_ID: 'TPL-9' } });
+  eq(off.ready, false, '开关关着 → not ready');
+  ok(off.ready_reason.indexOf('开启') !== -1, '理由指向"去打开开关"');
+
+  // ⑤ 从没配过的用户（settings 里没有这一行）也不能炸
+  const blank = await remind.actionStatus(createFakeDb({ settings: [], tasks: [] }), 'nobody', { env: { REMIND_TEMPLATE_ID: 'TPL-9' } });
+  eq(blank.ok, true, '没有 settings 行也返回成功');
+  eq(blank.enabled, false, '默认关闭（绝不默认给没授权的人发消息）');
+  eq(blank.quota, 0, '默认 0 条额度');
+  eq(blank.lead_min, remind.DEFAULT_LEAD_MIN, '默认提前量');
+});
+
+testCaseAsync('10.20 actionConfig：非法 lead_min 被拒绝并给出允许列表', async () => {
+  const db = remindWorld({ quota: 1, leadMin: 60, tasks: [] });
+  const deps = { env: { REMIND_TEMPLATE_ID: 'TPL-9' } };
+
+  // 非法值一律拒绝（**不静默改成默认值** —— 那会让用户以为设置生效了）
+  for (const bad of [17, 0, -30, 1441, 'soon', null]) {
+    const r = await remind.actionConfig(db, 'me', { lead_min: bad }, deps);
+    eq(r.ok, false, `lead_min=${JSON.stringify(bad)} 必须被拒绝`);
+    ok(r.error.indexOf('15') !== -1 && r.error.indexOf('1440') !== -1, '错误里列出允许值');
+  }
+  eq(db.store.settings[0].lead_min, 60, '被拒绝时不改库（原值 60 还在）');
+
+  // 合法值写进去
+  const okLead = await remind.actionConfig(db, 'me', { lead_min: 30 }, deps);
+  eq(okLead.ok, true, '30 合法');
+  eq(db.store.settings[0].lead_min, 30, '写进库了');
+  eq(okLead.lead_min, 30, '返回里也告诉前端生效值');
+
+  // enabled 必须是布尔
+  eq((await remind.actionConfig(db, 'me', { enabled: 'yes' }, deps)).ok, false, 'enabled 传字符串被拒绝');
+  const off = await remind.actionConfig(db, 'me', { enabled: false }, deps);
+  eq(off.ok, true, '关掉是合法的');
+  eq(db.store.settings[0].remind_enabled, false, '库里关掉了');
+  eq((await remind.actionConfig(db, 'me', {}, deps)).ok, false, '什么都没给 → 拒绝（不白写一次库）');
+});
+
+testCaseAsync('10.21 actionAck：count 超过 3 被拒绝；合法时累加并开启提醒', async () => {
+  const deps = { env: { REMIND_TEMPLATE_ID: 'TPL-9' } };
+
+  // ① 越界 / 非整数一律拒绝（否则改过的客户端能把自己刷成无限额度）
+  const db = remindWorld({ quota: 0, enabled: false, tasks: [] });
+  for (const bad of [0, 4, 10, -1, 1.5, '3', null]) {
+    const r = await remind.actionAck(db, 'me', { count: bad }, deps);
+    eq(r.ok, false, `count=${JSON.stringify(bad)} 必须被拒绝`);
+    ok(r.error.indexOf('3') !== -1, '错误里说明上限是 3');
+  }
+  eq(db.store.settings[0].remind_quota, 0, '被拒绝时额度纹丝不动');
+  eq(db.store.settings[0].remind_enabled, false, '被拒绝时开关也不动');
+
+  // 特别地：字符串 "3" 也必须被拒绝（ack 是唯一能给额度加数的入口，只认数字）
+  const strCount = await remind.actionAck(db, 'me', { count: '3' }, deps);
+  eq(strCount.ok, false, 'count 传字符串 "3" 也要拒绝（不允许静默转成数字）');
+  ok(strCount.error.indexOf('数字') !== -1, '错误文案说清要的是数字');
+
+  // ② 合法：+2，并且顺手打开开关
+  const ack2 = await remind.actionAck(db, 'me', { count: 2 }, deps);
+  eq(ack2.ok, true, 'count=2 合法');
+  eq(ack2.quota, 2, '额度 = 2');
+  eq(ack2.added, 2, '实际加上 2');
+  eq(db.store.settings[0].remind_enabled, true, 'ack 成功即视为用户已授权 → 打开开关');
+  eq(db.store.settings[0].remind_quota, 2, '库里也是 2');
+
+  // ③ 不传 count 默认 +1
+  eq((await remind.actionAck(db, 'me', {}, deps)).quota, 3, '缺省 count = 1');
+
+  // ④ 封顶：反复授权不能无限攒（否则变成骚扰）
+  const dbCap = remindWorld({ quota: 9, tasks: [] });
+  const capped = await remind.actionAck(dbCap, 'me', { count: 3 }, deps);
+  eq(remind.MAX_QUOTA, 10, '总额上限 10');
+  eq(capped.quota, 10, '封顶到 10');
+  eq(capped.capped, true, '如实告诉前端"被截断了"（不是加满了 3）');
+  eq(capped.added, 1, '实际只加上 1');
+
+  // ⑤ ack 里也能顺手改提前量，但同样走白名单
+  const dbLead = remindWorld({ quota: 0, tasks: [] });
+  eq((await remind.actionAck(dbLead, 'me', { count: 1, lead_min: 7 }, deps)).ok, false, 'ack 里的非法 lead_min 也要拒绝');
+  eq((await remind.actionAck(dbLead, 'me', { count: 1, lead_min: 1440 }, deps)).ok, true, '合法 lead_min 一起写');
+  eq(dbLead.store.settings[0].lead_min, 1440, '提前量写进去了');
+});
+
+testCaseAsync('10.22 actionTest：测试下发默认不消耗额度，失败时给出排查线索', async () => {
+  const deps = { env: { REMIND_TEMPLATE_ID: 'TPL-9', REMIND_PAGE: '/pages/me/me' }, now: R_NOW };
+  const realSend = remind.sendSubscribeMessage;
+  try {
+    // ① 成功且不消耗额度
+    const db = remindWorld({ quota: 2, tasks: [] });
+    const sender = stubSender([{ ok: true }]);
+    remind.sendSubscribeMessage = sender;
+    const sent = await remind.actionTest(db, 'me', {}, deps);
+    eq(sent.ok, true, '测试发送成功');
+    eq(sent.sent, true, 'sent=true');
+    eq(sent.quota_consumed, false, '默认**不**消耗额度（配置阶段不该把额度试光）');
+    eq(sent.quota, 2, '额度没变');
+    eq(db.store.settings[0].remind_quota, 2, '库里也没变');
+    eq(sender.calls.length, 1, '确实调了下发出口');
+    eq(sender.calls[0].templateId, 'TPL-9', '用环境变量里的模板');
+    eq(sender.calls[0].page, '/pages/me/me', '用配置的跳转页');
+    // preview 回的就是真发出去的 data —— 字段对不上时前端拿它逐字对照
+    eq(sent.preview, sender.calls[0].data, 'preview 与真发的 data 一致');
+    ok(sent.preview.thing2.value.indexOf('测试') !== -1, 'data 里能看出是测试消息');
+    ok(sent.preview.thing2.value.indexOf('还剩') !== -1, '标题里带"还剩多久"的尾巴');
+    ok(/^\d{4}年\d{1,2}月\d{1,2}日/.test(sent.preview.date4.value), 'date4 是年月日形状');
+    eq(sent.preview.short_thing19.value, '截止', 'short_thing19 是类别');
+    // 留痕明细同样回给调用方（比 preview 更适合逐条对照模板）
+    eq(sent.fields.map((f) => `${f.slot}:${f.key}:${f.type}`),
+      ['title:thing2:thing', 'due:date4:date', 'category:short_thing19:short_thing'], 'fields 留痕齐全');
+    ok(sent.fields_text.indexOf('thing2=') !== -1, 'fields_text 一行可读');
+
+    // ② 显式要求走真实扣减路径
+    const db2 = remindWorld({ quota: 2, tasks: [] });
+    const sender2 = stubSender([{ ok: true }]);
+    remind.sendSubscribeMessage = sender2;
+    const consumed = await remind.actionTest(db2, 'me', { consume_quota: true }, deps);
+    eq(consumed.quota_consumed, true, 'consume_quota=true 时如实说消耗了');
+    eq(db2.store.settings[0].remind_quota, 1, '扣了 1 条');
+
+    // ③ 额度为 0 又要消耗 → 在调用微信**之前**就中止
+    const db3 = remindWorld({ quota: 0, tasks: [] });
+    const sender3 = stubSender([{ ok: true }]);
+    remind.sendSubscribeMessage = sender3;
+    const noQuota = await remind.actionTest(db3, 'me', { consume_quota: true }, deps);
+    eq(noQuota.ok, false, '如实拒绝');
+    eq(sender3.calls.length, 0, '没额度就不去调微信');
+
+    // ④ 模板字段不对 → 失败原因必须能指导排查，并留痕
+    const db4 = remindWorld({ quota: 2, tasks: [] });
+    remind.sendSubscribeMessage = stubSender([{ ok: false, errCode: 47003, errMsg: 'data.date4.value invalid' }]);
+    const bad = await remind.actionTest(db4, 'me', {}, deps);
+    eq(bad.ok, false, '如实报失败');
+    ok(bad.error.indexOf('47003') !== -1, '带上错误码');
+    ok(bad.error.indexOf('REMIND_FIELD_MAP') !== -1, '指向该改哪里');
+    ok(bad.error.indexOf('date4=') !== -1, '并且带上"哪个字段、发了什么值"（否则用户无从下手）');
+    eq(db4.store.reminders.length, 1, '测试失败也留痕（这正是排查最需要的线索）');
+    eq(db4.store.reminders[0].type, 'test', '记录标明是测试');
+
+    // ⑤ 没配模板时不去调微信
+    const db5 = remindWorld({ quota: 2, tasks: [] });
+    const sender5 = stubSender([{ ok: true }]);
+    remind.sendSubscribeMessage = sender5;
+    const noTpl = await remind.actionTest(db5, 'me', {}, { env: {} });
+    eq(noTpl.ok, false, '没配模板 → 拒绝');
+    eq(sender5.calls.length, 0, '不去调微信');
+  } finally {
+    remind.sendSubscribeMessage = realSend;
+  }
+});
+
+testCaseAsync('10.23 handleAction：无 action 当 scan；未知 action 报错并列出支持项', async () => {
+  const db = remindWorld({ quota: 1, tasks: [ddlAt(R_NOW + 5 * MIN, { _id: 'h1' })] });
+  const sender = stubSender([{ ok: true }]);
+  const realSend = remind.sendSubscribeMessage;
+  remind.sendSubscribeMessage = sender;
+  try {
+    const deps = { now: R_NOW, env: { REMIND_TEMPLATE_ID: 'TPL-9' } };
+    // 定时触发器塞进来的 event 没有 action（甚至是 {}）—— 两种都必须当 scan
+    const asEmpty = await remind.handleAction(db, '', {}, deps);
+    eq(asEmpty.ok, true, '{} 当 scan');
+    eq(asEmpty.sent, 1, '并且真的发了');
+    const asTimerShape = await remind.handleAction(db, '', { Type: 'Timer', TriggerName: 'remindScan' }, deps);
+    eq(asTimerShape.ok, true, '定时器形状的 event 也当 scan');
+    eq(asTimerShape.sent, 0, '同一批任务第二遍不再发（幂等）');
+
+    // 未知 action：要说清支持哪些，别让人猜
+    const unknown = await remind.handleAction(db, 'me', { action: 'nope' }, deps);
+    eq(unknown.ok, false, '未知 action → 失败');
+    ok(unknown.error.indexOf('status') !== -1 && unknown.error.indexOf('ack') !== -1, '列出支持的 action');
+
+    // 个人动作必须有身份（定时器没有 openid，但 status 这种必须要有）
+    const noUser = await remind.handleAction(db, '', { action: 'status' }, deps);
+    eq(noUser.ok, false, '没有身份不能读个人配置');
+
+    // 身份类字段被显式丢弃（前端伪造 _openid 无效）
+    const forged = await remind.handleAction(db, 'me', { action: 'status', _openid: 'someone-else' }, deps);
+    eq(forged.ok, true, '伪造身份不影响调用');
+    eq(forged.quota, 0, '读到的仍是自己的额度（第一轮已把 1 条用掉）');
+
+    // db 不可用
+    eq((await remind.handleAction(null, 'me', { action: 'status' }, deps)).ok, false, 'db 不可用 → 如实报错');
+  } finally {
+    remind.sendSubscribeMessage = realSend;
+  }
+});
+
+testCaseAsync('10.24 scan 返回结构完整（前端/日志靠它排查）', async () => {
+  const db = remindWorld({
+    quota: 3,
+    tasks: [
+      ddlAt(R_NOW + 5 * MIN, { _id: 's1', title: '要发的' }),
+      ddlAt(R_NOW + 5 * MIN, { _id: 's2', title: '要发的2' }),
+      ddlAt(R_NOW + 5 * MIN, { _id: 's3', title: '要发的3' }),
+      ddlAt(R_NOW + 5 * MIN, { _id: 's4', title: '被截断的' }), // 超过 MAX_PER_SCAN
+      ddlAt(R_NOW + 200 * MIN, { _id: 's5' }), // 还早
+      makeTask({ _id: 's6', type: 'event', date: bjDay(R_NOW), start_time: '10:05' }), // 非 ddl
+    ],
+  });
+  const sender = stubSender([{ ok: true }]);
+  const result = await runScan(db, sender);
+
+  eq(result.ok, true, 'ok');
+  eq(result.scanned, 1, 'scanned = 用户数');
+  eq(result.sent, 3, 'sent = 真发出去几条（MAX_PER_SCAN 封顶）');
+  eq(result.sent + result.skipped + result.failed > result.sent, true, 'skipped/failed 也都有数');
+  eq(result.skipped_reasons.over_scan_limit, 1, '第 4 条最急的被 over_scan_limit');
+  eq(result.skipped_reasons.too_early, 1, '还早的那条 too_early');
+  eq(result.skipped_reasons.no_due_instant, 1, '非 ddl 那条 no_due_instant');
+  eq(result.failed, 0, '没有失败');
+  eq(result.lead_min, 60, '返回里说明本轮用的提前量');
+  ok(typeof result.now === 'string' && result.now.indexOf('+08:00') !== -1, 'now 是北京时间字符串（日志可读）');
+  eq(result.warnings, [], '默认字段映射不产生配置警告');
+  eq(result.details.length, 3, 'details 里逐条留痕');
+  ok(result.details.every((d) => d.action === 'sent'), '三条都是 sent');
+});
+
+testCaseAsync('10.25 scan：REMIND_FIELD_MAP 生效（换模板字段名不改代码）', async () => {
+  const dueAt = R_NOW + 5 * MIN;
+  const db = remindWorld({ quota: 2, tasks: [ddlAt(dueAt, { _id: 'fm1', title: '换模板也要能发' })] });
+  const sender = stubSender([{ ok: true }]);
+  const result = await runScan(db, sender, {
+    env: {
+      REMIND_TEMPLATE_ID: 'TPL-2',
+      REMIND_FIELD_MAP: '{"thing5":"title","time6":"due"}',
+    },
+  });
+
+  eq(result.sent, 1, '发了');
+  eq(Object.keys(sender.calls[0].data).sort(), ['thing5', 'time6'], 'data 的键按环境变量映射来');
+  eq(sender.calls[0].data.thing5.value, '换模板也要能发（还剩5分钟）', 'thing5 拿标题（带尾巴）');
+  eq(sender.calls[0].data.time6.value, remind.formatDateFieldText(dueAt), 'time6 拿时刻（time 类也是年月日形状）');
+  eq(result.warnings, [], '合法映射没有警告');
+
+  // 写坏的映射：回退默认 + 警告（功能不整体挂掉）
+  const db2 = remindWorld({ quota: 2, tasks: [ddlAt(dueAt, { _id: 'fm2' })] });
+  const sender2 = stubSender([{ ok: true }]);
+  const result2 = await runScan(db2, sender2, {
+    env: { REMIND_TEMPLATE_ID: 'TPL-2', REMIND_FIELD_MAP: '{坏 JSON' },
+  });
+  eq(result2.sent, 1, '坏映射也照样发（用默认映射兜底）');
+  ok(result2.warnings.length === 1, '但把问题明确告诉调用方');
+  ok(result2.warnings[0].indexOf('REMIND_FIELD_MAP') !== -1, 'warning 点名字段映射');
+  eq(Object.keys(sender2.calls[0].data).sort(), Object.keys(remind.DEFAULT_FIELD_MAP).sort(), '用的是默认字段');
 });
 
 // ===========================================================================

@@ -68,8 +68,9 @@
 
         <!-- 5.2 一天一行：左列节次名 + 时间；右列 7 格任务 -->
         <!-- rowIndex 很关键：day.cells 与 rows 同下标（同一下标 = 同一行），不能拿 dayIndex 去取 -->
+        <!-- fallback-row：「其他时段」兜底行，固定在表头正下方第一行（不然要滑到底才看得到） -->
         <view
-          class="board-row {{row.isBreak ? 'break-row' : ''}}"
+          class="board-row {{row.isBreak ? 'break-row' : ''}} {{row.isFallback ? 'fallback-row' : ''}}"
           wx:for="{{rows}}"
           wx:for-item="row"
           wx:for-index="rowIndex"
@@ -87,11 +88,17 @@
             wx:for-index="dayIndex"
             wx:key="date"
           >
+            <!-- 「其他时段」这一行右侧的灰字说明：只在该行有任务时显示，免得白占地方 -->
+            <text
+              class="fallback-hint"
+              wx:if="{{row.isFallback && day.cells[rowIndex].tasks.length}}"
+            >未落在课节内的时间</text>
             <!-- 同一行落在同一天的多条任务：竖着排（各占满一整格宽），不会互相覆盖 -->
             <!-- 连堂的卡片带 blockStyle：高度 = 跨的节数 × 行高 − 间隙；
                  卡片仍是"只画在起始行"这一张，靠高度盖住它跨过的后面几行 -->
+            <!-- 三种类型用不同底色 + 角标颜色区分：程=日程 / 止=截止 / 务=子任务 -->
             <view
-              class="chip {{task.isDdl ? 'chip-ddl' : ''}} {{task.done ? 'chip-done' : ''}} {{task.highPriority ? 'chip-high' : ''}} {{task.isBlock ? 'chip-block' : ''}}"
+              class="chip {{task.isDdl ? 'chip-ddl' : ''}} {{task.isSubtask ? 'chip-sub' : ''}} {{task.done ? 'chip-done' : ''}} {{task.highPriority ? 'chip-high' : ''}} {{task.isBlock ? 'chip-block' : ''}}"
               style="{{task.blockStyle}}"
               wx:for="{{day.cells[rowIndex].tasks}}"
               wx:for-item="task"
@@ -115,7 +122,24 @@
     <!-- 5.3 底部按钮：新增（不带 id 进编辑页 = 新增） -->
     <view class="footer">
       <view class="add-btn" hover-class="add-btn-hover" bindtap="onTapAdd">添加任务</view>
-      <text class="footer-tip">午休等空档行不计入「空闲 N 节」</text>
+      <!-- 图例：三种类型靠角标字与底色区分，不写出来用户只能猜 -->
+      <view class="legend">
+        <view class="legend-item">
+          <text class="chip-mark legend-mark legend-mark-event">程</text>
+          <text class="legend-text">日程</text>
+        </view>
+        <view class="legend-item">
+          <text class="chip-mark legend-mark legend-mark-ddl">止</text>
+          <text class="legend-text">截止</text>
+        </view>
+        <view class="legend-item">
+          <text class="chip-mark legend-mark legend-mark-sub">务</text>
+          <text class="legend-text">子任务</text>
+        </view>
+      </view>
+      <text class="footer-tip">午休等空档行、「其他时段」行都不计入「空闲 N 节」</text>
+      <text class="footer-tip">截止不占节次，只标出到期时刻；连堂按实际跨的节数占用</text>
+      <text class="footer-tip">校准过作息后，截止与子任务也会落到对应节次上</text>
     </view>
   </scroll-view>
 

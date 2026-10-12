@@ -150,11 +150,32 @@ function task(overrides) {
   }, overrides || {});
 }
 
-/** 让 cloud 的 tasks/list 返回给定任务数组 */
+/** 当前"云端保存的模型"（识图提示行按它判定）；默认给项目默认的纯文本模型 */
+var AI_MODEL_IN_TEST = 'glm-4.7-flash';
+
+/**
+ * 让 cloud 的 tasks 返回给定任务数组。
+ *
+ * 【为什么也要桩 ai_config_get】页面进「录入」模式时会**悄悄**读一次 AI 配置
+ * （只为了在选图之前显示"当前模型能不能识图"）。不桩它的话这次读取会走到
+ * "unexpected call" 分支 —— 虽然页面用的是 silent 读取（失败不弹 toast，见下面对
+ * 应的回归用例），但那样这组用例就永远测不到"读到了配置"这条路。
+ */
 function serveTasks(list) {
   cloudHandler = function (name, data) {
     if (name === 'tasks' && data.action === 'list') {
       return Promise.resolve({ ok: true, tasks: list, count: list.length });
+    }
+    if (name === 'tasks' && data.action === 'ai_config_get') {
+      // 形状与云函数一致（平铺：字段与 ok 同级）
+      return Promise.resolve({
+        ok: true,
+        provider: 'zhipu',
+        model: AI_MODEL_IN_TEST,
+        hasKey: true,
+        masked: '****test',
+        updated_at: ''
+      });
     }
     return Promise.resolve({ ok: false, error: 'unexpected call: ' + name + '/' + data.action });
   };
@@ -465,6 +486,66 @@ function run() {
     .then(function () {
       eq(ctx.p7.data.mode, 'parse', '默认录入模式');
       eq(ctx.p7.data.courses.length, 1, '候选列表也照常准备好了（切过去即可用）');
+      return null;
+    })
+    // ---- 8. 识图提示行：进录入模式时**悄悄**读一次 AI 配置 ----
+    //   【为什么要单独守这一段】这一页多了一次云函数调用（ai_config_get），而它
+    //   只服务于一句提示。曾经它没走 silent，于是"用户只想用文字录入"也会因为
+    //   这次后台读取失败被弹一句「网络异常」（ai_contract/本文件的 0-toast 断言当场变红）。
+    .then(function () {
+      block('ai 页面 —— 识图提示行：进页面读一次 AI 配置（选图之前就要看得见）');
+      reset();
+      serveTasks([OK_TASK]);
+      ctx.p8 = newPage();
+      ctx.p8.onLoad({});
+      return settle();
+    })
+    .then(function () {
+      eq(callLog.length, 2, '进页面共两次云函数调用：list + ai_config_get');
+      eq(callLog[0].data.action, 'list', 'list 仍然是第一次（别的用例依赖 callLog[0]）');
+      eq(callLog[1].data.action, 'ai_config_get', '第二次是读 AI 配置');
+      eq(callLog[1].name, 'tasks', 'ai_config_get 转发给 tasks 云函数');
+      eq(ctx.p8.data.aiModel, AI_MODEL_IN_TEST, '读到了当前实际会用的模型名');
+      eq(ctx.p8.data.visionState, false,
+        '默认模型 glm-4.7-flash 是纯文本 → 判定为"不具备识图能力"（选图前就拦）');
+      eq(ctx.p8.data.visionHintLevel, 'danger', '这种情况下是红字提示');
+      isTrue(ctx.p8.data.visionHint.indexOf(AI_MODEL_IN_TEST) > -1
+        && ctx.p8.data.visionHint.indexOf('glm-5.3-flash') > -1,
+        '提示里同时有当前模型与建议换的模型：' + show(ctx.p8.data.visionHint));
+      eq(toasts.length, 0, '读配置本身不弹提示（用户还没做任何操作）');
+
+      // 拆解入口不该为识图多发这一次请求（从任务页点"拆解"过来的用户不碰识图）
+      reset();
+      serveTasks([OK_TASK]);
+      ctx.p8b = newPage();
+      ctx.p8b.onLoad({ mode: 'decompose', id: 'ok1' });
+      return settle();
+    })
+    .then(function () {
+      var actions = callLog.map(function (one) { return one.data.action; }).join(',');
+      eq(actions.indexOf('ai_config_get'), -1, '拆解模式进页面**不**读 AI 配置（少一次无关请求）');
+      eq(ctx.p8b.data.aiModel, '', '没读过 → 模型名还是空的');
+
+      // 读配置失败：降级成"不确定"，而且**一条 toast 都不能弹**
+      block('ai 页面 —— 识图：读 AI 配置失败不打扰用户（silent 回归）');
+      reset();
+      cloudHandler = function (name, data) {
+        if (name === 'tasks' && data.action === 'list') {
+          return Promise.resolve({ ok: true, tasks: [OK_TASK], count: 1 });
+        }
+        return Promise.resolve({ ok: false, error: 'unexpected call: ' + name + '/' + data.action });
+      };
+      ctx.p9 = newPage();
+      ctx.p9.onLoad({});
+      return settle();
+    })
+    .then(function () {
+      eq(toasts.length, 0, '**读配置失败 → 一次 toast 都不弹**（用户只是想用文字录入）');
+      eq(ctx.p9.data.visionState, 'unknown', '降级成 unknown：不拦用户，允许尝试');
+      eq(ctx.p9.data.visionHintLevel, 'muted', '灰字提示（不是红字劝阻，也不是绿字保证）');
+      isTrue(ctx.p9.data.visionHint.indexOf('没能读到 AI 配置') > -1,
+        '如实说明是"没能读到"，而不是假装支持/不支持：' + show(ctx.p9.data.visionHint));
+      eq(ctx.p9.data.courses.length, 1, '任务列表照常可用（读配置失败不影响主流程）');
       return null;
     });
 }

@@ -282,6 +282,50 @@ page {
 }
 
 /* --------------------------------------------------------------------------
+   「其他时段」兜底行（固定在表头正下方第一行）
+   --------------------------------------------------------------------------
+   落在这里的是"时间不在任何课节内"的任务 —— 最常见的就是截止与子任务：
+   默认作息里 11:40–14:00 是午休空档，12:00 的截止定位不到任何一节。
+   以前这一行在表格最下面，用户要滑过 13 行才看得见，等于"没显示"；
+   现在挪到最前，配上底色与右侧灰字说明，一进页面就能看到。
+   -------------------------------------------------------------------------- */
+.fallback-row .period-col {
+  background: #f7f8fc;
+}
+
+.fallback-row .period-name {
+  font-size: 22rpx;
+  color: #6b7288;
+}
+
+.fallback-row .day-col {
+  background: #fbfcfe;
+}
+
+.fallback-row.today,
+.fallback-row .today {
+  background: #f4f7ff;
+}
+
+/* 右侧灰字提示：只在该行确实有任务时显示，免得空占一行 */
+.fallback-hint {
+  width: 100%;
+  margin-bottom: 4rpx;
+  font-size: 18rpx;
+  color: #a8aebd;
+}
+
+/* 子任务卡片：与 .chip-ddl 对称，让 程 / 止 / 务 三种角标颜色可区分 */
+.chip-sub {
+  background: #eef8f2;
+  border-left-color: #2f8f5b;
+}
+
+.chip-sub .chip-mark {
+  background: #2f8f5b;
+}
+
+/* --------------------------------------------------------------------------
    三、任务条目（同一行同一天多条任务）
    --------------------------------------------------------------------------
    【为什么卡片要用 position: relative + inline 的 top/height】
@@ -398,6 +442,45 @@ page {
 
 .add-btn-hover {
   background: #2449b3;
+}
+
+/* 图例：三种类型的角标字与颜色 */
+.legend {
+  display: flex;
+  align-items: center;
+  margin-top: 16rpx;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  margin-right: 26rpx;
+}
+
+.legend-mark {
+  width: 24rpx;
+  height: 24rpx;
+  line-height: 24rpx;
+  font-size: 17rpx;
+  border-radius: 5rpx;
+}
+
+.legend-mark-event {
+  background: #2f5bd7;
+}
+
+.legend-mark-ddl {
+  background: #e0553f;
+}
+
+.legend-mark-sub {
+  background: #2f8f5b;
+}
+
+.legend-text {
+  margin-left: 8rpx;
+  font-size: 21rpx;
+  color: #6b7288;
 }
 
 .footer-tip {

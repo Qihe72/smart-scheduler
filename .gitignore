@@ -68,3 +68,4 @@ data/app.db-shm
 # ---------------------------------------------------------------------------
 node_modules/
 project.private.config.json
+.tmp-test/

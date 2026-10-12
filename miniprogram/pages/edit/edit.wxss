@@ -151,6 +151,66 @@ page {
 }
 
 /* --------------------------------------------------------------------------
+   占用提示（时间那一栏下面：一行红字 + 一键避让按钮）
+   -------------------------------------------------------------------------- */
+.busy-box {
+  padding: 0 0 16rpx;
+}
+
+.busy-row {
+  display: flex;
+  align-items: flex-start;
+}
+
+/* 红字：flex:1 让长文案换行，而不是把右边的按钮挤出去 */
+.busy-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 24rpx;
+  line-height: 1.5;
+  color: #e0553f;
+}
+
+.busy-avoid {
+  flex: none;
+  max-width: 300rpx;
+  margin-left: 12rpx;
+  padding: 8rpx 16rpx;
+  font-size: 22rpx;
+  line-height: 1.4;
+  text-align: center;
+  color: #ffffff;
+  background: #e0553f;
+  border-radius: 8rpx;
+}
+
+.busy-avoid-hover {
+  background: #c2402a;
+}
+
+/* 找不到空档时置灰：仍然可点（点了会明确说一句"今天没有足够长的空档"） */
+.busy-avoid-disabled {
+  color: #a8aebd;
+  background: #f2f4f8;
+}
+
+.busy-note {
+  display: block;
+  margin-top: 8rpx;
+  font-size: 22rpx;
+  line-height: 1.5;
+  color: #8a90a2;
+}
+
+.busy-tip {
+  display: block;
+  margin-top: 4rpx;
+  font-size: 22rpx;
+  line-height: 1.5;
+  color: #c2402a;
+}
+
+/* --------------------------------------------------------------------------
    底部按钮
    -------------------------------------------------------------------------- */
 .actions {

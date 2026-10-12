@@ -118,6 +118,49 @@ page {
   border-radius: 10rpx;
 }
 
+/* --------------------------------------------------------------------------
+   一.5、「24 小时内到期」警示条（降级提示：不依赖微信订阅消息，永远可用）
+   —— 配色沿用 .ai-hint 那一套警示色，不新造一套设计语言
+   -------------------------------------------------------------------------- */
+.soon-banner {
+  display: flex;
+  align-items: center;
+  margin: 4rpx 4rpx 0;
+  padding: 18rpx 20rpx;
+  font-size: 24rpx;
+  color: #8a5a00;
+  background: #fff7e6;
+  border: 1rpx solid #ffd98a;
+  border-left: 6rpx solid #d99a00;
+  border-radius: 12rpx;
+}
+
+.soon-banner-hover {
+  background: #ffefd2;
+}
+
+.soon-icon {
+  flex: none;
+  margin-right: 12rpx;
+  font-size: 26rpx;
+}
+
+.soon-text {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.soon-action {
+  flex: none;
+  margin-left: 12rpx;
+  padding: 4rpx 18rpx;
+  font-size: 22rpx;
+  color: #ffffff;
+  background: #d99a00;
+  border-radius: 24rpx;
+}
+
 /* 加载 / 失败 / 空态 */
 .state-box {
   display: flex;
@@ -163,6 +206,12 @@ page {
 
 .card-done {
   opacity: 0.62;
+}
+
+/* 24 小时内到期且未完成：整卡一条左侧琥珀色提示条（与警示条同色系，颜色本身就是提示）。
+   只加左边框，不动其它盒模型属性 —— 卡片版式与别的条目完全一致。 */
+.card-soon {
+  border-left: 8rpx solid #d99a00;
 }
 
 /* 勾选框 */
@@ -257,6 +306,18 @@ page {
 .meta-today {
   color: #2f8f5b;
   font-weight: 600;
+}
+
+/* 「即将到期」标记：与 .priority 同一版式（胶囊标签），配色更醒目。
+   用红色是因为"快到了"就是要抢注意力；它与 .priority-high 不会歧义 ——
+   能进这一条的一定是**未完成**的，所以两者不冲突。 */
+.meta-soon {
+  flex: none;
+  padding: 2rpx 12rpx;
+  font-size: 21rpx;
+  color: #b02a16;
+  background: #ffe6e1;
+  border-radius: 20rpx;
 }
 
 .line-extra {

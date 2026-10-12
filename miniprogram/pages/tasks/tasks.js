@@ -46,12 +46,51 @@ try {
 /** 筛选标签：值与 taskFilter 对应 */
 const FILTERS = [
   { key: 'pending', label: '进行中' },
+  { key: 'soon', label: '即将到期' },
   { key: 'all', label: '全部' },
   { key: 'done', label: '已完成' },
 ];
 
 /** 一屏先渲染多少条，「加载更多」每次再加这么多 */
 const PAGE_STEP = 40;
+
+// ---------------------------------------------------------------------------
+// 「24 小时内到期」—— 顶部警示条 + 「即将到期」筛选（**纯前端**，不依赖任何云函数）
+// ---------------------------------------------------------------------------
+/**
+ * ===========================================================================
+ * 【这是没有微信通知时的降级路径，必须永远可用】
+ * ===========================================================================
+ * 订阅消息那条路（cloudfunctions/remind + pages/me 的「到期提醒」卡片）依赖三件事：
+ * 用户在微信后台配好模板、用户在真机上授权过、并且还有剩余额度。任何一件没满足，
+ * 用户就**什么都收不到**。所以"打开小程序时能看见哪些事快到期了"这件事必须由
+ * **页面自己算**：拿已经拉到的任务列表现算，不新增云函数、不依赖 remind 是否可用。
+ *
+ * 【时间口径：北京时间（UTC+8），与 remind 云函数逐字对齐】
+ * 云函数容器时区是 UTC，它用 `Date.UTC(y, m-1, d) + (h*60+min)*60000 - 8h` 合成
+ * 截止时刻（remind/index.js 的 dueInstantOf）。前端**必须用同一套算法**，否则
+ * 设备时区不是东八区时（比如模拟器、或者人在国外），同一件事在两端会得出不同结论：
+ * 云函数认为"还差 30 分钟"，页面却认为"还早"。
+ * 所以下面 dueInstantOf 的合成方式与云函数**一模一样**，不要图省事写成
+ * `new Date(date + ' ' + time)`（那种写法按设备本地时区解释）。
+ *
+ * 【"24 小时内"的判定口径】
+ *   `dueAt - now ∈ [-GRACE, +WINDOW]`，即
+ *     * 还没到期、且距到期不到 24 小时 → 算；
+ *     * 刚过期一点点（≤ GRACE = 10 分钟）→ **也算**（用户刚打开小程序，这条正是最急的）；
+ *     * 已经过期很久（超过宽限）→ **不算**（"早该做完了"不算"即将到期"，天天挂在那
+ *       只会让人忽略这条警示条）。
+ *   口径与云函数的提醒窗口对齐：那边同样是"窗口内 + 10 分钟宽限兜底"。
+ *   这些任务必须是 **ddl + 未完成 + 有明确截止时刻（date + end_time）**，
+ *   缺时刻的一律不算 —— 与云函数的 dueInstantOf 一样"不瞎猜 23:59"。
+ */
+const TASK_REMIND_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** 刚过期多久之内仍然算"即将到期"（与云函数 GRACE_MS 同值，理由见上） */
+const TASK_REMIND_GRACE_MS = 10 * 60 * 1000;
+
+/** 北京时间相对 UTC 的偏移（与云函数 BEIJING_OFFSET_MS 同值） */
+const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 /**
  * 「拆解」入口的路径（绝对路径，wx.navigateTo 要求以 / 开头）。
@@ -65,6 +104,7 @@ const AI_PARSE_URL = '/pages/ai/ai';
 /** 各筛选下的空态文案（空列表时总得告诉用户"是没数据，还是筛掉了"） */
 const EMPTY_TEXT = {
   pending: '当前没有进行中的任务',
+  soon: '24 小时内没有要到期的截止事项',
   all: '还没有任何任务，点下面按钮添加',
   done: '还没有已完成的任务',
 };
@@ -101,6 +141,10 @@ Page({
     semesterStart: '',       // 学期开始日期，判断"已结课"要用；从 app.globalData 取
     aiEnabled: true,         // utils/tasks.js 是否可用（不可用时拆解入口按简化判断）
     decomposeHint: '',       // 一键拆解不可用时的说明文案，空串 = 可以正常用
+
+    // --- 24 小时内到期（降级提示，纯前端算，不依赖 remind 云函数） ---
+    dueSoonCount: 0,         // 24 小时内到期的截止事项有几条（只数**未完成**的）
+    dueSoonText: '',         // 「今天有 2 个截止事项即将到期」；没有时为空串（警示条不出现）
   },
 
   onLoad() {
@@ -164,6 +208,11 @@ Page({
         tasks.map((task) => viewTask(task, titleById, today, semesterStart))
       );
 
+      // 【降级提示】24 小时内到期的截止事项 —— 拿刚拉到的列表现算，**不发任何请求**
+      // （理由与时间口径见文件上方 TASK_REMIND_WINDOW_MS 那一段注释）。
+      // 它同时把 dueSoonCount / dueSoonText 写进 data，所以必须排在下面的 setData 之前。
+      this.applyDueSoon(items, tasks);
+
       // 统计（全部口径）
       let pendingCount = 0;
       let doneCount = 0;
@@ -210,13 +259,15 @@ Page({
 
   /**
    * 套用筛选并重置分页。
-   * @param {string} key pending / all / done
+   * @param {string} key pending / soon / all / done
    * @param {boolean} reset 是否从头渲染
    */
   applyFilter(key, reset) {
     const filter = FILTERS.some((item) => item.key === key) ? key : 'pending';
     const items = (this.allItems || []).filter((item) => {
       if (filter === 'done') return item.done;
+      // 「即将到期」= 24 小时内到期**且未完成**的截止事项（isSoon 在 loadTasks 里算好）
+      if (filter === 'soon') return item.isSoon === true;
       if (filter === 'all') return true;
       return !item.done;
     });
@@ -229,6 +280,58 @@ Page({
       visibleItems: reset ? items.slice(0, PAGE_STEP) : (this.data.visibleItems || []),
       hasMore: items.length > PAGE_STEP,
     });
+  },
+
+  /**
+   * 点顶部那条「今天有 N 个截止事项即将到期」的警示条 → 切到「即将到期」筛选，
+   * 把那几条摆到眼前。用筛选而不是滚动：列表里可能还夹着别的任务，滚动能滚到的
+   * 位置并不确定，而筛选是"确定看得见"的。
+   */
+  onTapSoonBanner() {
+    if (!this.data.dueSoonCount) return;
+    this.applyFilter('soon', true);
+  },
+
+  /**
+   * 重算「24 小时内到期」并把结果写进 data（**唯一的写入口**）。
+   *
+   * 【为什么要一个统一入口，而不是各处自己 setData】勾选完成 / 取消完成 / 删除之后
+   * 都要重算，而"截止时刻"没变、只有 `done` 变了 —— 如果有哪条路径忘了重算，
+   * 顶部警示条就会继续用旧数字说"还有 1 个即将到期"，点进去却是空的。
+   * 这类"文案与事实不一致"的 bug 在页面上非常显眼，所以收口到一个方法里。
+   *
+   * @param {Array<object>} items 条目视图模型（会被就地打上 isSoon）
+   * @param {Array<object>} [tasks] 原始任务数组；不传时按 id 用 allItems 反查 done 状态
+   * @returns {number} 符合项条数
+   */
+  applyDueSoon(items, tasks) {
+    const list = Array.isArray(items) ? items : [];
+    // 「现在」存成实例字段而不是 data：WXML 用不到它，而时间戳进 data 只会让每次
+    // setData 都多传一份用不上的数据。
+    // 写成 `this.remindNowMs || Date.now()` 是**故意留一个可注入的口子**：单测
+    // （utils/tests/remind_page.test.js）先往里塞一个固定时刻，才能对"23 小时后算、
+    // 24 小时整算不算、刚过期 10 分钟算"这些边界下确定性断言。生产路径没人预设它。
+    this.remindNowMs = this.remindNowMs || Date.now();
+
+    // 入参两种形态：刚拉到的**原始任务**，或本地的**条目视图模型**（勾选后走这条）。
+    // 视图模型带着 isSoon 之外的所有判据（type/date/end_time/done），所以能直接复用。
+    const source = Array.isArray(tasks) ? tasks : list;
+    const soonIds = computeDueSoonIds(source, this.remindNowMs);
+    list.forEach((item) => {
+      item.isSoon = item.done !== true && soonIds.indexOf(item.id) !== -1;
+    });
+    const count = this.countDueSoon(list);
+    this.setData({
+      dueSoonCount: count,
+      // 没有符合项时文案是空串 → WXML 里警示条整条不渲染（不留一条空条占位置）
+      dueSoonText: dueSoonText(count),
+    });
+    return count;
+  },
+
+  /** 数一数当前有几个"即将到期"（只算未完成的） */
+  countDueSoon(items) {
+    return (Array.isArray(items) ? items : []).filter((item) => item.isSoon === true).length;
   },
 
   /** 加载更多 */
@@ -273,6 +376,10 @@ Page({
       });
       const total = this.allItems.length;
       const doneCount = this.allItems.filter((item) => item.done).length;
+      // 【必须重算】「即将到期」的口径里有"未完成"这一条：勾上之后它立刻不再算，
+      // 取消勾选（若仍符合时间窗口）要立刻变回来。不重算的话顶部警示条会继续说
+      // "还有 1 个即将到期"，点进去却是空的 —— 文案与事实不一致最容易让人不信这个功能。
+      this.applyDueSoon(this.allItems);
       this.setData({
         busyId: '',
         allItems: this.allItems,
@@ -404,6 +511,19 @@ Page({
       : '');
     wx.showToast({ title: reason || '这条任务暂时不能拆解', icon: 'none' });
   },
+
+  /**
+   * 只给纯 node 单测用的探针（utils/tests/remind_page.test.js）。
+   * 测的是页面真正在用的那份实现（与 pages/ai/ai.js、pages/week/week.js 同一套做法）。
+   */
+  __test: {
+    dueInstantOf: dueInstantOf,
+    computeDueSoonIds: computeDueSoonIds,
+    dueSoonText: dueSoonText,
+    TASK_REMIND_WINDOW_MS: TASK_REMIND_WINDOW_MS,
+    TASK_REMIND_GRACE_MS: TASK_REMIND_GRACE_MS,
+    BEIJING_OFFSET_MS: BEIJING_OFFSET_MS,
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -463,6 +583,9 @@ function viewTask(task, titleById, today, semesterStart) {
     showParent,
     childCount: 0,       // 由 buildChildCounts 统一填
     subtaskOfOther: type === 'subtask' && !parentId,
+    // --- 24 小时内到期（由 loadTasks 用 computeDueSoonIds 统一填） ---
+    // 默认 false：没有截止时刻 / 已经完成 / 还早 / 过期太久，都是 false（判据见文件上方注释）
+    isSoon: false,
     // --- AI 拆解入口 ---
     canDecompose: decompose.ok,
     decomposeBlockedText: decompose.reason,
@@ -570,6 +693,100 @@ function periodsText(raw) {
   if (matched) return `第${matched[1]}-${matched[2]}节`;
   const single = /^\d{1,2}$/.test(text);
   return single ? `第${text}节` : text;
+}
+
+// ---------------------------------------------------------------------------
+// 24 小时内到期（降级提示的纯逻辑，全部可单测）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一条 DDL 的截止**绝对时刻**（毫秒，北京时间的日历日 + 当天时刻合成）。
+ *
+ * ===========================================================================
+ * 【口径必须与 remind 云函数逐字一致】两头算的不是同一个东西 = 用户看到的
+ * 和实际会提醒的对不上。云函数的 dueInstantOf（cloudfunctions/remind/index.js）：
+ *   `Date.UTC(y, m-1, d) + (h*60+min)*60000 - 8h`
+ * 这里就是同一行公式（见文件上方 BEIJING_OFFSET_MS 那一段的说明）。
+ * 特意**不**复用 utils/periods.js 的 parseDate/toDate：那两个按设备本地时区构造
+ * Date，取 getTime() 出来会随设备时区漂移，和云函数对不上。
+ * ===========================================================================
+ *
+ * 返回 null 的情况（都不算"即将到期" —— 宁可不提示，也不要提示一条错的）：
+ *   * 不是 ddl（日程/子任务没有"到期"概念）；
+ *   * `done === true`（做完了还催就是骚扰）；
+ *   * 缺 `date` 或缺 `end_time`（没有明确时刻 —— **不瞎猜 23:59**，与云函数同款取舍）；
+ *   * 日期/时间格式非法，或 `end_time` 越界（`24:00` 那种跨天写法）。
+ *
+ * 【与云函数唯一的差异，如实写在这里】云函数的时间正则容忍 `9:5` 这种写法
+ * （normalize 系的口径），这里只认 `H:MM` / `HH:MM`。差异的后果是"极端脏数据下
+ * 少提示一条"，不会多提示；而且云端入库前已经把时间归一化成 `HH:MM` 了。
+ *
+ * @param {object} task 任务文档
+ * @returns {number|null} 毫秒时间戳；算不出来为 null
+ */
+function dueInstantOf(task) {
+  if (!task || typeof task !== 'object') return null;
+  if (str(task.type) !== 'ddl') return null;
+  if (task.done === true) return null;
+
+  const dateText = str(task.date);
+  const timeText = str(task.end_time);
+  if (!dateText || !timeText) return null;
+
+  const dateMatched = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateText);
+  if (!dateMatched) return null;
+  const timeMatched = /^(\d{1,2}):(\d{2})$/.exec(timeText);
+  if (!timeMatched) return null;
+
+  const year = Number(dateMatched[1]);
+  const month = Number(dateMatched[2]);
+  const day = Number(dateMatched[3]);
+  const hour = Number(timeMatched[1]);
+  const minute = Number(timeMatched[2]);
+  if (hour > 23 || minute > 59) return null;
+
+  const dayUtc = Date.UTC(year, month - 1, day);
+  // 回环校验：Date.UTC 会把 2026-02-30 静默进位成 2026-03-02，必须自己发现
+  const roundTrip = new Date(dayUtc);
+  if (roundTrip.getUTCFullYear() !== year
+    || roundTrip.getUTCMonth() + 1 !== month
+    || roundTrip.getUTCDate() !== day) {
+    return null;
+  }
+  return dayUtc + (hour * 60 + minute) * 60 * 1000 - BEIJING_OFFSET_MS;
+}
+
+/**
+ * 从一批原始任务里挑出"24 小时内到期**且未完成**"的 id。
+ *
+ * 判定区间：`dueAt - now ∈ [-TASK_REMIND_GRACE_MS, +TASK_REMIND_WINDOW_MS]`
+ * （含"刚过期 10 分钟内"这次兜底，超过就算"过期太久"，不再提示 —— 口径见文件上方注释）。
+ *
+ * @param {Array<object>} tasks 云函数 list 返回的原始任务数组
+ * @param {number} nowMs "现在"（毫秒）。**由调用方传进来**：测试要能钉死一个时刻，
+ *        页面在 loadTasks 里传 Date.now()。不传就按当前时刻。
+ * @returns {Array<string>} 命中的任务 id（去重不会发生，但顺序与入参一致）
+ */
+function computeDueSoonIds(tasks, nowMs) {
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const list = Array.isArray(tasks) ? tasks : [];
+  const ids = [];
+  list.forEach((task) => {
+    const dueAt = dueInstantOf(task);
+    if (dueAt === null) return;
+    const delta = dueAt - now;
+    if (delta > TASK_REMIND_WINDOW_MS) return;   // 还早（超过 24 小时）
+    if (delta < -TASK_REMIND_GRACE_MS) return;   // 过期太久（不算"即将到期"）
+    const id = str(task._id);
+    if (id) ids.push(id);
+  });
+  return ids;
+}
+
+/** 警示条文案；没有符合项时返回**空串**（WXML 据此整条不渲染） */
+function dueSoonText(count) {
+  const n = Math.max(0, Math.floor(Number(count) || 0));
+  return n ? `今天有 ${n} 个截止事项即将到期` : '';
 }
 
 // ---------------------------------------------------------------------------

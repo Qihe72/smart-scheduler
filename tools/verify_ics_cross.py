@@ -38,6 +38,18 @@ import os
 import subprocess
 import sys
 
+
+# ---------------------------------------------------------------------------
+# 中文 Windows 的控制台默认按 GBK 编码，打印中文或 ⏰ 这类符号会抛
+# UnicodeEncodeError 直接中断脚本 —— 那是**编码问题，不是校验失败**，
+# 却很容易被误读成"检查没通过"（真实踩过一次）。统一把标准输出切成 UTF-8。
+# ---------------------------------------------------------------------------
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # 脚本放在 <仓库根>/tools/ 下，所以仓库根是它的上一级目录。
 # 刻意不写死绝对路径 —— 别人克隆下来就能跑。
 HERE = os.path.dirname(os.path.abspath(__file__))

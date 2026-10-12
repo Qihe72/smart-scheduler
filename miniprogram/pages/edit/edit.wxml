@@ -15,6 +15,7 @@
     typeIndex / priorityIndex / repeatIndex / parityIndex / weekStartIndex /
     weekEndIndex / durationIndex / parentIndex /
     isDdl / isSubtask / isWeekly / customDuration / customDurationText /
+    busyHint / busyNote / canAvoid / avoidTip /
     taskId / isEdit / loading / saving / errorText / parentText /
     weekRangeText / estimateText / submitText
 -->
@@ -114,6 +115,28 @@
         </view>
       </view>
       <view class="hint-line" wx:if="{{isDdl}}">截止只记录一个时刻，所以不显示开始时间。</view>
+
+      <!--
+        占用提示：只提醒，不拦人。
+        - 红字来自 planner.findConflicts（编辑模式会排除这条任务自己）；
+        - 「换到最近的空闲课节」把起止时间换成 planner.suggestFreeSlot 的结果：
+          候选起点只有各节次的开始时刻，所以换出来的起点必然是某一节的开始
+          （周视图才画得对行）；节次走 planner.slotPeriods。一个课节都装不下时
+          按钮置灰，并在下面说明「今天没有整段的空闲课节」（见 edit.js 的 onAvoidBusy）；
+        - 保存按钮不受它影响：用户可能就是故意重叠，这里不做二次确认。
+      -->
+      <view class="busy-box" wx:if="{{busyHint}}">
+        <view class="busy-row">
+          <text class="busy-text">{{busyHint}}</text>
+          <view
+            class="busy-avoid {{canAvoid ? '' : 'busy-avoid-disabled'}}"
+            hover-class="{{canAvoid ? 'busy-avoid-hover' : ''}}"
+            catchtap="onAvoidBusy"
+          >换到最近的空闲课节</view>
+        </view>
+        <text class="busy-note" wx:if="{{busyNote}}">{{busyNote}}</text>
+        <text class="busy-tip" wx:if="{{avoidTip}}">{{avoidTip}}</text>
+      </view>
 
       <!-- 节次：文本，例如 7-9 -->
       <view class="field field-col">

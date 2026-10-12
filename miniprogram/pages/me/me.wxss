@@ -123,6 +123,15 @@ page {
   padding: 14rpx 16rpx;
 }
 
+/* 作息校准保存成功那一行：绿色，与上面"未保存"的橙色区分开 */
+.note-ok {
+  color: #2f7a4f;
+  background: #eaf7f0;
+  border: 1rpx solid #bfe6cf;
+  border-radius: 10rpx;
+  padding: 14rpx 16rpx;
+}
+
 /* 小按钮（选择 / 复制） */
 .mini-btn {
   flex: none;
@@ -323,6 +332,48 @@ page {
 }
 
 /* --------------------------------------------------------------------------
+   到期提醒（微信订阅消息）
+   —— 复用 AI 状态条的视觉语言（左边一条色条 + 一行主文案 + 一行次要文案），
+      三态：off（灰）/ on（绿）/ warn（橙，= 服务端还没配模板）
+   -------------------------------------------------------------------------- */
+.remind-status {
+  display: flex;
+  flex-direction: column;
+  margin-top: 16rpx;
+  padding: 16rpx 18rpx;
+  background: #f4f6fa;
+  border-left: 6rpx solid #c3c9d6;
+  border-radius: 10rpx;
+}
+
+.remind-status-off {
+  background: #f4f6fa;
+  border-left-color: #c3c9d6;
+}
+
+.remind-status-on {
+  background: #eaf7f0;
+  border-left-color: #2f8f5b;
+}
+
+.remind-status-warn {
+  background: #fff7e6;
+  border-left-color: #d99a00;
+}
+
+.remind-status-text {
+  font-size: 25rpx;
+  color: #1f2430;
+  line-height: 1.5;
+}
+
+.remind-status-quota {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  color: #6b7288;
+}
+
+/* --------------------------------------------------------------------------
    导入方式（替换 / 追加）
    -------------------------------------------------------------------------- */
 .mode-title {
@@ -380,6 +431,14 @@ page {
   color: #2f5bd7;
   background: #eef2fe;
   border-radius: 10rpx;
+}
+
+/* 失败 / 需要用户注意的结果行：与 .result-line 同版式，只换配色。
+   【必须写在 .result-line **后面**】两者特异性相同（都是单类选择器），
+   谁在后面谁生效 —— 写在前面会被上面那条整个盖掉。 */
+.result-line-warn {
+  color: #b02a16;
+  background: #fff1ef;
 }
 
 .warn-box {

@@ -17,6 +17,8 @@
 
   <!-- 提示条（成功 / 警告都走这里） -->
   <view wx:if="{{tip}}" class="tip tip-{{tipType}}">{{tip}}</view>
+  <!-- 作息校准是**独立**的一件事：它失败不代表识别/导入失败，所以单独一行、单独口径 -->
+  <view wx:if="{{periodsSaveText}}" class="tip tip-muted">{{periodsSaveText}}</view>
 
   <!-- ===================== ② 录入模式 ===================== -->
   <block wx:if="{{mode === 'parse'}}">
@@ -40,6 +42,58 @@
       </view>
     </view>
 
+    <!-- 课表截图识别：用用户自己填的 Key + 多模态模型直接认课表 -->
+    <view class="card">
+      <view class="row">
+        <view class="card-title">课表截图识别</view>
+        <text wx:if="{{aiModel}}" class="tag tag-gray tag-line">{{aiModel}}</text>
+      </view>
+      <view class="muted">拍一张课表（教务系统截图或纸质课表照片），让 AI 认成课程。图片只在识别时用一次，不会保存。</view>
+
+      <!-- 模型提示行：**选图之前**就显示，能识图 / 明确不能 / 不确定 三种口径 -->
+      <view wx:if="{{visionHint}}" class="vision-hint vision-hint-{{visionHintLevel}}">{{visionHint}}</view>
+
+      <view wx:if="{{!visionReady}}" class="vision-hint vision-hint-danger">
+        当前版本的截图识别不可用，请改用文字录入。
+      </view>
+
+      <view class="row mt-16">
+        <view class="btn-ghost btn-mini" bindtap="onPickImage" data-source="camera">拍照</view>
+        <view class="btn-ghost btn-mini" bindtap="onPickImage" data-source="album">从相册选</view>
+      </view>
+
+      <!-- 选好之后的缩略图 + 体积（压到多少要如实说） -->
+      <view wx:if="{{imagePath}}" class="vision-preview mt-16">
+        <image class="vision-thumb" src="{{imagePath}}" mode="aspectFit" />
+        <view class="flex-1">
+          <view class="muted">{{imageSource}}的课表图片</view>
+          <view class="muted">{{imageSizeText}}</view>
+        </view>
+      </view>
+      <view wx:if="{{imageError}}" class="vision-hint vision-hint-danger">{{imageError}}</view>
+
+      <view class="mt-16">
+        <view
+          class="btn-primary btn-block {{visionBusy || !imagePath || !visionReady ? 'btn-disabled' : ''}}"
+          bindtap="onRecognize"
+        >{{visionBusy ? '识别中… 已等待 ' + visionElapsed + ' 秒' : '开始识别'}}</view>
+      </view>
+      <view wx:if="{{visionBusy}}" class="muted mt-8">正在识别课表，约 10~30 秒… 请不要退出这一页。</view>
+    </view>
+
+    <!-- 识别失败：原样显示后端那句可操作的人话（换模型 / 换小图 / 稍后重试） -->
+    <view wx:if="{{visionError}}" class="card ai-error">
+      <view class="ai-error-title">没能识别</view>
+      <view class="ai-error-text">{{visionError}}</view>
+    </view>
+
+    <!-- 识别提示：模型自己说"哪里没看清" + 云端跳过的脏条目（课程落库后也留着） -->
+    <view wx:if="{{visionWarnings.length}}" class="card ai-notes">
+      <view class="card-title">识别提示</view>
+      <view wx:for="{{visionWarnings}}" wx:key="index" class="ai-note-item">· {{item}}</view>
+      <view wx:if="{{visionNotes}}" class="muted mt-8">{{visionNotes}}</view>
+    </view>
+
     <!-- 解析失败：原样显示后端文案 -->
     <view wx:if="{{parseError}}" class="card ai-error">
       <view class="ai-error-title">没能解析</view>
@@ -52,10 +106,10 @@
       <view class="ai-error-text">{{clarification}}</view>
     </view>
 
-    <!-- 解析结果 -->
+    <!-- 解析 / 识别结果（两条路共用同一套勾选列表） -->
     <view wx:if="{{parsed}}" class="card">
       <view class="row">
-        <view class="card-title">解析出 {{parsed.items.length}} 条</view>
+        <view class="card-title">{{parsedSource === 'image' ? '识别出' : '解析出'}} {{parsed.items.length}} 条</view>
         <view class="btn-ghost btn-mini" bindtap="onToggleAll">全选 / 全不选</view>
       </view>
 
@@ -75,16 +129,35 @@
             <text class="tag {{item.tagClass}} tag-line">{{item.priorityLabel}}</text>
           </view>
           <view class="muted">
-            {{item.typeLabel}} · {{item.date}} · {{item.timeText}}
+            <text wx:if="{{item.courseText}}">{{item.courseText}}</text>
+            <text wx:else>{{item.typeLabel}} · {{item.date}}</text>
+            <text> · {{item.timeText}}</text>
           </view>
         </view>
       </view>
 
       <view wx:if="{{parsed.hasAny}}" class="mt-16">
-        <view
-          class="btn-primary btn-block {{submitting ? 'btn-disabled' : ''}}"
-          bindtap="onConfirmImport"
-        >{{submitting ? '添加中…' : '确认添加'}}</view>
+        <!-- 识图那条路：两个出口 —— 替换课表（会删旧课）/ 追加导入 -->
+        <block wx:if="{{parsedSource === 'image'}}">
+          <view
+            class="btn-primary btn-block {{submitting ? 'btn-disabled' : ''}}"
+            bindtap="onVisionAppend"
+          >{{submitting ? '处理中…' : '追加导入'}}</view>
+          <view
+            class="btn-ghost btn-block btn-danger mt-16 {{submitting ? 'btn-disabled' : ''}}"
+            bindtap="onVisionReplace"
+          >{{submitting ? '处理中…' : '替换课表'}}</view>
+          <view class="muted mt-8">
+            「替换课表」会先删除现有的课表类任务（只删课程，你手动添加的日程、截止、子任务不受影响）。
+          </view>
+        </block>
+        <!-- 文字解析那条路：维持原来的单按钮 -->
+        <block wx:else>
+          <view
+            class="btn-primary btn-block {{submitting ? 'btn-disabled' : ''}}"
+            bindtap="onConfirmImport"
+          >{{submitting ? '添加中…' : '确认添加'}}</view>
+        </block>
       </view>
     </view>
   </block>

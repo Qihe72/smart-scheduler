@@ -40,6 +40,10 @@ var modals = [];
 var cloudCalls = [];
 var cloudHandler = null;
 var modalConfirm = true;
+/** 最近一次 settings_save 收到的 settings（用来断言作息合并结果） */
+var savedSettings = null;
+/** 当前生效的作息（settings_get 返回它，也是合并的基准） */
+var currentPeriodTimes = null;
 
 var savedWx = global.wx;
 var savedGetApp = global.getApp;
@@ -50,6 +54,8 @@ function useStub() {
   cloudCalls = [];
   cloudHandler = null;
   modalConfirm = true;
+  savedSettings = null;
+  currentPeriodTimes = null;
 
   global.wx = {
     showToast: function (options) { toasts.push((options && options.title) || ''); },
@@ -92,29 +98,13 @@ function restoreGlobals() {
 }
 
 // ---------------------------------------------------------------------------
-// import_replace 是否已经落地
+// import_replace 的落地状态
 // ---------------------------------------------------------------------------
-// 【为什么要在测试里补一个桩】这一版 api.js 还没有 importReplace，而"替换"是本轮
-// 的核心行为，等它落地才能测就等于没测。所以这里当它缺席时**装一个只记录调用的桩**：
-// 桩负责证明页面发出的 action / scope / payload 都是对的；
-// 真函数的端到端联调留给它落地之后（测试最后会如实打印当前是哪种情况）。
+// api.js 已经提供了真实的 importReplace（走 call('import_replace', {tasks, scope:'courses'})），
+// 所以本文件**不需要桩**：页面发出的 action / scope / payload 会被 cloudHandler 记下来，
+// 断言跑在真实封装上。这里只留一个标记，末尾如实打印用的是哪一路。
 var api = require(path.join(ROOT, 'utils', 'api.js'));
-var replaceStubbed = false;
-if (typeof api.importReplace !== 'function') {
-  replaceStubbed = true;
-  api.importReplace = function (tasks) {
-    var payload = { action: 'import_replace', tasks: tasks, scope: 'courses' };
-    if (!global.wx || !global.wx.cloud) return Promise.resolve({ ok: false, error: 'no wx.cloud' });
-    return global.wx.cloud.callFunction({ name: 'tasks', data: payload }).then(function (res) {
-      var result = res && res.result;
-      if (!result || result.ok !== true) {
-        return { ok: false, error: (result && result.error) || '替换失败', data: null };
-      }
-      // 与云函数约定的平铺形状：{ ok, removed, inserted, skipped, errors }
-      return { ok: true, data: result, error: null };
-    });
-  };
-}
+var replaceIsReal = (typeof api.importReplace === 'function');
 
 // ---------------------------------------------------------------------------
 // 取回页面注册对象（加载期只调用一次 Page()，不碰 wx）
@@ -166,8 +156,7 @@ function settle(rounds) {
 function manualEvent(id, title) {
   return { _id: id, title: title, type: 'event', date: '2026-12-31', repeat: 'none',
     periods: '', start_time: '10:00', end_time: '11:00', priority: 'mid', done: false };
-}
-function manualDdl(id, title) {
+}function manualDdl(id, title) {
   return { _id: id, title: title, type: 'ddl', date: '2026-12-20', repeat: 'none',
     periods: '', end_time: '23:59', priority: 'high', done: false };
 }
@@ -188,7 +177,7 @@ function serve(options) {
   cloudHandler = function (name, data) {
     if (name !== 'tasks') return Promise.resolve({ ok: false, error: 'unexpected fn: ' + name });
     if (data.action === 'settings_get') {
-      return Promise.resolve({ ok: true, semester_start: '2026-09-07', period_times: null });
+      return Promise.resolve({ ok: true, semester_start: '2026-09-07', period_times: currentPeriodTimes });
     }
     if (data.action === 'ai_config_get') {
       return Promise.resolve({ ok: true, provider: '', model: '', hasKey: false, masked: '' });
@@ -212,6 +201,21 @@ function serve(options) {
         skipped: 0,
         errors: [],
         scope: data.scope
+      });
+    }
+    // 作息保存：settings_save 只接受 semester_start / period_times，
+    // 返回**保存后**的值（这里模拟服务端把 period_times 原样回传）
+    if (data.action === 'settings_save') {
+      savedSettings = data.settings || {};
+      if (opts.settingsFail) {
+        return Promise.resolve({ ok: false, error: opts.settingsFail });
+      }
+      return Promise.resolve({
+        ok: true,
+        updated: 1,
+        created: 0,
+        semester_start: savedSettings.semester_start || '',
+        period_times: savedSettings.period_times || null
       });
     }
     return Promise.resolve({ ok: false, error: 'unexpected action: ' + data.action });
@@ -382,8 +386,13 @@ function run() {
       eq(modals.length, 0, '也不弹确认框');
 
       // ---- 9. 替换未就绪时必须挡住（不能抛 TypeError，也不能静默） ----
+      // 【为什么这段要"临时删除、用后立刻在同一个 then 里还原"】
+      // 本文件第一版把还原写在了后面另一段用例里，而 api.js 后来又补上了真实的
+      // importReplace → "还原"其实是把 undefined 赋了回去，导致后面的替换用例整段
+      // 静默地跑在"未就绪"分支上（测试看着绿，其实什么都没测）。
+      // 现在改成"借出→用完马上还"，中间不跨任何用例。
       block('边界 —— importReplace 未就绪时会挡住，而不是抛错');
-      var stub = api.importReplace;
+      var savedImportReplace = api.importReplace;
       delete api.importReplace;              // 模拟"云函数/封装还没落地"
 
       var p5 = newPage();
@@ -419,20 +428,149 @@ function run() {
         try { p5.doReplace(pendingOf(1)); } catch (err) { threw2 = true; }
         isFalse(threw2, 'doReplace 自己也有守卫，不抛异常');
 
-        api.importReplace = stub;            // 还原
+        // 【立刻还原】就在同一个 then 里还回去，后面的替换用例才跑在真实封装上
+        api.importReplace = savedImportReplace;
+        isTrue(typeof api.importReplace === 'function', 'importReplace 已还原成真函数');
         return null;
       }).then(function () {
-        // 如实报告：这一版到底测的是真函数还是桩
+        // =====================================================================
+        // 根因修复：导入成功后把校准作息增量存回 settings
+        // （不存 → 课表页按默认作息算"这个时间属于第几节" → 截止/子任务落错行或掉进兜底行）
+        // =====================================================================
+        block('作息落库 —— 追加路径：调 saveSettings 且合并结果正确');
+
+        // 基准作息（settings 里已有的），合并必须以它为基准
+        currentPeriodTimes = { '1': ['08:00', '08:45'], '7': ['16:00', '16:45'] };
+        // 本次文件校准出来的（第 1 节被**覆盖**，第 5 节是**新增**）
+        var incoming = { '1': ['08:30', '09:10'], '5': ['11:45', '12:25'] };
+
+        var p6 = newPage();
+        p6.onLoad();
+        return settle().then(function () {
+          eq(p6.periodTimes['1'][0], '08:00', 'onLoad 后页面拿到了当前作息（合并基准）');
+
+          // 模拟"选完文件解析完"：pendingTasks + pendingPeriodTimes 都已就位
+          p6.pendingTasks = pendingOf(2);
+          p6.pendingPeriodTimes = incoming;
+          p6.setData({ importMode: 'append' });
+          savedSettings = null;
+          cloudCalls.length = 0;
+          p6.onConfirmImport();
+          return settle().then(function () {
+            isTrue(cloudCalls.some(function (c) { return c.data.action === 'bulk_add'; }),
+              '追加路径确实导入了');
+            eq(callsOf('settings_save').length, 1,
+              '**追加路径也调了 settings_save**（两条路径都要存作息）');
+            isTrue(!!savedSettings && !!savedSettings.period_times, '带上了 period_times');
+            var merged = (savedSettings && savedSettings.period_times) || {};
+            eq(merged['1'][0], '08:30',
+              '**新导入的节次覆盖同名节次**：第 1 节 08:00 → 08:30');
+            eq(merged['1'][1], '09:10', '第 1 节的结束时间也被覆盖成 09:10');
+            eq(merged['5'][0], '11:45', '**未涉及的新节次被并入**：第 5 节新增进来了');
+            eq(merged['7'][0], '16:00',
+              '**未涉及的原有节次原样保留**：第 7 节仍是 16:00（没被空对象抹掉）');
+            eq(Object.keys(merged).length, 3, '合并结果是 3 个节次（1/5/7）：'
+              + show(Object.keys(merged)));
+            isTrue(/并按导入课表校准了 2 节作息/.test(p6.data.periodSaveText),
+              '给了一句独立文案：' + show(p6.data.periodSaveText));
+            isFalse(p6.data.periodSaveFailed, '并标记为成功（绿色那行）');
+            isTrue(/已入库 2 条/.test(p6.data.importResultText),
+              '导入文案照旧不受影响：' + show(p6.data.importResultText));
+            return null;
+          });
+        });
+      }).then(function () {
+        // ---- 替换路径（用真实的 api.importReplace）----
+        block('作息落库 —— 替换路径同样存作息');
+        var incoming2 = { '1': ['08:30', '09:10'], '5': ['11:45', '12:25'] };
+        currentPeriodTimes = { '1': ['08:00', '08:45'] };
+        // 【必须重新 serve】cloudHandler 是上一组用例（替换失败那条）留下的，
+        // 它还带着 replaceFail —— 不重设的话这组会静默地跑在"替换失败"分支上，
+        // 断言全红却看不出原因。（本文件第二次栽在"忘了重置桩状态"上了）
+        serve({ tasks: [] });
+        var p7 = newPage();
+        p7.onLoad();
+        return settle().then(function () {
+          p7.pendingTasks = pendingOf(3);
+          p7.pendingPeriodTimes = incoming2;
+          p7.setData({ importMode: 'replace' });
+          savedSettings = null;
+          cloudCalls.length = 0;
+          modalConfirm = true;
+          eq(p7.data.importReplaceReady, true, '真函数在位 → 替换可用');
+          p7.onConfirmImport();
+          return settle().then(function () {
+            isTrue(cloudCalls.some(function (c) { return c.data.action === 'import_replace'; }),
+              '替换路径确实走了 import_replace');
+            eq(callsOf('settings_save').length, 1, '**替换路径同样调了 settings_save**');
+            var m2 = (savedSettings && savedSettings.period_times) || {};
+                eq(m2['1'][0], '08:30', '替换路径的合并结果同样覆盖第 1 节');
+                eq(m2['5'][0], '11:45', '替换路径也并入了第 5 节');
+                isTrue(/已替换/.test(p7.data.importResultText),
+                  '替换的导入文案照旧：' + show(p7.data.importResultText));
+                isTrue(/校准了 2 节作息/.test(p7.data.periodSaveText), '也给了作息那句：' + show(p7.data.periodSaveText));
+
+                // ---- 解耦：作息保存失败不能把导入说成失败 ----
+                block('作息落库 —— 保存失败时导入文案照旧，并提示「未保存」');
+                var p8 = newPage();
+                currentPeriodTimes = { '1': ['08:00', '08:45'] };
+                serve({ tasks: [], settingsFail: '设置服务异常' });
+                p8.onLoad();
+                return settle().then(function () {
+                  p8.pendingTasks = pendingOf(2);
+                  p8.pendingPeriodTimes = incoming2;
+                  p8.setData({ importMode: 'append' });
+                  toasts.length = 0;
+                  p8.onConfirmImport();
+                  return settle().then(function () {
+                    isTrue(/已入库 2 条/.test(p8.data.importResultText),
+                      '**导入仍然报成功**（课程确实已经进库了）：' + show(p8.data.importResultText));
+                    isFalse(/失败/.test(p8.data.importResultText),
+                      '导入文案里没有出现"失败"');
+                    isTrue(/作息校准未保存/.test(p8.data.periodSaveText),
+                      '**单独提示作息未保存**：' + show(p8.data.periodSaveText));
+                    isTrue(/课程已导入/.test(p8.data.periodSaveText),
+                      '并说明课程其实已经导入成功了');
+                    isTrue(p8.data.periodSaveFailed === true, '标了失败标记（橙色那行）');
+                    isFalse(toasts.join('|').indexOf('入库失败') !== -1,
+                      '没有弹"入库失败"的 toast（那会误导用户以为课没进去）');
+
+                    // ---- 没有可校准信息：不调 saveSettings，也不提示 ----
+                    block('作息落库 —— 文件里没有可校准信息时不写库、不提示');
+                    var p9 = newPage();
+                    currentPeriodTimes = { '1': ['08:00', '08:45'] };
+                    serve({ tasks: [] });
+                    p9.onLoad();
+                    return settle().then(function () {
+                      p9.pendingTasks = pendingOf(2);
+                      p9.pendingPeriodTimes = null;   // 文件里没有可校准信息
+                      p9.setData({ importMode: 'append' });
+                      cloudCalls.length = 0;
+                      p9.onConfirmImport();
+                      return settle().then(function () {
+                        eq(callsOf('settings_save').length, 0,
+                          '**没有可校准信息 → 一次 settings_save 都不发**');
+                        eq(p9.data.periodSaveText, '', '也不显示任何作息提示');
+                        isTrue(/已入库 2 条/.test(p9.data.importResultText), '导入照常完成');
+                        return null;
+                      });
+                    });
+                  });
+                });
+              });
+            });
+          });
+        });
+      }).then(function () {
+        // 如实报告：替换断言跑在真实封装上还是桩上
         block('本轮 import_replace 的状态');
         isTrue(typeof api.importReplace === 'function', 'api.importReplace 现在可用');
-        isTrue(true, replaceStubbed
-          ? '本轮 import_replace **尚未落地**，上面的替换断言跑在"只记录调用的桩"上'
-            + '（已证明页面发出的 action / scope / payload 正确；真函数联调待其落地）'
-          : '本轮 import_replace **由 api.js 真实提供**，替换断言跑在真实封装上');
+        isTrue(true, replaceIsReal
+          ? '本轮 import_replace **由 api.js 真实提供**，替换断言跑在真实封装上'
+            + '（action=import_replace、scope=courses、payload 都经过真函数）'
+          : '⚠️ api.importReplace 缺席，替换相关断言未生效');
         return null;
       });
-    });
-  });
 }
 
 // ---------------------------------------------------------------------------

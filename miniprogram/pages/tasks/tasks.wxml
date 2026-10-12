@@ -2,21 +2,23 @@
   pages/tasks/tasks.wxml —— DDL / 子任务列表。
 
   【结构】
-    顶部：三个筛选标签（进行中 / 全部 / 已完成）+ 一行统计
+    顶部：三个筛选标签（进行中 / 即将到期 / 全部 / 已完成）+ 一行统计
+    顶部下方：「24 小时内到期」警示条（有符合项时才出现，点它切到「即将到期」筛选）
     中间：任务卡片列表
       左边  勾选框（catchtap，避免连带触发"进入编辑"）
-      中间  标题 / 类型 / 日期 / 时间或节次 / 优先级 / 预计耗时 / 重复
+      中间  标题 / 类型 / 日期 / 时间或节次 / 优先级 / 预计耗时 / 重复 /「即将到期」
             子任务多一行「↳ 属于：<父标题>」（点它跳父任务）
       右边  删除按钮（catchtap，弹窗二次确认）
     底部：「加载更多」或「已全部加载」
 
   【字段来源】都用到的字段都在 tasks.js 的 data 里初始化过：
     filters / taskFilter / filterText / visibleItems / hasMore / emptyText /
-    loading / errorText / busyId / totalCount / pendingCount / doneCount / todayCount
+    loading / errorText / busyId / totalCount / pendingCount / doneCount / todayCount /
+    dueSoonCount / dueSoonText
     visibleItems[i] = { id, title, type, typeLabel, done, priority, priorityLabel,
                         highPriority, dateText, isToday, whenText, location,
                         estimateText, repeatText, parentId, parentTitle,
-                        showParent, childCount, subtaskOfOther }
+                        showParent, childCount, subtaskOfOther, isSoon }
 -->
 
 <view class="page">
@@ -54,6 +56,18 @@
     <view class="ai-hint" wx:if="{{decomposeHint}}">{{decomposeHint}}</view>
   </view>
 
+  <!--
+    一.5、【降级提示】24 小时内到期的截止事项
+    —— 这条**不依赖微信订阅消息**（不依赖模板是否配好、用户是否授权、remind 云函数是否可用），
+       永远是纯前端拿已拉到的列表现算的。点一下切到「即将到期」筛选，把那几条摆到眼前。
+       没有符合项时 dueSoonText 是空串 → 这一条整条不渲染。
+  -->
+  <view class="soon-banner" wx:if="{{dueSoonText}}" hover-class="soon-banner-hover" bindtap="onTapSoonBanner">
+    <text class="soon-icon">⏰</text>
+    <text class="soon-text">{{dueSoonText}}</text>
+    <text class="soon-action">查看</text>
+  </view>
+
   <!-- 二、加载中 / 加载失败 -->
   <view class="state-box" wx:if="{{loading}}">
     <text class="state-text">正在加载任务…</text>
@@ -72,7 +86,7 @@
   <!-- 四、列表 -->
   <view class="list" wx:else>
     <view
-      class="card {{item.done ? 'card-done' : ''}}"
+      class="card {{item.done ? 'card-done' : ''}} {{item.isSoon ? 'card-soon' : ''}}"
       wx:for="{{visibleItems}}"
       wx:for-item="item"
       wx:key="id"
@@ -99,11 +113,14 @@
           >{{item.priorityLabel}}</text>
         </view>
 
-        <!-- 第二行：类型 / 日期 / 时间或节次 -->
+        <!-- 第二行：类型 / 日期 / 时间或节次 / 「即将到期」标记 -->
         <view class="line-meta">
           <text class="tag">{{item.typeLabel}}</text>
           <text class="meta {{item.isToday ? 'meta-today' : ''}}">{{item.dateText}}</text>
           <text class="meta" wx:if="{{item.whenText}}">{{item.whenText}}</text>
+          <!-- 视觉标记：24 小时内到期且未完成。样式沿用现有标签体系（与优先级同一版式，
+               只换配色），不新造一套设计语言 -->
+          <text class="meta-soon" wx:if="{{item.isSoon}}">即将到期</text>
         </view>
 
         <!-- 第三行：预计耗时 / 地点 / 重复（有才显示） -->

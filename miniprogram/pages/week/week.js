@@ -312,6 +312,7 @@ Page({
     occupiedRowsOfDay: occupiedRowsOfDay,
     periodSpanOf: periodSpanOf,
     locateRow: locateRow,
+    bestOverlapPeriod: bestOverlapPeriod,
     chipHeightOf: chipHeightOf,
     ROW_HEIGHT_RPX: ROW_HEIGHT_RPX,
     CHIP_GAP_RPX: CHIP_GAP_RPX,
@@ -357,6 +358,9 @@ function buildGrid(perDay, override, weekMonday) {
       label,
       timeText: range[0] && range[1] ? `${range[0]}-${range[1]}` : (range[0] || range[1] || ''),
       isBreak,
+      // 显式给 false：模板里用 row.isFallback 区分「其他时段」兜底行，
+      // 字段先在 data 里初始化好，免得渲染出 undefined（本页一直遵守这条）
+      isFallback: false,
     });
     rowIndexOfPeriod[number] = index;
   });
@@ -364,18 +368,35 @@ function buildGrid(perDay, override, weekMonday) {
   // 2) 先把每条任务定位到「起始行」
   const buckets = [];
   for (let i = 0; i < rows.length; i += 1) buckets.push([]);
-  let otherIndex = -1; // 「其他时段」行：有了才追加，没有就不占地方
+  /**
+   * 「其他时段」兜底行：**放在表头正下方（rows[0]）**，不放最后。
+   *
+   * 【为什么必须挪到最前】放最后时，用户得把 13 行课节全滑到底才看得见它 ——
+   * 真机上就等于"截止和子任务没显示出来"（那些时间落在默认作息的午休空档里，
+   * 定位不到课节行，全被兜到这里）。挪到第一行，它们一进页面就看得见。
+   *
+   * 【挪动时必须一起维护的东西】rows 与 buckets 是**同下标并行**的两份数组，
+   * rowIndexOfPeriod 又是"节次号 → 行下标"的映射：
+   *   * 用 unshift 同时给 rows 与 buckets 头部插一项 → 两者仍然一一对应；
+   *   * 插完把 rowIndexOfPeriod 里所有下标 +1，否则课节行会全部错位一行。
+   * 这三件事任何一件漏掉，卡片就会画到别的行上去。
+   */
+  let otherIndex = -1;
   const ensureOtherRow = () => {
     if (otherIndex === -1) {
-      otherIndex = rows.length;
-      rows.push({
+      rows.unshift({
         key: FALLBACK_ROW_KEY,
         number: 0,
         label: FALLBACK_ROW_LABEL,
         timeText: '',
         isBreak: false,
+        isFallback: true,
       });
-      buckets.push([]);
+      buckets.unshift([]);
+      Object.keys(rowIndexOfPeriod).forEach((number) => {
+        rowIndexOfPeriod[number] += 1;
+      });
+      otherIndex = 0;
     }
     return otherIndex;
   };
@@ -389,9 +410,15 @@ function buildGrid(perDay, override, weekMonday) {
   });
 
   // 3) 空的「其他时段」行不留着（课表不该多一条永远空着的横线）
+  //    它在最前面，所以摘掉要用 shift；同时把 rowIndexOfPeriod 的下标减回去，
+  //    让"节次号 → 行下标"这个映射始终是准的。
   if (otherIndex !== -1 && buckets[otherIndex].length === 0) {
-    rows.pop();
-    buckets.pop();
+    rows.shift();
+    buckets.shift();
+    Object.keys(rowIndexOfPeriod).forEach((number) => {
+      rowIndexOfPeriod[number] -= 1;
+    });
+    otherIndex = -1;
   }
 
   // 4) 铺成 7 列；同一行里多条任务都塞进同一个 cell，由 WXSS 并排排列
@@ -420,7 +447,7 @@ function buildGrid(perDay, override, weekMonday) {
   //   * FALLBACK_ROW_KEY（"其他时段"兜底行）不计入空闲
   const freeCounts = [];
   for (let d = 0; d < DAYS_PER_WEEK; d += 1) {
-    const occupied = occupiedRowsOfDay(buckets, rows, rowIndexOfPeriod, d);
+    const occupied = occupiedRowsOfDay(buckets, rows, rowIndexOfPeriod, d, override);
     let free = 0;
     rows.forEach((row, rowIndex) => {
       if (row.isBreak || row.key === FALLBACK_ROW_KEY) return; // 空档行与兜底行都不算
@@ -438,29 +465,50 @@ function buildGrid(perDay, override, weekMonday) {
  * 与渲染用的 buckets 是两份数据，故意的：渲染要"连堂只画一次"，
  * 统计要"每一节都算真的被占了"（见上面第 5 步的长注释）。
  *
+ * ===========================================================================
+ * 【截止（ddl）不占节次】—— 与 utils/planner.js 的 busyRangesOfDay 保持同一口径
+ * ===========================================================================
+ *   ddl 的语义是"某个时刻之前必须完成"，它**不是一段被占住的时间**：
+ *   12:00 交材料，不代表 11:45-12:25 这一节你上不了别的课。
+ *   编辑页的占用提示（planner.busyRangesOfDay）早就是这个口径：
+ *   "ddl 只有截止时刻 → 不产生占用区间"。
+ *
+ *   同一个问题（"一条截止算不算占了这段时间"）如果在两个页面给出相反答案，
+ *   评审一眼就能看出是洞 —— 所以这里排除 ddl，让它与编辑页一致。
+ *
+ *   【注意】只是**不计入空闲统计**：ddl 的卡片照旧画在它到期时刻对应的那一行
+ *   （可见性不能退，用户就是要看到"12:00 前要交材料"）。所以这里不能去改
+ *   buildGrid 的 buckets —— 那会让卡片直接消失。这又是一次"排版与统计不能
+ *   共用同一个数据结构"：排版要它在，统计要不数它。
+ *
  * @param {Array<Array<{dayIndex: number, task: object}>>} buckets 每个任务只出现在它的起始行
  * @param {Array<object>} rows 行数组（用来索引）
  * @param {object} rowIndexOfPeriod 节次号 → 行下标
  * @param {number} dayIndex 0 = 周一
+ * @param {object|null} override 校准过的作息表（resolveSpan 要用，必须与排版同源）
  * @returns {Array<boolean>} 长度与 rows 相同；true = 这一行在这一天被占了
  */
-function occupiedRowsOfDay(buckets, rows, rowIndexOfPeriod, dayIndex) {
+function occupiedRowsOfDay(buckets, rows, rowIndexOfPeriod, dayIndex, override) {
   const occupied = [];
   for (let i = 0; i < rows.length; i += 1) occupied.push(false);
 
   buckets.forEach((items) => {
     items.forEach((item) => {
       if (!item || item.dayIndex !== dayIndex) return;
-      const span = periodSpanOf(item.task);
-      if (!span) {
-        // 没有 span 的（落进「其他时段」的兜底任务）不占任何课节行，保持原样
+      // 截止只标出到期时刻，不占时间（与 planner.busyRangesOfDay 同口径）
+      if (str(item.task && item.task.type) === 'ddl') return;
+      // 【与 locateRow 共用同一个口径】否则会出现"卡片画在第 3 节行、第 3 节却算空闲"
+      const resolved = resolveSpan(item.task, override);
+      if (!resolved.span) {
+        // 没有落点（进「其他时段」的）不占任何课节行，保持原样
         return;
       }
-      for (let n = span[0]; n <= span[1]; n += 1) {
+      const numbers = resolved.degenerate ? [resolved.span[0]] : rangeOf(resolved.span[0], resolved.span[1]);
+      numbers.forEach((n) => {
         const index = rowIndexOfPeriod[n];
         // 越界的节次号（例如写了"第14节"但表里只有 13 行）安全忽略
         if (index !== undefined && occupied[index] !== undefined) occupied[index] = true;
-      }
+      });
     });
   });
 
@@ -470,26 +518,166 @@ function occupiedRowsOfDay(buckets, rows, rowIndexOfPeriod, dayIndex) {
 /**
  * 任务落在哪一行。
  *   1. 有 periods（"7-9"）→ 用它的起始节次定位（最准，是用户/导入时明确写下的）
- *   2. 没有 periods 但有时间 → 用 periods.periodSpanFromTimes 反推起始节次
- *      （只填了结束时间也能定位，这是 Python 版的行为）
- *   3. 都没有 → -1，交给「其他时段」
+ *   2. 没有 periods 但有**起止时间** → 取"与 [start,end] 重叠分钟数最多"的那一节
+ *   3. 只有 end_time（截止）→ 照旧用 periods.periodSpanFromTimes 的"结束时刻包含判定"
+ *   4. 都没有 → -1，交给「其他时段」
+ *
+ * ===========================================================================
+ * 【第 2 条为什么要按"最大重叠"挑，而不是照抄 periodSpanFromTimes】
+ * ===========================================================================
+ *   periodSpanFromTimes 是**就位吸附**：它先看"起点属于哪一节"，起点不在任何一节里
+ *   才退回按结束时刻定位。于是会挑出一节**跟这条任务几乎没关系**的行：
+ *     * 「09:55-10:55」默认作息 → 起点 09:55 不属于任何一节 → 退回按结束时刻 10:55
+ *       → 10:55 恰好是第 4 节的开始（包含判定含端点）→ 落第 4 节行，
+ *       而它与第 4 节的重叠是 **0 分钟**（它真正占的是第 3 节 10:00-10:45 那 45 分钟）。
+ *   用户看到"时间写着 09:55-10:55、卡片却在第 4 节那一行"，就是我们一直在修的那类
+ *   "时间与显示对不上"。所以**只在这一条路径上**改用最大重叠：
+ *   与当天所有节次逐一算重叠分钟数，取最大的那一节；**最大重叠 ≤ 0 才返回 -1**
+ *   （跟哪一节都没交集 → 交给「其他时段」，它现在就在表头下方第一行，一眼能看到，
+ *   卡片上还写着自己的时间）。并列时取节次号小的（与 periodNumberAt 的既有排序一致）。
+ *
+ * 【这一条不比就落空】「09:40-10:40」起点 09:40 被第 2 节包含（含端点）但重叠 0 分钟，
+ *   而第 3 节有 40 分钟 —— 按"起点所在节必须有重叠"判会把它误伤进兜底行，
+ *   按最大重叠判才会正确地落到第 3 节。
+ *
+ * 【绝不改动 periodSpanFromTimes 本身】它是全项目共用口径（编辑页的冲突提示等也在用），
+ *   这里只是页面自己的"落在哪一行"选择器。
  *
  * @returns {number} 行下标；定位不到返回 -1
  */
 function locateRow(task, rowIndexOfPeriod, override) {
-  let span = periodSpanOf(task);
-  if (!span) {
-    const startTime = str(task.start_time);
-    const endTime = str(task.end_time);
-    if (!startTime && !endTime) return -1;
-    const derived = periods.periodSpanFromTimes(startTime, endTime, override);
-    if (!derived) return -1;
-    span = derived;
-  }
-  for (let n = span[0]; n <= span[1]; n += 1) {
-    if (rowIndexOfPeriod[n] !== undefined) return rowIndexOfPeriod[n];
+  const resolved = resolveSpan(task, override);
+  const span = resolved.span;
+  if (!span) return -1;
+  // 退化区间（只有 start、或 start/end 粘在一起）只把**落点那一节**算作占用，
+  // 避免把整段都算成"这课上满了"（那会凭空少掉好几节空闲）
+  const numbers = resolved.degenerate ? [span[0]] : rangeOf(span[0], span[1]);
+  for (let i = 0; i < numbers.length; i += 1) {
+    if (rowIndexOfPeriod[numbers[i]] !== undefined) return rowIndexOfPeriod[numbers[i]];
   }
   return -1;
+}
+
+/** [from, to] 展开成节次号数组（闭区间） */
+function rangeOf(from, to) {
+  const list = [];
+  for (let n = from; n <= to; n += 1) list.push(n);
+  return list;
+}
+
+/**
+ * 一条任务"占哪几节"的统一口径 —— **排版（locateRow）与统计（occupiedRowsOfDay）
+ * 都必须走它**，否则会出现"卡片画在某一行、那行却没被算成占用"这种自相矛盾。
+ *
+ * 返回的 span 语义：
+ *   * 有 periods（"7-9"）→ 原样 [7,9]，degenerate=false，占满 7~9 三行
+ *   * 有 start+end 时间 → 按"最大重叠"选中的**单节** [n,n]，degenerate=false
+ *   * 只有 end_time（截止）→ [n,n]，degenerate=true（零长：不占时间，只标时刻）
+ *   * start 有、end 缺失/倒挂 → 零长区间命中 [n,n]，degenerate=true
+ *   * 定位不到 → span=null（交给「其他时段」，不占任何课节行）
+ *
+ * @returns {{span: number[]|null, degenerate: boolean}}
+ */
+function resolveSpan(task, override) {
+  const byPeriods = periodSpanOf(task);
+  if (byPeriods) return { span: byPeriods, degenerate: false };
+
+  const startTime = str(task.start_time);
+  const endTime = str(task.end_time);
+  if (!startTime && !endTime) return { span: null, degenerate: false };
+
+  // 只有 end_time 的（典型是 ddl）走"结束时刻包含判定"。
+  // 一条 12:00 的截止是零长区间，与第 5 节的重叠是 0 分钟 —— 若把它也套上最大重叠，
+  // 它会掉进「其他时段」，"截止与子任务不出现在时间表里"那个问题立刻复活。
+  // 截止的语义就是"标出到期时刻"，本来就该吸附到那个时刻所在的那一节。
+  if (!startTime) {
+    const byEnd = periods.periodSpanFromTimes('', endTime, override);
+    if (!byEnd) return { span: null, degenerate: false };
+    return { span: [byEnd[0], byEnd[0]], degenerate: true };
+  }
+
+  const best = bestOverlapPeriod(startTime, endTime, override);
+  if (best === null) return { span: null, degenerate: false };
+  // end 缺失或早于 start（脏数据）→ 零长区间：同样不占时间
+  const startMin = periods.toMinutes(startTime);
+  const endMin = periods.toMinutes(endTime);
+  const degenerate = (endMin === null || endMin <= startMin);
+  return { span: [best, best], degenerate: degenerate };
+}
+
+/**
+ * 找出与 [start, end] 重叠分钟数最多的**行**，作为这条任务的落点。
+ *
+ * ===========================================================================
+ * 【空档行（午休 / 休息）可以接任务 —— 这是 Python 版的有意设计】
+ * ===========================================================================
+ *   `config.py:225-234` 的 gap_period_range 注释原话是"让这段时间真的能接住任务"。
+ *   理由是「午休」行**不是一条假的横线**：
+ *     * 它是 periodRows 生成的一行，有**真实的时间区间**（校准作息下第 6 节 = 12:25-14:15）；
+ *     * 它**真的画在网格里**。一条 12:30 的任务落在它里面，用户就是在那一行找它；
+ *     * 它**本来就不计入空闲节数**（见 freeCounts 的统计口径），所以往里面放卡片
+ *       不会污染「空闲 N 节」这个数字 —— 两个口径并不冲突。
+ *   这与"12:00 在默认作息里没有任何一行接得住、所以进「其他时段」"**不是一回事**：
+ *   前者有行可落，后者连行都没有。
+ *
+ * 【为什么一度排除了它，又为什么回退】（写清判据，免得以后被当成反复无常）
+ *   一开始收到的用例要求「12:25-13:25（校准作息）→ 其他时段」。那条用例是在
+ *   **只考虑真实课节**的前提下推出来的，忘了空档行本身也是一个区间（它与第 6 节
+ *   重叠 60 分钟）。于是临时加了一行 `breakLabel` 早退去凑那个期望值。
+ *   复核后确认**用例写错了、以本实现为准**，判据就是上面那三条（有真实区间 /
+ *   画在网格里 / 不计入空闲）。所以那行早退已删除 —— 空档行与其他行一视同仁地
+ *   参与"最大重叠"比较。
+ *
+ * 【零长区间按"包含判定"定位】
+ *   start 缺失、或 end 早于 start（脏数据）时，区间退化成 start 那一刻的一个点；
+ *    点的"重叠"恒为 0，若仍要求"重叠 > 0"就永远定位不到。所以这种退化情形改用
+ *    "这个时刻落在哪一节里"来定，与 ddl 那条路径的口径一致。
+ *    （正常区间仍要求**严格大于 0** 的重叠 —— 12:25-13:25 与第 5 节的重叠是 0，
+ *      正是靠这一条它才不会被吸附到第 5 节。）
+ *
+ * @param {string} start "HH:MM"
+ * @param {string} end "HH:MM"（可空 → 退化成零长区间）
+ * @param {object|null} override 校准过的作息表
+ * @returns {number|null} 节次号；与任何一行都没有交集时返回 null
+ */
+function bestOverlapPeriod(start, end, override) {
+  const startMin = periods.toMinutes(start);
+  if (startMin === null) return null;
+
+  let endMin = periods.toMinutes(end);
+  let degenerate = false;
+  if (endMin === null || endMin < startMin) {
+    endMin = startMin;   // 缺失 / 倒挂 → 零长区间
+    degenerate = true;
+  }
+  if (endMin === startMin) degenerate = true;
+
+  // 每一行都是候选 —— **包括空档行（午休/休息）**：
+  // 它有真实时间区间、也真的画在网格里，而且不计入空闲节数（见函数头注释）。
+  const numbers = periods.periodNumbers(override);
+  let best = null;
+  let bestOverlap = 0;    // 初始 0：只有"严格大于 0"的重叠才算命中
+  let contained = null;   // 零长区间用：第一个包含该时刻的行
+
+  numbers.forEach((number) => {
+    const range = periods.effectivePeriodRange(number, override) || ['', ''];
+    const begin = periods.toMinutes(range[0]);
+    const finish = periods.toMinutes(range[1]);
+    if (begin === null || finish === null) return;
+
+    if (contained === null && startMin >= begin && startMin <= finish) contained = number;
+
+    const overlap = Math.max(0, Math.min(endMin, finish) - Math.max(startMin, begin));
+    if (overlap <= 0) return;
+    // 并列时取节次号小的：numbers 已升序，用"严格大于"比较即可天然做到
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      best = number;
+    }
+  });
+
+  if (degenerate) return contained;
+  return best;
 }
 
 /** 解析 task.periods（"7-9" / "7" / [7,9]）→ [起, 止]；解析不出来返回 null */

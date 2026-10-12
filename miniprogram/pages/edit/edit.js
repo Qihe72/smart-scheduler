@@ -23,9 +23,29 @@
  *   子任务也是"一件事"，允许有日期时间；但 DDL 的语义是"只有一个截止时刻"，
  *   所以选「截止」时隐藏开始时间，只留截止时间（与云函数的归一化一致：
  *   DDL 会把 start_time 迁移到 end_time 并清空 start_time）。
+ *
+ * ===========================================================================
+ * 【占用提示（"这段时间已经有事了"）】
+ * ===========================================================================
+ *   日期 + 时间（或节次）一填好，就在时间那一栏下面出一行红字，例：
+ *     该时间段已被占用：08:30-09:55 光学实训（与 1 条日程重叠）
+ *   旁边给一个「换到最近的空闲**课节**」按钮。五条底线：
+ *     1. **只提醒，不拦人**：保存逻辑一个字都不改（用户可能就是故意重叠），
+ *        也**不加**二次确认弹窗 —— 那会让"保存"这件事变啰嗦；
+ *     2. **算不动就不算**：任务列表拉不到时静默降级成"没有提示"，
+ *        绝不因为拉不到列表就让新建任务不可用；
+ *     3. **编辑时排除自己**：否则编辑自己的时间会一直撞自己，红字永远消不掉；
+ *     4. **作息自己拉一次**（loadPeriodSettings）：绝不把内置默认作息当成
+ *        用户的校准作息用 —— 那是"课表时间对不上"这一类 bug 的老根；
+ *     5. **避让只给"整段的空闲课节"**（候选起点只有各节次开始时刻）：换出来的
+ *        起点必然被某一节包含，周视图才画得对行；找不到就明说没有，不给
+ *        "09:57 这种课间时刻" —— 那会让卡片落在跟时间对不上的一行。
+ *   检测逻辑全在 utils/planner.js 的纯函数里（busyRangesOfDay / findConflicts /
+ *   suggestFreeSlot，节次换算走 slotPeriods），这里只负责"什么时候算"和"算完怎么显示"。
  */
 
 const api = require('../../utils/api.js');
+const planner = require('../../utils/planner.js');
 
 /** 类型中文名（放顶部：下面的函数是提升的，调用它们时这个常量必须已初始化） */
 const TYPE_LABELS = { event: '日程', ddl: '截止', subtask: '子任务' };
@@ -123,6 +143,12 @@ Page({
     customDuration: false,   // 是否用数字输入框填耗时（预设里没有的值）
     customDurationText: '',
 
+    // --- 占用提示（见 refreshBusy） ---
+    busyHint: '',            // 时间栏下方的红字；空串 = 不显示
+    busyNote: '',            // 附注：有任务没写预计耗时，时长是估的
+    canAvoid: false,         // 「换到最近的空闲课节」能不能点（找不到整段空闲课时为 false）
+    avoidTip: '',            // 找不到空闲课节时的说明文字
+
     // --- 页面状态 ---
     taskId: '',
     isEdit: false,
@@ -139,6 +165,9 @@ Page({
     const taskId = str(options && options.id);
     this.original = null;
     this.allTasks = [];
+    // 自己拉到的设置（见 loadPeriodSettings）；null / '' 表示"还没拿到，先看 globalData"
+    this.periodTimes = null;
+    this.semesterStart = '';
 
     // 新增：不预设时间，只把控件显示值放到一个中性位置
     this.setData({
@@ -150,12 +179,68 @@ Page({
     });
 
     if (taskId) this.loadTask(taskId);
-    else this.refreshDerived();
+    else this.loadAllTasks();
   },
 
   // -------------------------------------------------------------------------
   // 读取（编辑模式）
   // -------------------------------------------------------------------------
+
+  /**
+   * 新增任务时也要把已有任务拉下来 —— 占用提示要拿它们做对比。
+   *
+   * 【为什么失败只 warn 不报错】新建任务本身不依赖这份列表（保存走 addTask）。
+   * 拉不到就只是"这次没有占用提示"；如果照着 loadTask 那样写 errorText，
+   * 整个表单会变成一页错误提示，新建任务直接不可用 —— 那是本末倒置。
+   */
+  loadAllTasks() {
+    this.loadPeriodSettings();   // 与列表并行拉，谁先回来都会重算一次占用
+    api.listTasks().then((result) => {
+      if (result && result.ok === false) {
+        console.warn('[edit] 拉取任务列表失败，本次不显示占用提示：', describeError(result));
+        return;
+      }
+      this.allTasks = extractTasks(result);
+      // 列表是异步回来的：这期间用户可能已经填好时间了，补算一次
+      this.refreshBusy();
+    }).catch((err) => {
+      // api.listTasks 按约定不会 reject，这里只是兜底，行为与上面一致：静默降级
+      console.warn('[edit] 拉取任务列表失败，本次不显示占用提示：', describeError(err));
+    });
+  },
+
+  /**
+   * 拉一次设置（校准作息 + 学期开始日期），拿到就重算占用。
+   *
+   * 【为什么编辑页必须自己拉，不能只信 app.globalData】app.js 启动时确实同步过一次
+   * settings，但冷启动直接深链进编辑页（或 app 那次同步失败 / 还没回来）时，
+   * globalData 里的 periodTimes 还是空对象 —— 而**空对象 = 用内置默认作息**。
+   * 拿默认作息当校准作息用，正是"课表显示的时间跟实际对不上"那一类 bug 的根源
+   * （默认作息里第 5 节是 14:00，校准后可能是 11:45），所以这里必须自己确认一次：
+   * 只要 settings 里给了 period_times，占用检测就必须用**它**。
+   *
+   * 【失败不阻塞】按 api.js 的约定，getSettings 失败时它自己会弹一次 toast（那是
+   * "请求失败"提示，页面这边关不掉）；本页保证的是：不写 errorText、不进错误页、
+   * 照旧允许填表与保存 —— 代价只是这次的占用提示可能按默认作息算，不准而已。
+   * 这比"因为读不到设置就不让人建任务"要好得多。
+   */
+  loadPeriodSettings() {
+    return api.getSettings().then((result) => {
+      if (result && result.ok === false) {
+        console.warn('[edit] 读取设置失败，本次按已有作息（可能是默认表）算占用：', describeError(result));
+        return;
+      }
+      const settings = extractSettings(result);
+      // 只有真的拿到了才覆盖：云端没存过 period_times 时给的是 null，
+      // 这时保持"空 = 默认作息"的语义，而不是把 {} 当成一份校准表
+      if (settings.period_times) this.periodTimes = settings.period_times;
+      if (settings.semester_start) this.semesterStart = settings.semester_start;
+      this.refreshBusy();
+    }).catch((err) => {
+      // api.getSettings 按约定不会 reject，这里只是兜底：同样静默降级
+      console.warn('[edit] 读取设置失败，本次按已有作息算占用：', describeError(err));
+    });
+  },
 
   /**
    * 取全部任务 → 找到目标那条填进表单；同时把父任务候选也准备好。
@@ -167,6 +252,7 @@ Page({
    */
   loadTask(taskId) {
     this.setData({ loading: true, errorText: '' });
+    this.loadPeriodSettings();   // 编辑模式同样要自己确认一次作息（见 loadPeriodSettings）
     api.listTasks().then((result) => {
       if (result && result.ok === false) throw new Error(describeError(result));
       const tasks = extractTasks(result);
@@ -320,6 +406,8 @@ Page({
   /** 节次（"7-9" / "7"；留空表示按起止时间自动归类） */
   onPeriodsInput(event) {
     this.setData({ 'form.periods': str(event.detail.value) });
+    // 节次也是"时间信息"的一种（没填时间时占用区间就是靠它算出来的），得跟着重算
+    this.refreshBusy();
   },
 
   /** 优先级 */
@@ -427,7 +515,12 @@ Page({
   // 派生文案（WXML 里不写复杂表达式，都在这里算好）
   // -------------------------------------------------------------------------
 
-  /** 重算 isDdl / isWeekly / 各种提示文字 */
+  /**
+   * 重算 isDdl / isWeekly / 各种提示文字。
+   *
+   * 末尾顺带重算一次占用提示：所有会影响"时间占用"的交互（日期 / 起止时间 / 时长 /
+   * 类型）都已经汇到这里了，在这一处收口比在每个 handler 里各写一行更难漏。
+   */
   refreshDerived() {
     const form = this.data.form;
     const isDdl = form.type === 'ddl';
@@ -451,6 +544,171 @@ Page({
       parentText,
       weekRangeText: `第 ${form.week_start} ~ ${form.week_end} 周`,
       estimateText: estimate > 0 ? estimateLabel(estimate) : '未填写',
+    });
+    this.refreshBusy();
+  },
+
+  // -------------------------------------------------------------------------
+  // 占用提示 / 一键避让
+  // -------------------------------------------------------------------------
+
+  /** 正在填的这条任务（占用检测里的"候选"）：字段与 planner.findConflicts 的 candidate 对齐 */
+  candidateOf(form) {
+    const source = form || this.data.form || {};
+    const type = str(source.type) || 'event';
+    const isDdl = type === 'ddl';
+    const startTime = str(source.start_time);
+    const endTime = str(source.end_time);
+    return {
+      id: str(this.data.taskId),          // 编辑模式下就是这条自己的 _id（用来排除自己）
+      type,
+      date: str(source.date),
+      // 【与 buildPayload 同一口径】ddl 的 start_time 会连同保存一起被清掉（截止只有一个时刻），
+      // 所以检测时也不能拿它当"开始时间"：否则从"日程"改成"截止"后，
+      // 页面会提示一段根本不会被存下来的忙碌，红字与保存结果对不上。
+      start_time: isDdl ? '' : startTime,
+      end_time: isDdl ? (endTime || startTime) : endTime,
+      estimate_min: Number(source.estimate_min) || 0,
+      periods: str(source.periods),
+    };
+  },
+
+  /**
+   * 重算「该时间段已被占用」以及"能不能一键避让"。
+   *
+   * 【为什么同步算】planner 那三个函数都是纯内存计算（不发请求），所以每次改时间
+   * 就地重算最稳；反过来，如果做成"每次按键发一次请求"，不但在输入时浪费调用，
+   * 还会出现"后发的先回"把提示冲成旧结论的问题。
+   *
+   * 【什么时候不提示】没日期、或者既没时间也没节次时不提示 —— 那时用户还没表达
+   * 任何时间意图，弹一句红字只是噪音。ddl 只填了截止时刻的情况**不用特判**：
+   * planner 的口径是"截止时刻不是一段忙碌"，结论自然是没有占用。
+   */
+  refreshBusy() {
+    const form = this.data.form || {};
+    const date = str(form.date);
+    const hasTime = !!(str(form.start_time) || str(form.end_time));
+    const hasPeriods = !!str(form.periods);
+
+    if (!date || (!hasTime && !hasPeriods)) {
+      this.setBusy({});
+      return;
+    }
+
+    const periodTimes = this.currentPeriodTimes();
+    const semesterStart = this.currentSemesterStart();
+    const found = planner.findConflicts(this.candidateOf(form), this.allTasks || [], periodTimes, {
+      semesterStart,
+    });
+    const conflicts = found.conflicts || [];
+    if (!conflicts.length) {
+      this.setBusy({});
+      return;
+    }
+
+    // 期望时刻与时长都取自 findConflicts 算好的"候选自己的区间"：
+    // 这样"建议的空闲课节"和"红字里说的那段时间"永远是同一个口径（兜底规则也不会写两遍）。
+    const slot = planner.suggestFreeSlot(date, found.end - found.start, this.allTasks || [], periodTimes, {
+      after: found.start,
+      semesterStart,
+    });
+
+    this.setBusy({
+      busyHint: buildBusyHint(conflicts),
+      busyNote: buildBusyNote(conflicts),
+      canAvoid: !!slot,
+      // 找不到就是找不到：明说"没有整段的空闲课节"，不让用户以为按钮坏了
+      avoidTip: slot ? '' : '今天没有整段的空闲课节，可以自己挑一个别的时间。',
+    });
+  },
+
+  /** 占用提示统一从这里写回（一次 setData，字段齐了才不会留下上一轮的残影） */
+  setBusy(patch) {
+    this.setData({
+      busyHint: str(patch.busyHint),
+      busyNote: str(patch.busyNote),
+      canAvoid: patch.canAvoid === true,
+      avoidTip: str(patch.avoidTip),
+    });
+  },
+
+  /**
+   * 当前生效的校准作息：**本页自己拉到的那份优先**（见 loadPeriodSettings），
+   * 其次才看 app.globalData（app.js 启动时同步过一次），最后退回 {}＝内置默认作息。
+   */
+  currentPeriodTimes() {
+    if (this.periodTimes && typeof this.periodTimes === 'object' && Object.keys(this.periodTimes).length) {
+      return this.periodTimes;
+    }
+    return globalPeriodTimes();
+  },
+
+  /** 当前生效的学期开始日期（算"每周重复的课这周上不上"要用），口径同上 */
+  currentSemesterStart() {
+    return str(this.semesterStart) || globalSemesterStart();
+  },
+
+  /**
+   * 一键避让：把起止时间换成"离期望时刻最近的空闲**课节**"。
+   *
+   * 【为什么是"课节"而不是"任意空闲分钟段"】suggestFreeSlot 的候选起点只有各节次的
+   * 开始时刻（见 utils/planner.js 的 freeSlotCandidates），所以换出来的起点**必然**
+   * 被某一节包含 → 节次写得出来 → 周视图把卡片画在正确的那一行。反过来，如果允许
+   * "09:57 这种课间时刻"当起点，周视图只能靠就近吸附排版，卡片就会落在跟时间对不上
+   * 的行上 —— 那正是用户最早报的那类观感问题。
+   *
+   * 【节次怎么填】一律走 planner.slotPeriods()。它推不出来时返回空串，这里就写空串
+   * （绝不把老节次留在表单里造成"时间与显示不符"）；这条分支正常路径走不到，只是防御。
+   *
+   * 【找不到就不硬给】按钮此时是灰的，点一下也要有一句明确的话，
+   * 而不是默默什么都不发生、也不是随便塞一个会把卡片画错行的时间。
+   */
+  onAvoidBusy() {
+    const form = this.data.form || {};
+    const date = str(form.date);
+    const periodTimes = this.currentPeriodTimes();
+    const semesterStart = this.currentSemesterStart();
+    const found = planner.findConflicts(this.candidateOf(form), this.allTasks || [], periodTimes, {
+      semesterStart,
+    });
+
+    // 理论上进不来（按钮只在有冲突时出现）；真进来了就按"没有可避让的"处理，别抛错
+    const duration = found.start === null ? 0 : (found.end - found.start);
+    const slot = planner.suggestFreeSlot(date, duration, this.allTasks || [], periodTimes, {
+      after: found.start === null ? undefined : found.start,
+      semesterStart,
+    });
+
+    if (!slot) {
+      this.setBusy({
+        busyHint: this.data.busyHint,
+        busyNote: this.data.busyNote,
+        canAvoid: false,
+        avoidTip: '今天没有整段的空闲课节，可以自己挑一个别的时间。',
+      });
+      wx.showToast({ title: '今天没有整段的空闲课节', icon: 'none' });
+      return;
+    }
+
+    const periodsText = planner.slotPeriods(slot.start_time, slot.end_time, periodTimes);
+    const patch = {
+      'form.start_time': slot.start_time,
+      'form.end_time': slot.end_time,
+      // 推不出节次就留空：绝不留一个跟新时间对不上的老节次（那会把卡片画到别处）
+      'form.periods': periodsText,
+      // picker 的显示值也要跟着走，否则"改"按钮点开还停在旧时刻上
+      startPicker: slot.start_time,
+      endPicker: slot.end_time,
+    };
+
+    this.setData(patch);
+    this.refreshDerived();   // 里面会重算占用（换完通常就没有红字了）
+    // 只报时间，不报节次：时段可能只盖住某节课的一头，说"第 3-4 节"反而容易让人以为占满了整节
+    wx.showToast({
+      title: periodsText
+        ? `已换到 ${slot.start_time}-${slot.end_time}`
+        : `已换到 ${slot.start_time}-${slot.end_time}，节次请自己填`,
+      icon: 'none',
     });
   },
 
@@ -685,8 +943,103 @@ function buildParentOptions(allTasks, selfId, currentParentId) {
 }
 
 // ---------------------------------------------------------------------------
+// 占用提示的文案（纯函数：输入是 planner 算出来的占用区间，输出是给人看的一句话）
+// ---------------------------------------------------------------------------
+
+/**
+ * 红字提示。多条时只列前 2 条 + 「等 N 条」—— 全列出来会把表单挤得没法看，
+ * 而"到底撞了哪几条"用户其实在列表页一眼就能看到。
+ *
+ *   1 条：该时间段已被占用：08:30-09:55 光学实训（与 1 条日程重叠）
+ *   2 条：该时间段已被占用：08:30-09:55 光学实训、10:00-11:40 高等数学（与 2 条日程重叠）
+ *   3 条：该时间段已被占用：08:30-09:55 光学实训、10:00-11:40 高等数学 等 3 条
+ */
+function buildBusyHint(conflicts) {
+  const list = conflicts || [];
+  if (!list.length) return '';
+  const shown = list.slice(0, 2).map(busyRangeLabel).join('、');
+  if (list.length > 2) return `该时间段已被占用：${shown} 等 ${list.length} 条`;
+  return `该时间段已被占用：${shown}（与 ${list.length} 条${busyTypeWord(list)}重叠）`;
+}
+
+/** 一条占用区间写成 "08:30-09:55 光学实训" */
+function busyRangeLabel(range) {
+  const item = range || {};
+  const start = str(item.start_time);
+  const end = str(item.end_time);
+  const time = start && end ? `${start}-${end}` : (start || end);
+  const title = str(item.title) || '(无标题)';
+  return time ? `${time} ${title}` : title;
+}
+
+/** "与 N 条 XX 重叠"里的 XX：撞上的是同一种类型就说类型名，混着就说"任务" */
+function busyTypeWord(list) {
+  const first = str(list[0].type) || 'event';
+  const same = list.every((item) => (str(item.type) || 'event') === first);
+  return same ? (TYPE_LABELS[first] || '任务') : '任务';
+}
+
+/**
+ * 附注：撞上的任务里有"没写预计耗时"的，那段时间长度是按 30 分钟估的。
+ * 必须说出来 —— 与项目里"算不准就不猜（算不准也要说清哪里不准）"是同一条原则。
+ */
+function buildBusyNote(conflicts) {
+  const estimated = (conflicts || []).filter((item) => item.estimated === true);
+  if (!estimated.length) return '';
+  return `其中 ${estimated.length} 条没写预计耗时，占用时长按 30 分钟估算。`;
+}
+
+// ---------------------------------------------------------------------------
 // 小工具
 // ---------------------------------------------------------------------------
+
+/**
+ * app.globalData 里的校准作息（settings.period_times）—— **兜底来源**。
+ *
+ * 页面自己拉到的那份优先（见 loadPeriodSettings 与 currentPeriodTimes 方法）：
+ * 这里只负责"页面还没拉到 / 拉失败"时给出一个可用的值。拿不到返回 {}，
+ * 语义上等于"完全用 periods.js 的内置默认作息"。
+ */
+function globalPeriodTimes() {
+  try {
+    const app = typeof getApp === 'function' ? getApp() : null;
+    if (app && typeof app.getPeriodTimes === 'function') return app.getPeriodTimes() || {};
+    if (app && app.globalData && app.globalData.periodTimes) return app.globalData.periodTimes;
+  } catch (err) {
+    // 极端情况下（页面卸载中）getApp 可能抛错：不能让它把整张表单带崩
+    console.warn('[edit] 读取作息失败，按默认作息算：', err);
+  }
+  return {};
+}
+
+/** app.globalData 里的学期开始日期（算"每周重复的课这周上不上"要用）；拿不到返回空串 */
+function globalSemesterStart() {
+  try {
+    const app = typeof getApp === 'function' ? getApp() : null;
+    if (app && typeof app.getSemesterStart === 'function') return str(app.getSemesterStart());
+    if (app && app.globalData) return str(app.globalData.semesterStart);
+  } catch (err) {
+    console.warn('[edit] 读取学期开始日期失败：', err);
+  }
+  return '';
+}
+
+/**
+ * 从 api.getSettings() 的返回值里取 {semester_start, period_times}。
+ * 与 pages/week 的 extractSettings 同一套口径（都兼容 res.data 包装、都校验日期格式）。
+ */
+function extractSettings(result) {
+  const empty = { semester_start: '', period_times: null };
+  if (!result) return empty;
+  const data = result.data === undefined ? result : result.data;
+  if (!data || typeof data !== 'object') return empty;
+  const start = str(data.semester_start);
+  const times = data.period_times && typeof data.period_times === 'object' ? data.period_times : null;
+  return {
+    semester_start: /^\d{4}-\d{2}-\d{2}$/.test(start) ? start : '',
+    period_times: times,
+  };
+}
 
 function str(value) {
   if (value === null || value === undefined) return '';

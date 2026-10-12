@@ -31,9 +31,15 @@
  * 【禁止自定义 baseUrl】服务商只能从白名单映射到写死的地址。绝不会因为 event 里
  *         带了地址就去请求它 —— 那等于把云函数变成任意请求转发器（SSRF）。
  *
- * 入参：{ text }（**只认这一个字段**）
- * 返回：{ ok:true, events, deadlines, needs_clarification, clarification_question }
- *       或 { ok:false, error:'AI 服务暂不可用' }
+ * 入参（**两个入口，靠 action 区分**）：
+ *   ① 文本解析（默认，无 action）：{ text }（**只认这一个字段**）
+ *      返回 { ok:true, events, deadlines, needs_clarification, clarification_question, tasks }
+ *           或 { ok:false, error:'AI 服务暂不可用' }
+ *   ② 课表截图识别：{ action:'parse_image', image_base64, mime_type, week_monday,
+ *                     semester_start, week_start, week_end, period_times }
+ *      返回 { ok:true, provider, model, events, deadlines, tasks, period_times, warnings, notes }
+ *           或 { ok:false, code, error }（code 见下面「识图」一节的 CODE_* 常量）
+ *      详见本文件「识图：课表截图 → 课程」那一节。
  */
 
 'use strict';
@@ -120,6 +126,17 @@ const PROVIDERS = {
     authCodes: ['1000', '1001', '1003', '1005'], // 身份验证失败
     modelMissingCodes: ['1211'], // 模型不存在，请检查模型代码
     paramCodes: ['1210', '1212', '1213', '1214', '1215', '1221', '1222', '1261'],
+    // 【识图能力】见 visionSupportOf()。判定只三态：true / false / 'unknown' —— 没收录的
+    // 一律 'unknown' 并**照常尝试**，让服务端报错说话（新模型层出不穷，硬说"不支持"会挡人）。
+    // 列表来源：智谱官方文档的多模态（VLM）模型页；改动时请只增减名字，不要改结构。
+    visionModels: [
+      'glm-5.3-flash', 'glm-5.3-flashx', 'glm-ocr',
+      'glm-4v', 'glm-4v-plus', 'glm-4v-flash',
+      'glm-4.1v-thinking-flash', 'glm-4.5v', 'glm-4.6v',
+    ],
+    // 只把**确定**是纯文本的写进来：判成 false 就一个请求都不发（省用户的钱），
+    // 所以宁可漏写（漏写只会退化成 'unknown'，照样试），也不能写错。
+    textOnlyModels: ['glm-4.7-flash'],
   },
   deepseek: {
     name: 'deepseek',
@@ -132,6 +149,9 @@ const PROVIDERS = {
     authCodes: [],
     modelMissingCodes: [],
     paramCodes: [],
+    // 【识图能力】DeepSeek 目前没有多模态模型 → 支持列表为空，识图会被事前拒掉并提示换服务商。
+    visionModels: [],
+    textOnlyModels: ['deepseek-chat', 'deepseek-reasoner'],
   },
 };
 
@@ -958,6 +978,995 @@ async function chatCompletion(messages, jsonMode, temperature, options) {
   return { content, error: null, provider: provider.name, model, source, reason: '' };
 }
 
+// ---------------------------------------------------------------------------
+// 识图：课表截图 → 课程（action: 'parse_image'）
+// ---------------------------------------------------------------------------
+/**
+ * ===========================================================================
+ * 这一节与上面的文本解析（handleParse）是**两条独立入口**，共享的只有三样：
+ *   1. 服务商表与 Key 的两级来源（resolveEffectiveConfig：用户自填 > 环境变量）
+ *   2. 容错 JSON 解析（extractJsonObject）与常量映射（TYPE_CN_TO_CONST / PRIORITY_CN_TO_CONST）
+ *   3. 出网方式（exports.postJson —— 契约测试替换它才能做到零网络回归）
+ *
+ * 刻意**不共享**的三件事，每条都有原因：
+ *   * 【超时】VISION_TIMEOUT_MS = 45 秒，文本路径仍是既成的 15 秒。识图要传图、
+ *     而 glm-5.3-flash 会先"思考"再答，15 秒几乎必然超时。两条路径的超时互相独立，
+ *     改一个不会动到另一个。
+ *   * 【不带 response_format】glm-5.3-flash 的 thinking 只能 enabled，官方也没承诺
+ *     JSON 模式一定生效，带上反而可能吃 400。所以 JSON 靠提示词约束 + 容错解析兜底。
+ *   * 【失败分码】文本路径对外只有一句统一文案；识图必须让用户知道"该换模型 / 该换小图 /
+ *     该稍后重试"，所以返回 { ok:false, code, error }。
+ *
+ * 【三条安全红线（改动时不许破）】
+ *   1. base64 **绝不进日志、绝不进错误信息**：日志里只允许出现「mime + 字节数」。
+ *      厂商的报错原文也要过 scrubImagePayload() 把长 base64 串抹掉再写日志。
+ *   2. 图片**只在内存里活这一次请求**：不落库、不上云存储、不缓存。
+ *   3. Key 仍只从服务端读（用户自填按 openid 查库 > 环境变量），前端传什么都不认。
+ * ===========================================================================
+ */
+
+/** 识图入口的 action 名（前端 utils/api.js 的 AI_PARSE_ACTION_PARSE_IMAGE 必须一致） */
+const ACTION_PARSE_IMAGE = 'parse_image';
+
+/** 图片路径的超时：45 秒（文本路径保持 TIMEOUT_MS = 15 秒不动） */
+const VISION_TIMEOUT_MS = 45000;
+
+/** base64 字符数上限：900000 ≈ 660 KB 原图。再大基本不是课表截图，直接拒 */
+const MAX_IMAGE_BASE64_CHARS = 900000;
+
+/** 只认这三种 MIME（与前端 wx.chooseMedia + wx.compressImage 的产物一致） */
+const ALLOWED_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+
+/** 识图采样参数：智谱官方对 glm-5.3-flash 的推荐值 */
+const VISION_TEMPERATURE = 1;
+const VISION_TOP_P = 0.95;
+
+/** 文案里推荐的识图模型（真正的"支持列表"是 PROVIDERS[*].visionModels） */
+const VISION_RECOMMENDED_MODELS = ['glm-5.3-flash', 'glm-ocr'];
+
+/** 失败码：前端按 code 决定给哪句话；error 永远是人话 */
+const CODE_VISION_UNSUPPORTED = 'VISION_UNSUPPORTED'; // 模型不支持识图（本需求的核心）
+const CODE_NO_API_KEY = 'NO_API_KEY';                 // 没有可用的 Key
+const CODE_BAD_IMAGE = 'BAD_IMAGE';                   // 图片格式/尺寸不合法
+const CODE_TIMEOUT = 'TIMEOUT';                       // 模型太慢（区别于其它失败）
+const CODE_QUOTA = 'QUOTA';                           // 欠费 / 限流 / 超额度
+const CODE_MODEL_MISSING = 'MODEL_MISSING';           // 模型名不存在
+const CODE_PARSE_FAILED = 'PARSE_FAILED';             // 拿到了回答但不是可用的 JSON
+const CODE_AUTH = 'AUTH';                             // Key 无效 / 无权限
+const CODE_FAILED = 'FAILED';                         // 其它失败（网络 / 5xx / 参数）
+const CODE_BAD_ACTION = 'BAD_ACTION';                 // 不认识的 action
+
+/** 图片相关的人话文案（**任何一条都不许把 base64 拼进来**） */
+const IMAGE_TOO_LARGE_MESSAGE = '图片太大，请重新截图或先裁剪，只保留课表部分';
+const IMAGE_INVALID_MESSAGE = '这张图没能识别：格式不支持或数据不完整，请用 JPG / PNG 的清晰截图';
+const IMAGE_EMPTY_MESSAGE = '没有收到图片数据，请重新拍照或从相册选一张课表截图';
+const NO_API_KEY_MESSAGE = '还没有可用的 AI Key，请到「我的 → AI 设置」填写后再识别图片';
+const PARSE_FAILED_MESSAGE = '没能从这张截图里读出课表，换一张更清晰、只含课表的截图，或改用文字录入';
+const VISION_QUOTA_MESSAGE = 'AI 额度不足或请求过于频繁，请稍后重试；也可以到「我的 → AI 设置」检查这个 Key 的额度';
+const VISION_AUTH_MESSAGE = 'AI Key 验证失败，请到「我的 → AI 设置」检查 Key 是否有效';
+const VISION_TIMEOUT_MESSAGE = `识别超时：等了 ${VISION_TIMEOUT_MS / 1000} 秒模型还没返回。`
+  + '可以换成 glm-ocr 试试（它更快），或稍后重试';
+
+/**
+ * 服务端报错里出现这些词，说明"这次请求带了图片，但模型/接口不认它"。
+ *
+ * 【为什么要靠关键词】各家对"模型不支持图片输入"的报错五花八门（有的 400、有的 422、
+ * 有的把它归进参数错误业务码），官方文档也没给一个稳定的错误码。所以先用关键词兜底，
+ * 并且要求**同时**满足"HTTP 400/415/422 或业务码属于参数类"，避免把 5xx、限流误判成它。
+ */
+const VISION_KEYWORDS = [
+  '不支持', '图片', '图像', '视觉', '识图', '多模态',
+  'image', 'vision', 'multimodal', 'content type', 'content-type', 'content_type',
+];
+
+/** 服务端说"图太大"的关键词（要先于 VISION_KEYWORDS 判：它同样含"图片"二字） */
+const IMAGE_TOO_LARGE_PATTERN = /(too large|too big|exceed|size limit|过大|尺寸|大小超|超出[^,，]{0,6}(大小|尺寸|限制))/i;
+
+/**
+ * 日志用的图片脱敏：把可能被厂商回显出来的长 base64 串换成占位符。
+ *
+ * 【为什么必须有】错误信息里会拼进服务端返回的原文。正常情况它只有一句中文报错，
+ * 但"参数有误"类的报错常常会**回显出错字段的内容**（例如 messages[1].content[1].image_url）。
+ * 一张 900 KB 的 base64 写进日志既会撑爆日志，也可能带上用户的隐私（课表截图）。
+ */
+function scrubImagePayload(text) {
+  return scrubSecret(text)
+    .replace(/[A-Za-z0-9+/]{60,}={0,2}/g, '<base64 已省略>') // base64 长串
+    .replace(/data:image\/[a-z+]+;base64,[^\s"']*/gi, 'data:image/<已省略>');
+}
+
+/** 模型名归一化：去空白、转小写，并容忍 `provider/model`、`model:free` 这类网关写法 */
+function normalizeModelKey(model) {
+  let text = toStr(model).toLowerCase();
+  const slash = text.lastIndexOf('/');
+  if (slash !== -1) text = text.slice(slash + 1);
+  const colon = text.indexOf(':');
+  if (colon !== -1) text = text.slice(0, colon);
+  return text.trim();
+}
+
+/**
+ * 取某个服务商的"已知支持识图 / 已知不支持识图"名单。
+ * providerName 认不出来时，把**所有**服务商的名单合起来看（宁可判得出，也不要漏判）。
+ *
+ * @param {string} providerName 'zhipu' / 'deepseek' / 其它
+ * @returns {{vision: string[], textOnly: string[]}}
+ */
+function visionModelLists(providerName) {
+  const name = toStr(providerName).toLowerCase();
+  const names = Object.prototype.hasOwnProperty.call(PROVIDERS, name) ? [name] : providerNames();
+  const vision = [];
+  const textOnly = [];
+  names.forEach((one) => {
+    (PROVIDERS[one].visionModels || []).forEach((item) => {
+      if (vision.indexOf(item) === -1) vision.push(item);
+    });
+    (PROVIDERS[one].textOnlyModels || []).forEach((item) => {
+      if (textOnly.indexOf(item) === -1) textOnly.push(item);
+    });
+  });
+  return { vision, textOnly };
+}
+
+/**
+ * 【本需求的核心】这个模型能不能识图？**三态**，不要简化成布尔。
+ *
+ *   true      已知支持（白名单里）→ 照常发请求
+ *   false     已知**不支持**（纯文本模型）→ **一个请求都不发**，直接回 VISION_UNSUPPORTED
+ *             （省用户的钱和时间：拿 glm-4.7-flash 传图，必然是白跑一次 + 一句看不懂的错）
+ *   'unknown' 没收录 → 照常尝试。模型迭代太快，把没见过的名字当成"不支持"会挡住能用的人；
+ *             真不支持时由服务端报错，再看事后那条关键词判定。
+ *
+ * @param {string} model 模型名（可带 provider/ 前缀或 :tag 后缀）
+ * @param {string} [providerName] 服务商名（'' = 不知道，按全部服务商合并看）
+ * @returns {boolean|'unknown'}
+ */
+function visionSupportOf(model, providerName) {
+  const key = normalizeModelKey(model);
+  if (!key) return 'unknown'; // 空模型名不代表任何模型（调用方会先按"没配模型"处理）
+  const lists = visionModelLists(providerName);
+  if (lists.vision.indexOf(key) !== -1) return true;
+  if (lists.textOnly.indexOf(key) !== -1) return false;
+  return 'unknown';
+}
+
+/**
+ * 「换一个能识图的模型」这句人话 —— 必须带**当前模型名**与**建议换的模型名**，
+ * 用户才知道去哪儿改、改成什么。DeepSeek 目前没有多模态，所以要说清"换服务商"。
+ *
+ * @param {string} model 当前模型名
+ * @param {string} providerName 当前服务商
+ * @returns {string}
+ */
+function visionUnsupportedMessage(model, providerName) {
+  const suggestions = VISION_RECOMMENDED_MODELS
+    .map((name) => (name === 'glm-ocr' ? `${name}（专做图文解析）` : `${name}（原生多模态，推荐）`))
+    .join('或');
+  const name = toStr(providerName).toLowerCase();
+  const where = name === 'deepseek'
+    ? 'DeepSeek 目前没有支持识图的模型，请到「我的 → AI 设置」把服务商换成智谱（zhipu），模型填'
+    : '请到「我的 → AI 设置」把模型换成';
+  return `当前模型 ${toStr(model)} 不具备识图能力，无法识别图片。${where} ${suggestions}，`
+    + '也可以继续用文字录入。';
+}
+
+/** 从报错体里抠出业务码（智谱是 error.code 的字符串数字） */
+function businessCodeOf(bodyText) {
+  const matched = toStr(bodyText).match(/"code"\s*:\s*"?([0-9A-Za-z_.-]{1,32})"?/);
+  return matched ? matched[1] : '';
+}
+
+/**
+ * 【事后那条腿】服务端报错看起来是"不接受图片输入"吗？**纯函数**，好单独测。
+ *
+ * 判定要**同时**成立两件事，缺一不可：
+ *   1. 语义词命中（不支持 / 图片 / image / multimodal / content type …）
+ *   2. 属于"参数类"错误：HTTP 400 / 415 / 422，或业务码在 provider.paramCodes 里
+ * 只看关键词会把 5xx、限流误判成"模型不支持识图"，那会把用户引到错误的方向。
+ *
+ * @param {object} provider 服务商对象（用它的 paramCodes）
+ * @param {number} status HTTP 状态码
+ * @param {string} bodyText 响应体原文
+ * @returns {boolean}
+ */
+function isVisionUnsupportedError(provider, status, bodyText) {
+  const body = toStr(bodyText).toLowerCase();
+  if (!body) return false;
+  const code = businessCodeOf(body);
+  const paramCodes = (provider && provider.paramCodes) || [];
+  const paramLike = status === 400 || status === 415 || status === 422
+    || (!!code && paramCodes.indexOf(code) !== -1);
+  if (!paramLike) return false;
+  return VISION_KEYWORDS.some((word) => body.indexOf(word.toLowerCase()) !== -1);
+}
+
+/** 服务端说"图太大"吗？（同样要求参数类状态码，避免把别处的"超出"误判） */
+function isImageTooLargeError(status, bodyText) {
+  const body = toStr(bodyText);
+  if (!body) return false;
+  if (status !== 400 && status !== 413 && status !== 422) return false;
+  return IMAGE_TOO_LARGE_PATTERN.test(body);
+}
+
+/**
+ * 把识图请求的失败（HTTP 状态 + 响应体）翻译成 { code, error }。
+ * 纯函数：不碰网络、不碰日志，便于单测直接把各种报错喂进来。
+ *
+ * @param {object} provider 服务商对象
+ * @param {number} status HTTP 状态码
+ * @param {string} bodyText 响应体
+ * @param {string} model 当前模型名（文案里要用）
+ * @returns {{code:string, error:string}}
+ */
+function classifyVisionFailure(provider, status, bodyText, model) {
+  const providerName = (provider && provider.name) || '';
+  // 顺序有讲究：先排"图太大"（它同样含"图片"二字），再排"不支持图片输入"
+  if (isImageTooLargeError(status, bodyText)) {
+    return { code: CODE_BAD_IMAGE, error: IMAGE_TOO_LARGE_MESSAGE };
+  }
+  if (isVisionUnsupportedError(provider, status, bodyText)) {
+    return { code: CODE_VISION_UNSUPPORTED, error: visionUnsupportedMessage(model, providerName) };
+  }
+
+  const code = businessCodeOf(bodyText);
+  const hasCode = (list) => !!code && (list || []).indexOf(code) !== -1;
+  const suggestions = `识图推荐 ${VISION_RECOMMENDED_MODELS.join(' / ')}`;
+
+  if (hasCode(provider && provider.modelMissingCodes) || status === 404
+    || /模型不存在|model not exist|model not found/i.test(toStr(bodyText))) {
+    return {
+      code: CODE_MODEL_MISSING,
+      error: `当前模型 ${toStr(model)} 不存在或不可用，请到「我的 → AI 设置」检查模型名（${suggestions}）`,
+    };
+  }
+  if (hasCode(provider && provider.quotaCodes) || status === 429) {
+    return { code: CODE_QUOTA, error: VISION_QUOTA_MESSAGE };
+  }
+  if (hasCode(provider && provider.authCodes) || status === 401 || status === 403) {
+    return { code: CODE_AUTH, error: VISION_AUTH_MESSAGE };
+  }
+  if (status >= 500) {
+    return { code: CODE_FAILED, error: 'AI 服务出错了，请稍后重试（也可以换 glm-ocr 试试）' };
+  }
+  return {
+    code: CODE_FAILED,
+    error: `这张截图服务端没有接受（HTTP ${status}），可以换一张更小更清晰的截图，或改用文字录入`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 识图：入参校验与归一化（全部是纯函数）
+// ---------------------------------------------------------------------------
+
+/**
+ * 校验图片入参。**先校验再花任何额度**：格式不对、太大，都在这里拒。
+ *
+ * @param {object} event 云函数入参
+ * @returns {{ok:true, base64:string, mime:string, bytes:number}|{ok:false, code:string, error:string}}
+ */
+function normalizeImageInput(event) {
+  const raw = event && typeof event.image_base64 === 'string' ? event.image_base64 : '';
+  // 去掉换行/空格：base64 里混进空白是常见的手工拼接产物，清掉不影响解码
+  const base64 = raw.replace(/\s+/g, '');
+  if (!base64) return { ok: false, code: CODE_BAD_IMAGE, error: IMAGE_EMPTY_MESSAGE };
+  if (base64.length > MAX_IMAGE_BASE64_CHARS) {
+    return { ok: false, code: CODE_BAD_IMAGE, error: IMAGE_TOO_LARGE_MESSAGE };
+  }
+  // 必须是纯 base64（契约里明确"不带 data: 前缀"）：形状不对就别往服务商那边送
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) {
+    return { ok: false, code: CODE_BAD_IMAGE, error: IMAGE_INVALID_MESSAGE };
+  }
+  const mime = toStr(event && event.mime_type).toLowerCase();
+  if (ALLOWED_IMAGE_MIME_TYPES.indexOf(mime) === -1) {
+    return { ok: false, code: CODE_BAD_IMAGE, error: IMAGE_INVALID_MESSAGE };
+  }
+  return { ok: true, base64, mime, bytes: Math.round((base64.length * 3) / 4) };
+}
+
+/** 半角化：全角数字与全角逗号（模型/ OCR 常吐全角） */
+function toHalfWidth(text) {
+  return toStr(text)
+    .replace(/[\uff10-\uff19]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    .replace(/\uff0c/g, ',');
+}
+
+/** 把 "9:05" / "9：05" 补成 "09:05"；非法返回 ''（不瞎猜） */
+function normalizeClock(value) {
+  const raw = toHalfWidth(value).replace(/[：:]/g, ':').replace(/\s+/g, '');
+  const matched = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (!matched) return '';
+  const hour = Number(matched[1]);
+  const minute = Number(matched[2]);
+  if (hour > 23 || minute > 59) return '';
+  return `${pad2(hour)}:${pad2(minute)}`;
+}
+
+/**
+ * 节次文本归一化：与云函数 tasks 的 normalizePeriods 同一口径 —— "3-5" / "7"（不合法给 ''）。
+ * 认不出时返回 ''，由调用方**保留时间**并记一条 warning（时间才是定位课节的依据）。
+ */
+function normalizePeriodsText(value) {
+  const source = Array.isArray(value) ? value.join('-') : value;
+  const raw = toHalfWidth(source).replace(/第|节|\s+/g, '');
+  if (!raw) return '';
+  const matched = raw.match(/^(\d{1,2})(?:[-~—–到至](\d{1,2}))?$/);
+  if (!matched) return '';
+  let first = parseInt(matched[1], 10);
+  let last = matched[2] ? parseInt(matched[2], 10) : first;
+  if (!(first >= 1 && first <= 30) || !(last >= 1 && last <= 30)) return '';
+  if (last < first) { const tmp = first; first = last; last = tmp; }
+  return first === last ? String(first) : `${first}-${last}`;
+}
+
+/**
+ * 周次文本归一化：把模型读出来的 "1-16" / "1-8,10-16" / "单周" / "双周" / "第1-16周"
+ * 变成任务模型要的 week_start / week_end / week_parity 三个字段。
+ *
+ * 【断档怎么办】"1-8,10-16" 这种在任务模型里表达不了（只有起止 + 单双周），
+ * 所以取**最小起周 ~ 最大止周**，并回一条 warning 如实说明"中间没课的那几周也会排课"。
+ * 宁可多显示几周也不漏课 —— 用户可以在任务里改，而漏掉的课他很难发现。
+ *
+ * @param {*} value 模型给的周次文本
+ * @param {{week_start:number, week_end:number}} defaults 缺省范围（来自请求）
+ * @returns {{week_start:number, week_end:number, week_parity:string, warning:string}}
+ */
+function normalizeWeeksText(value, defaults) {
+  const base = defaults || {};
+  const fallback = {
+    week_start: base.week_start || 1,
+    week_end: base.week_end || 20,
+    week_parity: 'all',
+    warning: '',
+  };
+  const shown = toStr(value);
+  if (!shown) return fallback; // 截图里没写周次是常态，用默认范围，不打扰用户
+
+  const raw = toHalfWidth(shown).replace(/\s+/g, '');
+  const cleaned = raw.replace(/第|周/g, '');
+  if (/^(单|单数)$/.test(cleaned)) return Object.assign({}, fallback, { week_parity: 'odd' });
+  if (/^(双|双数)$/.test(cleaned)) return Object.assign({}, fallback, { week_parity: 'even' });
+
+  const bad = (why) => Object.assign({}, fallback, {
+    warning: `「${shown}」的周次没能认出来（${why}），已按第 ${fallback.week_start}-${fallback.week_end} 周导入`,
+  });
+
+  let parity = 'all';
+  let body = cleaned;
+  if (/单$/.test(body)) { parity = 'odd'; body = body.replace(/单$/, ''); }
+  else if (/双$/.test(body)) { parity = 'even'; body = body.replace(/双$/, ''); }
+  if (!body) return bad('只有一个单双周字样');
+
+  const segments = body.split(',').filter(Boolean);
+  if (!segments.length) return bad('空');
+
+  let first = null;
+  let last = null;
+  for (let i = 0; i < segments.length; i += 1) {
+    const matched = segments[i].match(/^(\d{1,2})(?:[-~—–到至](\d{1,2}))?$/);
+    if (!matched) return bad(`看不懂「${segments[i]}」`);
+    let begin = parseInt(matched[1], 10);
+    let finish = matched[2] ? parseInt(matched[2], 10) : begin;
+    if (finish < begin) { const tmp = begin; begin = finish; finish = tmp; }
+    if (!(begin >= 1 && begin <= 30) || !(finish >= 1 && finish <= 30)) {
+      return bad(`「${segments[i]}」超出 1-30 周`);
+    }
+    first = first === null ? begin : Math.min(first, begin);
+    last = last === null ? finish : Math.max(last, finish);
+  }
+
+  const warning = segments.length > 1
+    ? `「${shown}」是不连续的周次，已按第 ${first}-${last} 周导入（中间没课的那几周也会排课，可在任务里改）`
+    : '';
+  return { week_start: first, week_end: last, week_parity: parity, warning };
+}
+
+/**
+ * 作息表归一化：{"1": ["08:00","08:45"], ...}。非法时刻/越界节次一律丢掉（不瞎猜）。
+ * @returns {object|null} 一条都没剩下时返回 null（契约里就是 null）
+ */
+function normalizePeriodTimesValue(value) {
+  if (!isPlainObject(value)) return null;
+  const result = {};
+  Object.keys(value).forEach((key) => {
+    const number = parseInt(toHalfWidth(key), 10);
+    if (!(number >= 1 && number <= 30)) return;
+    const range = value[key];
+    if (!Array.isArray(range) || range.length < 2) return;
+    const start = normalizeClock(range[0]);
+    const end = normalizeClock(range[1]);
+    if (!start || !end || start >= end) return;
+    result[String(number)] = [start, end];
+  });
+  return Object.keys(result).length ? result : null;
+}
+
+/** 按节次从作息表里取 [开始, 结束]（取第一天的开始 / 最后一天的结束） */
+function timesForPeriods(periods, table) {
+  const span = toStr(periods).match(/^(\d{1,2})(?:-(\d{1,2}))?$/);
+  if (!span || !isPlainObject(table)) return { start: '', end: '' };
+  const first = span[1];
+  const last = span[2] || span[1];
+  const head = table[first];
+  const tail = table[last];
+  return {
+    start: Array.isArray(head) ? normalizeClock(head[0]) : '',
+    end: Array.isArray(tail) ? normalizeClock(tail[1]) : '',
+  };
+}
+
+/** "HH:MM" → 当天第几分钟；非法返回 null（与 utils/periods.js 的 toMinutes 同口径） */
+function clockMinutes(value) {
+  const clock = normalizeClock(value);
+  if (!clock) return null;
+  const parts = clock.split(':');
+  return (Number(parts[0]) * 60) + Number(parts[1]);
+}
+
+/**
+ * 把一条课程的时间换算成"拿去和作息表求重叠"的区间。
+ *
+ * 【退化口径照抄 utils/periods.js 的 periodSpanFromTimes，不另立一套】
+ *   * 两个时间都有 → 半开区间 [开始, 结束)
+ *   * 只有一个（或两个都有但倒挂）→ 退化成一个**时刻**：按"这一刻落在哪一节里"判断，
+ *     含首尾。periods.js 里"只填了结束时间也能定位到课节"用的就是这条口径；
+ *     倒挂时取**开始**那一刻（periods.js 对倒挂数据也是收敛成开始那一节）。
+ *
+ * @returns {{from:number, to:number, point:boolean}|null} 时间都非法 → null
+ */
+function buildOverlapQuery(startTime, endTime) {
+  const start = clockMinutes(startTime);
+  const end = clockMinutes(endTime);
+  if (start !== null && end !== null && end > start) return { from: start, to: end, point: false };
+  const only = start !== null ? start : end;
+  if (only === null) return null;
+  return { from: only, to: only, point: true };
+}
+
+/** 查询区间与某一节的重叠分钟数（退化成一个时刻时：落在这一节里算 1 分钟，否则 0） */
+function overlapMinutesOf(query, begin, finish) {
+  if (query.point) return (begin <= query.from && query.from <= finish) ? 1 : 0;
+  const from = Math.max(query.from, begin);
+  const to = Math.min(query.to, finish);
+  return to > from ? to - from : 0;
+}
+
+/**
+ * 模型没给出（或给歪了）节次、但给了上课时间时，**用时间反推节次**。
+ *
+ * ===========================================================================
+ * 【为什么必须推这一下】不推的话这条记录会变成"删不掉的孤儿"：
+ *   课表类任务的判据是 `repeat === 'weekly'` **且** `periods` 非空
+ *   （cloudfunctions/tasks/lib/normalize.js 的 isCourseTask，前端「替换课表」的
+ *   确认框里那个 N 也按它算）。于是"有周次、没节次"的条目：
+ *     * 下一次「替换课表」**删不掉它**（判据认为它不是课程）；
+ *     * 追加导入时又会留下同名的第二份 → 用户看到"我明明点了替换，怎么多出来一条重的"。
+ *   而它本来是有时间的（时间才是定位课节的依据），所以这里补一次推导，让判据能覆盖它。
+ * ===========================================================================
+ *
+ * 【口径为什么是"重叠 > 0 的最小/最大节次"】这就是课表页把任务放进哪几行的口径
+ * （按时间落在第几节），不引入新算法；连堂/跨节次自然得到 "3-5" 这样的区间。
+ *
+ * 【只用客户端传上来的作息表】那张表是用户校准过的、也是课表页落点用的同一张；
+ * 截图里读出来的作息（模型自己的读数）不作数 —— 拿它推等于用模型的第二个猜测去补第一个失误。
+ *
+ * @param {string} startTime 归一化后的开始时间（可为 ''）
+ * @param {string} endTime 归一化后的结束时间（可为 ''）
+ * @param {object|null} table 客户端传上来的作息表 {'3': ['10:15','10:55'], ...}
+ * @returns {string} '3-4' / '5' / ''（一个节次都不重叠 → 空串，调用方保留原来那句 warning）
+ */
+function derivePeriodsFromTimes(startTime, endTime, table) {
+  const query = buildOverlapQuery(startTime, endTime);
+  if (!query || !isPlainObject(table)) return '';
+
+  let first = null;
+  let last = null;
+  Object.keys(table).forEach((key) => {
+    const number = parseInt(toHalfWidth(key), 10);
+    if (!(number >= 1 && number <= 30)) return;
+    const range = table[key];
+    if (!Array.isArray(range) || range.length < 2) return;
+    const begin = clockMinutes(range[0]);
+    const finish = clockMinutes(range[1]);
+    if (begin === null || finish === null || begin >= finish) return;
+    if (overlapMinutesOf(query, begin, finish) <= 0) return;
+    first = first === null ? number : Math.min(first, number);
+    last = last === null ? number : Math.max(last, number);
+  });
+
+  if (first === null) return '';
+  return first === last ? String(first) : `${first}-${last}`;
+}
+
+/** 把 "周三第3节" 换算成具体日期：本周周一 + (weekday-1)。非法 weekday 返回 '' */
+function weekdayDate(weekMonday, weekday) {
+  const index = Number(weekday);
+  if (!(index >= 1 && index <= 7)) return '';
+  return addDays(toStr(weekMonday), index - 1);
+}
+
+/** warning 用的短标题（太长会把提示刷屏） */
+function shortTitle(title) {
+  const text = toStr(title);
+  return text.length > 12 ? `${text.slice(0, 12)}…` : text;
+}
+
+// ---------------------------------------------------------------------------
+// 识图：提示词
+// ---------------------------------------------------------------------------
+
+/** 作息表的可读文本（拼进提示词；没有就说明"没校准过"） */
+function periodTimesPromptText(table) {
+  if (!isPlainObject(table) || !Object.keys(table).length) {
+    return '（用户还没校准过作息，节次对应的具体时间以截图里写的为准；读不出时间就留空字符串）';
+  }
+  return Object.keys(table)
+    .sort((a, b) => Number(a) - Number(b))
+    .map((key) => `第${key}节 ${table[key][0]}-${table[key][1]}`)
+    .join('；');
+}
+
+/**
+ * 拼装识图的 system prompt。
+ *
+ * 【为什么把日期基准写进提示词】和文本解析同一个道理：日期由**服务端**算，
+ * 模型只负责认字（课程名 / 星期几 / 节次 / 周次）。所以这里明确告诉它"不要输出日期"。
+ *
+ * @param {object} ctx buildVisionContext() 的结果
+ * @returns {string}
+ */
+function buildVisionSystemPrompt(ctx) {
+  const semester = ctx.semester_start
+    ? `学期第一周的周一：${ctx.semester_start}`
+    : '学期起始日期：用户还没设置（不影响你识别，照抄截图里的周次即可）';
+  return `你是一个课表截图识别助手。用户上传的是一张课程表截图（教务系统导出的表格、App 截图或拍照都可能有）。
+请把截图里**每一门课**提取成结构化数据，只输出一个 JSON 对象。
+
+【日期基准（由系统换算，你不要自己算日期）】
+- 本周的周一是 ${ctx.week_monday}。
+- ${semester}
+- 周次默认范围：第 ${ctx.week_start} ~ ${ctx.week_end} 周。
+- 当前作息（节次 → 上课时间）：${periodTimesPromptText(ctx.period_times)}
+
+【输出格式】必须严格如下（**不要输出日期字段**）：
+{
+  "courses": [
+    {"title": "高等数学", "weekday": 1, "periods": "1-2", "weeks": "1-16",
+     "start_time": "08:00", "end_time": "09:40", "location": "教三201"}
+  ],
+  "period_times": {"1": ["08:00", "08:45"], "2": ["08:55", "09:40"]},
+  "warnings": ["第 3 行第 5 列有一门课被水印挡住，看不出课程名"],
+  "notes": "共识别出 12 门课"
+}
+
+【字段说明】
+1. title：课程名（必填；实在认不出**不要猜**，跳过它并在 warnings 里说明）。
+2. weekday：1~7，1=周一、2=周二 …… 7=周日。表格的列就是星期几，**照抄即可**。
+3. periods：节次。连堂写 "3-5"（第3到第5节），单节写 "7"；看不出节次就写空字符串 ""。
+4. weeks：周次原文，例如 "1-16"、"1-8,10-16"、"单周"、"双周"、"1-16周"；没写就写 ""。
+5. start_time / end_time：24 小时制 HH:MM。**只有截图里确实写了时间才填**，否则写 ""。
+6. location：上课地点（教室）；截图里有老师姓名的话，一并写在 location 里（如 "教三201 张老师"）。
+7. period_times：截图里若有一张"节次-时间"对照表，按节次号填进来；没有就给 null。
+8. warnings：看不清 / 被遮挡 / 判断不了的行列，用一句简短中文说明；没有就给空数组 []。
+9. notes：一句话概括你识别了什么（可留空字符串 ""）。
+
+【其他规则】
+1. 只输出 JSON：不要解释、不要用 Markdown 代码块、不要加别的字段。
+2. 同一门课出现在多个时间段（例如周一第1-2节、周三第3-4节）就输出**多条**，每条一个 weekday + periods。
+3. 合并单元格里写着 "高等数学（1-16周）" 这类信息时，把课程名放进 title、周次放进 weeks。
+4. 不要输出 date / 日期字段（日期由系统按 weekday 计算）；不要编造截图上没有的课。
+5. 一门课都没认出来时，返回空的 courses 数组，并在 warnings 里说明原因。`;
+}
+
+// ---------------------------------------------------------------------------
+// 识图：上下文（日期基准 / 默认周次 / 作息）
+// ---------------------------------------------------------------------------
+
+/**
+ * 组装识图上下文。入参全部来自 event，逐条给安全默认值（**不抛异常**）。
+ *
+ * @param {object} event 云函数入参
+ * @param {object} [options] { today } 便于自测注入
+ * @returns {{week_monday, semester_start, week_start, week_end, period_times}}
+ */
+function buildVisionContext(event, options) {
+  const opts = options || {};
+  const payload = event || {};
+  const today = toStr(opts.today) || todayStr();
+
+  // week_monday：契约里它就该是"本周周一"。合法就照用（日期 = 它 + (weekday-1) 天），
+  // 缺失/非法才退回服务器本周周一 —— 少一个字段不该让整次识别失败。
+  let weekMonday = toStr(payload.week_monday);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(weekMonday) || weekdayIndex(weekMonday) === null) {
+    weekMonday = mondayOf(today);
+    console.warn(`[aiParse] 识图入参 week_monday 缺失或非法，已按服务器本周周一 ${weekMonday} 换算日期`);
+  }
+
+  let semesterStart = toStr(payload.semester_start);
+  if (semesterStart && weekdayIndex(semesterStart) === null) semesterStart = ''; // 只做格式校验
+
+  const weekStart = clampWeek(payload.week_start, 1);
+  const weekEnd = Math.max(clampWeek(payload.week_end, 20), weekStart);
+
+  return {
+    week_monday: weekMonday,
+    semester_start: semesterStart,
+    week_start: weekStart,
+    week_end: weekEnd,
+    period_times: normalizePeriodTimesValue(payload.period_times), // 用户已校准的作息（可空）
+  };
+}
+
+/** 周次取值：只认 1~30 的整数，其余用默认值 */
+function clampWeek(value, fallback) {
+  const number = typeof value === 'number' ? Math.trunc(value) : parseInt(toHalfWidth(value), 10);
+  if (!Number.isFinite(number) || number < 1 || number > 30) return fallback;
+  return number;
+}
+
+// ---------------------------------------------------------------------------
+// 识图：结果归一化（模型 JSON → events / tasks）
+// ---------------------------------------------------------------------------
+
+/**
+ * 把模型认出来的课表归一化成 events + tasks（**同长同序，下标一一对应**）。
+ *
+ * 【为什么要两次 map 而不是一次】前端 buildParseItems 是按 `tasks[cursor]` 与
+ * events/deadlines 按下标配对的（见 pages/ai/ai.js 的顺序契约）。所以这里先算出
+ * 一份干净的课程数组，再分别投影成 events 与 tasks —— 任何脏条目都在**投影之前**
+ * 就被剔掉并记进 warnings，绝不会出现"显示了 5 条、只有 4 条能落库"的错位。
+ *
+ * 【丢弃的条目去哪了】title 为空、weekday 非法的条目会变成一条中文 warning
+ * （用户看得见"哪一行没认出来"），而不是静默消失。
+ *
+ * @param {object} data extractJsonObject() 的结果
+ * @param {object} ctx buildVisionContext() 的结果
+ * @returns {{events:Array, deadlines:Array, tasks:Array, period_times:object|null, warnings:string[], notes:string}}
+ */
+function normalizeVisionResult(data, ctx) {
+  const warnings = [];
+  const notes = toStr(isPlainObject(data) ? data.notes : '').slice(0, 200);
+
+  // 模型自己说的"哪里没看清"原样带给用户（截断，免得被刷屏）
+  const saidWarnings = isPlainObject(data) && Array.isArray(data.warnings) ? data.warnings : [];
+  saidWarnings.forEach((item) => {
+    const text = toStr(item).slice(0, 200);
+    if (text) warnings.push(text);
+  });
+
+  // 作息：截图里读出来的 + 用户已校准的（**用户的优先** —— 他手动校过的比截图更可信）
+  const fromImage = normalizePeriodTimesValue(isPlainObject(data) ? data.period_times : null);
+  const timeTable = Object.assign({}, fromImage || {}, ctx.period_times || {});
+
+  const rawCourses = isPlainObject(data) && Array.isArray(data.courses)
+    ? data.courses
+    // 容错：模型偶尔把 courses 写成 events（它也可能给 events 数组）
+    : (isPlainObject(data) && Array.isArray(data.events) ? data.events : []);
+
+  const courses = [];
+  rawCourses.forEach((item, index) => {
+    if (!isPlainObject(item)) return;
+    const title = toStr(item.title || item.name || item.course);
+    if (!title) {
+      warnings.push(`第 ${index + 1} 条没有课程名，已跳过`);
+      return;
+    }
+    const label = shortTitle(title);
+
+    const weekday = Number(toHalfWidth(item.weekday));
+    const date = weekdayDate(ctx.week_monday, weekday);
+    if (!date) {
+      warnings.push(`「${label}」没认出是星期几，已跳过（可手动补一条）`);
+      return;
+    }
+
+    const weeks = normalizeWeeksText(item.weeks, ctx);
+    if (weeks.warning) warnings.push(`「${label}」${weeks.warning}`);
+
+    // 时间：模型写了的用模型的；没写就按节次查作息表补（两条都没有就留空，
+    // 课表页按 periods 排课，不靠时间也能落对行）
+    let start = normalizeClock(item.start_time);
+    let end = normalizeClock(item.end_time);
+
+    // 节次：先信模型给的；模型没给（或给歪了）但给了时间，就用**客户端传上来的作息表**
+    // 按时间反推一次（见 derivePeriodsFromTimes 的说明：不推的话这条记录下次「替换课表」
+    // 删不掉，追加导入还会留一份重的）。推导只在"模型没给出合法节次"时发生，绝不覆盖模型的值。
+    let periods = normalizePeriodsText(item.periods);
+    let derivedPeriods = '';
+    if (!periods && (start || end)) {
+      derivedPeriods = derivePeriodsFromTimes(start, end, ctx.period_times);
+      if (derivedPeriods) periods = derivedPeriods;
+    }
+
+    if (!start || !end) {
+      const fromTable = timesForPeriods(periods, timeTable);
+      if (!start) start = fromTable.start;
+      if (!end) end = fromTable.end;
+    }
+    if (periods && !start && !end) {
+      warnings.push(`「${label}」只有节次没有具体时间，课表里会按节次排（时间可在任务里补）`);
+    }
+    if (!periods) {
+      // 【关键】节次确实定不下来时**留空但保留时间**：宁可不把它当课程，也不能瞎填一个节次
+      warnings.push(`「${label}」的节次没能认出来，已按时间导入（不会排进课表格子）`);
+    } else if (derivedPeriods) {
+      // 【如实说】这是系统按时间推的，不是模型认出来的 —— 请用户确认一句，
+      // 但**不静默改数据**（推错了用户在任务里一眼能看见并改掉）
+      warnings.push(`「${label}」的节次没认出来，已按时间推成第 ${derivedPeriods} 节，请确认`);
+    }
+
+    // 优先级的口径与文本解析一致：events 用中文标签，tasks 用内部常量
+    const priorityCn = toStr(item.priority) || '中';
+    const priority = lookupLabel(PRIORITY_CN_TO_CONST, priorityCn, 'mid');
+
+    courses.push({
+      title,
+      date,
+      start_time: start,
+      end_time: end,
+      periods: periods || '',
+      location: toStr(item.location || item.room).slice(0, 100),
+      priorityCn,
+      priority,
+      week_start: weeks.week_start,
+      week_end: weeks.week_end,
+      week_parity: weeks.week_parity,
+    });
+  });
+
+  if (!courses.length && !warnings.length) warnings.push('这张截图里没认出任何课程');
+
+  // events 与 tasks 都由同一份 courses 投影而来 → 长度与顺序必然一致
+  const events = courses.map((one) => ({
+    title: one.title,
+    date: one.date,
+    start_time: one.start_time,
+    end_time: one.end_time,
+    periods: one.periods,
+    location: one.location,
+    priority: one.priorityCn,
+    // 课程固定每周重复（带上 week_* 与 periods，课表页才会每周排出来）
+    repeat: 'weekly',
+    week_start: one.week_start,
+    week_end: one.week_end,
+    week_parity: one.week_parity,
+  }));
+
+  const tasks = courses.map((one) => ({
+    title: one.title,
+    type: 'event', // 课程统一 event（识别结果天然是课程，不给别的类型）
+    date: one.date,
+    start_time: one.start_time,
+    end_time: one.end_time,
+    priority: one.priority,
+    done: false,
+    parent_id: null,
+    repeat: 'weekly',
+    week_start: one.week_start,
+    week_end: one.week_end,
+    week_parity: one.week_parity,
+    periods: one.periods,
+    location: one.location,
+    // 【不猜耗时】截图里没有这个信息，填 0（= 没估），别拿节数瞎算
+    estimate_min: 0,
+  }));
+
+  return {
+    events,
+    deadlines: [], // 课表截图里没有"截止事项"，保持空数组（前端按下标配对时要靠它）
+    tasks,
+    period_times: fromImage,
+    warnings,
+    notes,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 识图：调用模型
+// ---------------------------------------------------------------------------
+
+/**
+ * 识图专用的 Chat Completions 调用。
+ *
+ * 【为什么另写一个而不是复用 chatCompletion】
+ *   1. 超时不同（45 秒 vs 15 秒），而复用就得改 chatCompletion 的签名 —— 那条路径是
+ *      既成契约（自测里断言了 15 秒、断言了 400 时去掉 response_format 重试一次），
+ *      不值得为识图去动它；
+ *   2. 失败要**分码**（换模型 / 换小图 / 稍后重试 / 超时），chatCompletion 只回一句统一文案。
+ *
+ * @param {Array} messages OpenAI 格式消息（content 可以是数组，含 image_url）
+ * @param {object} [options] { env, db, openid, config } —— config 已解析过就直接用（少读一次库）
+ * @returns {Promise<{content:string|null, error:string|null, code:string|null,
+ *                    provider:string, model:string, source:string, reason:string}>}
+ */
+async function chatCompletionVision(messages, options) {
+  const opts = options || {};
+  const config = opts.config || await resolveEffectiveConfig(opts);
+
+  if (config.notices) config.notices.forEach((notice) => console.warn(`[aiParse] ${notice}`));
+
+  if (!config.ok) {
+    console.warn(`[aiParse] 跳过识图调用（来源=服务端环境变量）：${config.reason}`);
+    return {
+      content: null, error: NO_API_KEY_MESSAGE, code: CODE_NO_API_KEY,
+      provider: '', model: config.model, source: config.source, reason: config.reason,
+    };
+  }
+
+  const provider = config.provider;
+  const model = config.model;
+  const endpoint = chatEndpoint(provider);
+  const source = config.source;
+  const sourceLabel = source === 'user' ? '来源=用户自填' : '来源=服务端环境变量';
+
+  const payload = {
+    model,
+    messages,
+    temperature: VISION_TEMPERATURE,
+    top_p: VISION_TOP_P,
+    stream: false,
+    // 【刻意不带 response_format】见本节开头：thinking 只能 enabled 时 JSON 模式不保证生效
+  };
+
+  // 日志一律过 scrubImagePayload：宁可少点信息，也不能把 base64 或 Key 写进日志
+  const describe = (error) => scrubImagePayload(`[识图] ${provider.name}/${model}（${sourceLabel}）${error}`);
+
+  let response;
+  try {
+    response = await exports.postJson(endpoint, payload, { Authorization: `Bearer ${config.apiKey}` }, VISION_TIMEOUT_MS);
+  } catch (error) {
+    const reason = describe(`请求失败：${(error && error.message) || error}`);
+    console.error(`[aiParse] ${reason}`);
+    // 【区分超时】超时是"模型太慢"，用户能做的是换更快的模型（glm-ocr）或稍后重试，
+    // 与配额、参数错误完全是两码事，所以单独给一个码和一句文案。
+    const isTimeout = (error && error.code === 'TIMEOUT') || /超时/.test(String((error && error.message) || ''));
+    return {
+      content: null,
+      error: isTimeout ? VISION_TIMEOUT_MESSAGE : '识别失败：网络异常或服务商不可达，请稍后重试',
+      code: isTimeout ? CODE_TIMEOUT : CODE_FAILED,
+      provider: provider.name, model, source, reason,
+    };
+  }
+
+  if (response.status !== 200) {
+    const failure = classifyVisionFailure(provider, response.status, response.text, model);
+    console.error(`[aiParse] ${describe(`识别失败（${failure.code}）：${response.status} ${toStr(response.text).slice(0, 300)}`)}`);
+    return {
+      content: null, error: failure.error, code: failure.code,
+      provider: provider.name, model, source, reason: failure.code,
+    };
+  }
+
+  let data;
+  try {
+    data = JSON.parse(response.text);
+  } catch (error) {
+    const reason = describe('返回的内容不是合法 JSON');
+    console.error(`[aiParse] ${reason}`);
+    return {
+      content: null, error: '识别失败：服务商返回的内容看不懂，请稍后重试', code: CODE_FAILED,
+      provider: provider.name, model, source, reason,
+    };
+  }
+
+  const content = data
+    && data.choices && data.choices[0]
+    && data.choices[0].message && data.choices[0].message.content;
+  if (typeof content !== 'string' || !content.trim()) {
+    const reason = describe('返回结构异常或内容为空');
+    console.error(`[aiParse] ${reason}`);
+    return {
+      content: null, error: PARSE_FAILED_MESSAGE, code: CODE_PARSE_FAILED,
+      provider: provider.name, model, source, reason,
+    };
+  }
+  return { content, error: null, code: null, provider: provider.name, model, source, reason: '' };
+}
+
+// ---------------------------------------------------------------------------
+// 识图：主逻辑
+// ---------------------------------------------------------------------------
+
+/**
+ * 识图主逻辑（action: 'parse_image'）。
+ *
+ * 顺序（每一步都能省下一次请求或一笔额度）：
+ *   ① 校验图片（格式 / 大小）→ ② 解析配置 → ③ **事前**判模型能力（明确不支持就直接拒，
+ *   一个请求都不发）→ ④ 发请求（45 秒超时）→ ⑤ 失败分码 / 成功归一化。
+ *
+ * 【Key 从哪来】只从服务端读：用户自填（settings 集合，按 openid）> 环境变量。
+ * 前端传上来的 apiKey / baseUrl / model 等字段一律忽略并记日志（见 findInjectedFields）。
+ *
+ * @param {object} event 云函数入参（契约见文件头）
+ * @param {object} [options] { today, env, db, openid } —— 便于自测注入
+ * @returns {Promise<object>} 成功 { ok:true, provider, model, events, deadlines, tasks,
+ *                                   period_times, warnings, notes }
+ *                            失败 { ok:false, code, error }
+ */
+async function handleParseImage(event, options) {
+  const opts = options || {};
+  const payload = event || {};
+
+  // 有人想传 Key / 传地址：只记字段名，**不记值**（与文本路径同一道闸门）
+  const injected = findInjectedFields(payload);
+  if (injected.length) {
+    console.warn(
+      `[aiParse] 识图入参里出现了不该由前端指定的字段（${injected.join(', ')}），已忽略；`
+      + 'Key 只从数据库（用户自填）或环境变量（服务端预置）读取，请求地址只从白名单映射'
+    );
+  }
+
+  const image = normalizeImageInput(payload);
+  if (!image.ok) {
+    console.warn(`[aiParse] 识图入参被拒（${image.code}）：mime=${toStr(payload.mime_type)}`);
+    return { ok: false, code: image.code, error: image.error };
+  }
+
+  const config = await resolveEffectiveConfig(opts);
+  if (config.notices) config.notices.forEach((notice) => console.warn(`[aiParse] ${notice}`));
+
+  const providerName = config.provider ? config.provider.name : '';
+  const support = visionSupportOf(config.model, providerName);
+  if (support === false) {
+    // 【事前那条腿】已知纯文本模型：直接拒，**不发请求**（省用户的钱和时间）。
+    // 这条判定先于"有没有 Key"：模型不行这件事与 Key 无关，先说清楚最有用。
+    console.warn(
+      `[aiParse] 拒绝识图：模型 ${config.model} 在已知"不支持识图"名单里，未发请求`
+      + `（建议换成 ${VISION_RECOMMENDED_MODELS.join(' / ')}）`
+    );
+    return {
+      ok: false,
+      code: CODE_VISION_UNSUPPORTED,
+      error: visionUnsupportedMessage(config.model, providerName),
+    };
+  }
+
+  const ctx = buildVisionContext(payload, opts);
+  // 【安全红线】日志里只允许出现 mime + 字节数，绝不出现 base64 本身
+  console.log(
+    `[aiParse] 开始识图：${image.mime}、约 ${Math.round(image.bytes / 1024)} KB、`
+    + `模型 ${config.model || '(未设置)'}（${config.source === 'user' ? '来源=用户自填' : '来源=服务端环境变量'}）`
+  );
+
+  const completion = await chatCompletionVision([
+    { role: 'system', content: buildVisionSystemPrompt(ctx) },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: '这是我这一学期的课表截图，请按系统提示的 JSON 结构把课程全部提取出来。' },
+        { type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.base64}` } },
+      ],
+    },
+  ], Object.assign({}, opts, { config }));
+
+  if (completion.error) {
+    return { ok: false, code: completion.code || CODE_FAILED, error: completion.error };
+  }
+
+  const parsed = extractJsonObject(completion.content);
+  if (!parsed) {
+    // 只记开头一小段，用于排查"模型到底回了什么"（**不含 base64**：那是我们发出去的，不是它回的）
+    console.error('[aiParse] 识图结果解析不出 JSON：', toStr(completion.content).slice(0, 200));
+    return { ok: false, code: CODE_PARSE_FAILED, error: PARSE_FAILED_MESSAGE };
+  }
+
+  const result = normalizeVisionResult(parsed, ctx);
+  console.log(
+    `[aiParse] 识图完成：认到 ${result.events.length} 门课、`
+    + `${result.warnings.length} 条提示（模型 ${completion.model}）`
+  );
+  return {
+    ok: true,
+    provider: completion.provider,
+    model: completion.model,
+    events: result.events,
+    deadlines: result.deadlines,
+    tasks: result.tasks,
+    period_times: result.period_times,
+    warnings: result.warnings,
+    notes: result.notes,
+  };
+}
+
 /**
  * 第三方可能塞进来的"看起来像凭证/地址"的字段名。
  *
@@ -1046,15 +2055,29 @@ async function handleParse(event, options) {
 /**
  * 云函数入口。
  *
- * 这里把 OPENID 与 db 都解析好传给 handleParse —— Key 的读取全在
+ * 【两个入口靠 action 区分】
+ *   无 action（或空）→ 文本解析 handleParse（**保持原样**：入参只认 text）
+ *   action:'parse_image' → 课表截图识别 handleParseImage
+ *   其它 action → 明确回一句"不认识的操作"，**不要**当成文本解析
+ *   （那会返回"请描述一下你的安排"，让人一头雾水地查半天）。
+ *
+ * 这里把 OPENID 与 db 都解析好传下去 —— Key 的读取全在
  * resolveEffectiveConfig() 里按 openid 完成；event 里的任何"凭证类"字段都不参与。
  */
 exports.main = async (event) => {
   try {
-    return await handleParse(event || {}, {
-      db: resolveDb({}),
-      openid: safeOpenId(),
-    });
+    const payload = event || {};
+    const action = toStr(payload.action);
+    const options = { db: resolveDb({}), openid: safeOpenId() };
+
+    if (action === ACTION_PARSE_IMAGE) {
+      return await handleParseImage(payload, options);
+    }
+    if (action) {
+      console.warn(`[aiParse] 不认识的 action：${action}`);
+      return { ok: false, code: CODE_BAD_ACTION, error: `不认识的操作「${action}」` };
+    }
+    return await handleParse(payload, options);
   } catch (error) {
     console.error('[aiParse] 未预期异常：', (error && error.stack) || error);
     return { ok: false, error: ERROR_MESSAGE };
@@ -1113,4 +2136,50 @@ Object.assign(exports, {
   MAX_TEXT_LENGTH,
   TEMPERATURE,
   WEEKDAY_CN,
+  // 识图（action: 'parse_image'）
+  handleParseImage,
+  chatCompletionVision,
+  visionSupportOf,
+  visionModelLists,
+  visionUnsupportedMessage,
+  isVisionUnsupportedError,
+  isImageTooLargeError,
+  classifyVisionFailure,
+  normalizeImageInput,
+  normalizePeriodsText,
+  normalizeWeeksText,
+  normalizePeriodTimesValue,
+  normalizeVisionResult,
+  buildVisionContext,
+  buildVisionSystemPrompt,
+  weekdayDate,
+  timesForPeriods,
+  derivePeriodsFromTimes,
+  buildOverlapQuery,
+  overlapMinutesOf,
+  clockMinutes,
+  normalizeClock,
+  businessCodeOf,
+  scrubImagePayload,
+  ACTION_PARSE_IMAGE,
+  VISION_TIMEOUT_MS,
+  MAX_IMAGE_BASE64_CHARS,
+  ALLOWED_IMAGE_MIME_TYPES,
+  VISION_RECOMMENDED_MODELS,
+  VISION_TEMPERATURE,
+  VISION_TOP_P,
+  CODE_VISION_UNSUPPORTED,
+  CODE_NO_API_KEY,
+  CODE_BAD_IMAGE,
+  CODE_TIMEOUT,
+  CODE_QUOTA,
+  CODE_MODEL_MISSING,
+  CODE_PARSE_FAILED,
+  CODE_AUTH,
+  CODE_FAILED,
+  IMAGE_TOO_LARGE_MESSAGE,
+  IMAGE_INVALID_MESSAGE,
+  NO_API_KEY_MESSAGE,
+  PARSE_FAILED_MESSAGE,
+  VISION_TIMEOUT_MESSAGE,
 });

@@ -373,6 +373,26 @@ chain = chain.then(function () {
   // 这样"文件还没建好"和"文件坏了"是两件能分清的事。
   var ics = loadTest('ics.test.js');
   return waitFor(ics);
+}).then(function () {
+  // 编辑页的"占用提示与一键避让"（同样装全局桩，所以也在这条串行链里）。
+  // 【注册规矩】utils/tests 下的每个测试文件都必须在这里出现一行 —— 落了文件却没注册，
+  // 等于它一条断言都没跑，报告却是绿的（这正是"假绿"的一种）。
+  var editBusy = loadTest('edit_busy.test.js');
+  return waitFor(editBusy);
+}).then(function () {
+  // 课表截图识别（parse_image）：装全局桩 + 要往云函数里递真实报文，所以同样放在串行链里。
+  // 【必须排在这条链的最后】它会删掉 require 缓存、让 pages/ai/ai.js 在**自己的桩**下
+  // 重新注册一次（否则 ai_page.test.js 已经加载过、require 缓存命中就拿不到注册对象）。
+  // 放在最后，前面几个文件的 registered 早就拿到手了，不受影响。
+  var vision = loadTest('ai_vision.test.js');
+  return waitFor(vision);
+}).then(function () {
+  // 到期提醒的小程序端（「我的」页卡片 + 任务页的降级提示）。装全局桩，所以也在这条串行链里。
+  // 它钉住的红线：两层 ok / 模板 ID 不许硬编码 / ack count 恒为 1 / reject·ban 不许 ack /
+  // status 失败要静默 / 「24 小时内到期」的北京时间口径。云函数那一半由
+  // cloudfunctions/_selftest.js 覆盖，两边合起来才是完整的一条链。
+  var remindPage = loadTest('remind_page.test.js');
+  return waitFor(remindPage);
 });
 
 // ---------------------------------------------------------------------------
