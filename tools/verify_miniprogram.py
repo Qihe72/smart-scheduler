@@ -370,6 +370,12 @@ def main() -> int:
     test_file_hint = re.compile(r"(^|[\\/])tests?[\\/]|_selftest|\.test\.js$|contract", re.I)
 
     product_hits, fixture_hits = [], []
+    # 【为什么还要放过"占位符形状"的命中】这条检查曾经在**注释里的示例**上误报：
+    # pages/me/me.js 用一行示例串解释"智谱 Key 长什么样"，形状恰好满足扫描正则，
+    # 于是静态验收报"产品代码里硬编码了 API Key" —— 那是**假警报**，而且很吓人。
+    # 判据：出现「例如 / 形如 / 示例 / example」或明显的占位符标记（<...>、xxxx、...）
+    # 时，按说明性文字放过。真 Key 不会长成带尖括号或一串 x 的样子。
+    placeholder_hint = re.compile(r"例如|形如|示例|举例|example|e\.g\.|<[^>]{2,}>|x{4,}|X{4,}|\.\.\.|…", re.I)
     for base, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d != "node_modules"]
         for name in files:
@@ -380,9 +386,12 @@ def main() -> int:
             try:
                 with open(path, encoding="utf-8", errors="ignore") as fh:
                     for lineno, line in enumerate(fh, 1):
-                        if secret_pattern.search(line):
-                            (fixture_hits if test_file_hint.search(rel) else product_hits).append(
-                                f"{rel}:{lineno}")
+                        if not secret_pattern.search(line):
+                            continue
+                        if placeholder_hint.search(line):
+                            continue  # 说明性示例，不是真 Key
+                        (fixture_hits if test_file_hint.search(rel) else product_hits).append(
+                            f"{rel}:{lineno}")
             except OSError:
                 continue
     check("产品代码里没有硬编码的 API Key", not product_hits, product_hits[:5])

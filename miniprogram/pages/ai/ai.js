@@ -39,6 +39,23 @@ var MAX_BULK_INPUT = 200;
  */
 var MAX_IMAGE_BASE64_CHARS = Number(api.MAX_IMAGE_BASE64_CHARS) || 900000;
 
+/**
+ * 已停用（官方公告停止服务）的模型名 → 建议改用的模型名。
+ *
+ * 【事实依据】DeepSeek 官方 changelog（https://api-docs.deepseek.com/updates/）：
+ * 2026-07-24 起 `deepseek-chat` / `deepseek-reasoner` **停止服务**（它们当年指向
+ * V4-Flash 的非思考/思考模式）；2026-09-10 发布的 V4.1-Flash 是原生多模态，
+ * API 模型名 `deepseek-flash`。
+ *
+ * 【为什么要和"不支持识图"分开说】两件事给用户的下一步不一样：一个是"换个模型"，
+ * 另一个是"你存的名字已经不被服务了，改成 X"。而且**都不需要换服务商** ——
+ * 早先版本以为 DeepSeek 没有多模态、劝人换服务商，那是错的（见文件末尾的更正说明）。
+ */
+var RETIRED_MODELS = {
+  'deepseek-chat': 'deepseek-flash',
+  'deepseek-reasoner': 'deepseek-flash'
+};
+
 Page({
   data: {
     mode: 'parse',            // 'parse' = 自然语言录入 | 'decompose' = 任务拆解
@@ -401,7 +418,7 @@ Page({
     var unknownHint = function () {
       return {
         visionState: 'unknown',
-        visionHint: '没能读到 AI 配置，识别前请确认当前模型支持识图（不确定就用 glm-5.3-flash）',
+        visionHint: '没能读到 AI 配置，识别前请确认「我的 → AI 设置」里的模型支持识图（拿不准就先识别试试，失败会说清原因）',
         visionHintLevel: 'muted'
       };
     };
@@ -419,7 +436,10 @@ Page({
       // 用户没填模型时，云函数用的是该服务商的**默认模型**（恰好是纯文本的），
       // 所以这里要把默认值兜出来再判定，否则最常见的那种情况反而漏了提示。
       var model = api.effectiveModelName(cfg.provider, cfg.model);
-      var hint = visionHintOf(model);
+      // 【必须把 provider 一起传进去】提示要按"服务商 + 模型 + 是否停用"分流：
+      // 同样是 DeepSeek，`deepseek-chat`（已停用）要劝他改名字，`deepseek-flash`（V4.1-Flash）
+      // 却是能识图的 —— 光看模型名/光看服务商都不够（见 visionHintOf）。
+      var hint = visionHintOf(model, cfg.provider);
       self.setData({
         aiProvider: cfg.provider,
         aiModel: model,
@@ -1089,6 +1109,7 @@ Page({
     priorityTagClass: priorityTagClass,
     // 识图那几条路的纯函数（测的就是页面真正在用的那份实现）
     visionHintOf: visionHintOf,
+    RETIRED_MODELS: RETIRED_MODELS,
     isCourseTask: isCourseTask,
     mergePeriodTimes: mergePeriodTimes,
     mimeFromBase64: mimeFromBase64,
@@ -1215,18 +1236,40 @@ function courseLine(item) {
 }
 
 /**
- * 这句提示的三态文案（与云函数 visionUnsupportedMessage 的口吻一致）。
+ * 这句提示的分流（**按"服务商 + 模型 + 是否停用"**，不再按"服务商有没有识图模型"）。
  *
- *   false     → 红字：明确不具备识图能力，指名道姓说换哪个模型
- *   'unknown' → 灰字：没收录，允许尝试，失败了就换
- *   true      → 绿字：已知支持（用户看一眼就安心，不用猜）
+ *   ① 模型名已停用（deepseek-chat / deepseek-reasoner）→ 红字：**改成 deepseek-flash**，
+ *      **不是**换服务商（DeepSeek 的 V4.1-Flash 自带识图）；
+ *   ② 已知纯文本模型（如智谱 glm-4.7-flash）→ 红字：换成**同一家**的 glm-5.3-flash / glm-ocr；
+ *   ③ 模型没收录（unknown）→ 灰字：允许尝试，失败了再换；
+ *   ④ 已知支持 → 绿字：让他安心。
+ *
+ * 【state 的口径】它回答"这次识图能不能成"：①② 都是 false（「开始识别」据此**直接拦下、
+ * 一个请求都不发**），③ 是 'unknown'（照常尝试），④ 是 true。
  *
  * @param {string} model 实际会被使用的模型名
+ * @param {string} [provider] 当前服务商（'zhipu' / 'deepseek' / ''）
+ *        目前**不参与判定**（判定看模型名：停用名单 + 支持/纯文本名单），
+ *        参数保留是为了不改调用处、也给以后"按服务商换措辞"留位置。
  * @returns {{state:(boolean|string), text:string, level:string}}
  */
-function visionHintOf(model) {
+function visionHintOf(model, provider) {
   var name = String(model === null || model === undefined ? '' : model).trim() || '(未设置)';
+  var key = api.normalizeModelKey ? api.normalizeModelKey(name) : name.toLowerCase();
+  var replacement = RETIRED_MODELS[key];
+
+  // ① 名字已经停服了：说清"换成哪个名字"，而不是笼统说"不支持识图"
+  if (replacement) {
+    return {
+      state: false,
+      level: 'danger',
+      text: '当前模型 ' + name + ' 自 2026-07-24 起已停止服务，'
+        + '请到「我的 → AI 设置」把模型改成 ' + replacement + '（DeepSeek V4.1-Flash，自带识图能力）'
+    };
+  }
+
   var state = api.classifyVisionModel(name);
+  // ② 同一家换个模型就行（建议的模型都是这家自己的，不需要换服务商/换 Key）
   if (state === false) {
     return {
       state: state,
@@ -1234,9 +1277,11 @@ function visionHintOf(model) {
       text: '当前模型 ' + name + ' 不具备识图能力，请到「我的 → AI 设置」换成 glm-5.3-flash 或 glm-ocr'
     };
   }
+  // ④ 已知支持
   if (state === true) {
     return { state: state, level: 'ok', text: '当前模型 ' + name + ' 支持识图' };
   }
+  // ③ 没收录
   return {
     state: state,
     level: 'muted',

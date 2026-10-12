@@ -393,6 +393,12 @@ chain = chain.then(function () {
   // cloudfunctions/_selftest.js 覆盖，两边合起来才是完整的一条链。
   var remindPage = loadTest('remind_page.test.js');
   return waitFor(remindPage);
+}).then(function () {
+  // 我的页 · AI 设置：模型可填 + Key 形状与服务商匹配。
+  // 真机上用户抱怨"我用的明明是 deepseek，它硬说我用的是智谱大模型，还改不了" ——
+  // 这个文件钉住那次 UI 缺口的修复（模型输入框、不匹配提示、按钮只改选中项不自动保存）。
+  var meAi = loadTest('me_ai.test.js');
+  return waitFor(meAi);
 });
 
 // ---------------------------------------------------------------------------

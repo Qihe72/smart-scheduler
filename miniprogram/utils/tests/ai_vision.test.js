@@ -260,7 +260,9 @@ function run() {
     '从云函数源码里抽到了"支持识图"的名单（抽不到就是正则失效，会变成假绿）：' + show(visionFromSource));
   isTrue(textOnlyFromSource.length > 0, '从云函数源码里抽到了"不支持识图"的名单');
 
-  var runtimeVision = aiParseFn.visionModelLists('zhipu').vision;
+  // 源码里抽出来的是**所有服务商的并集**（两家各有一份数组），所以运行时也取并集来比：
+  // visionModelLists('') = 服务商认不出来时把全部合并看（见云函数的注释）。
+  var runtimeVision = aiParseFn.visionModelLists('').vision;
   eq(visionFromSource.slice().sort().join(','), runtimeVision.slice().sort().join(','),
     '源码里那份 == 运行时 visionModelLists() 那份（证明上面那个正则确实读的是同一处）');
   eq(api.VISION_HINT_MODELS.slice().sort().join(','), visionFromSource.slice().sort().join(','),
@@ -271,12 +273,23 @@ function run() {
   var visionNames = visionFromSource.join(',');
   ['glm-5.3-flash', 'glm-5.3-flashx', 'glm-ocr', 'glm-4v', 'glm-4v-plus', 'glm-4v-flash',
     'glm-4.1v-thinking-flash', 'glm-4.5v', 'glm-4.6v'].forEach(function (name) {
-    isTrue(visionNames.indexOf(name) !== -1, '智谱的名单纯粹支持列表里有 ' + name);
+    isTrue(visionNames.indexOf(name) !== -1, '智谱那份支持列表里有 ' + name);
   });
+  // 【事实更正（依据 DeepSeek 官方 changelog https://api-docs.deepseek.com/updates/）】
+  // 2026-09-10 的 DeepSeek-V4.1-Flash 是**原生多模态**，API 模型名 deepseek-flash；
+  // 早先"DeepSeek 没有多模态、要换服务商"的说法是错的，这几条断言就是为了别再写回去。
+  isTrue(visionNames.indexOf('deepseek-flash') !== -1,
+    '**DeepSeek 的 deepseek-flash（V4.1-Flash）在支持识图的名单里**');
+  isTrue(visionNames.indexOf('deepseek-v4-flash-vision-exp') !== -1,
+    '已下线但仍会路由到 V4.1-Flash 的 deepseek-v4-flash-vision-exp 也认');
+  eq(aiParseFn.PROVIDERS.deepseek.visionModels.length > 0, true,
+    'DeepSeek 的识图支持列表**不再是空的**');
+  eq(aiParseFn.PROVIDERS.deepseek.defaultModel, 'deepseek-flash',
+    'DeepSeek 的默认模型跟着换成 deepseek-flash（V4.1-Flash）');
   isTrue(textOnlyFromSource.indexOf('glm-4.7-flash') !== -1,
-    '项目当前的默认模型 glm-4.7-flash 在"不支持识图"名单里（它就是本需求要拦的那个例子）');
-  eq(aiParseFn.PROVIDERS.deepseek.visionModels.length, 0,
-    'DeepSeek 的识图支持列表是空的（它目前没有多模态模型）');
+    '智谱默认模型 glm-4.7-flash 在"不支持识图"名单里（它是本需求要拦的那个例子）');
+  isTrue(textOnlyFromSource.indexOf('deepseek-chat') !== -1,
+    'deepseek-chat 在"不支持识图"名单里（它同时还是**已停用**的模型名）');
   eq(JSON.stringify(aiDecomposeFn.PROVIDERS), JSON.stringify(aiParseFn.PROVIDERS),
     '两个云函数的 PROVIDERS 表仍然逐字一致（_selftest 8b.1 的那条不变量）');
 
@@ -284,13 +297,18 @@ function run() {
   eq(aiParseFn.visionSupportOf('glm-5.3-flash', 'zhipu'), true, "visionSupportOf('glm-5.3-flash') → true");
   eq(aiParseFn.visionSupportOf('  GLM-OCR ', 'zhipu'), true, '大小写与空白不影响判定');
   eq(aiParseFn.visionSupportOf('glm-4.7-flash', 'zhipu'), false, "visionSupportOf('glm-4.7-flash') → false");
-  eq(aiParseFn.visionSupportOf('deepseek-chat', 'deepseek'), false, "visionSupportOf('deepseek-chat') → false");
+  eq(aiParseFn.visionSupportOf('deepseek-flash', 'deepseek'), true,
+    "visionSupportOf('deepseek-flash') → **true**（DeepSeek 的多模态主模型）");
+  eq(aiParseFn.visionSupportOf('deepseek-chat', 'deepseek'), false,
+    "visionSupportOf('deepseek-chat') → false（已停用 + 纯文本）");
   eq(aiParseFn.visionSupportOf('', 'zhipu'), 'unknown', '空模型名 → unknown（不代表任何模型）');
   eq(aiParseFn.visionSupportOf('some-brand-new-vlm', 'zhipu'), 'unknown',
     '没收录的模型 → unknown（照常尝试，让服务端报错说话）');
 
   // api.js 那份三态判定必须与云函数同口径
   eq(api.classifyVisionModel('glm-5.3-flash'), true, 'api.classifyVisionModel 已知支持 → true');
+  eq(api.classifyVisionModel('deepseek-flash'), true,
+    'api.classifyVisionModel 也认得 deepseek-flash（否则 DeepSeek 用户会被误拦）');
   eq(api.classifyVisionModel('glm-4.7-flash'), false, 'api.classifyVisionModel 已知纯文本 → false');
   eq(api.classifyVisionModel('glm-4.7'), 'unknown', 'api.classifyVisionModel 没收录 → unknown');
   eq(api.classifyVisionModel(''), 'unknown', 'api.classifyVisionModel 空串 → unknown');
@@ -299,8 +317,11 @@ function run() {
   eq(api.effectiveModelName('', ''), aiParseFn.PROVIDERS.zhipu.defaultModel,
     '用户没填模型时按智谱默认模型算（与云函数的默认值一致）');
   eq(api.effectiveModelName('deepseek', ''), aiParseFn.PROVIDERS.deepseek.defaultModel,
-    'DeepSeek 没填模型时按 deepseek-chat 算');
+    'DeepSeek 没填模型时按 deepseek-flash 算（与云函数一致）');
+  eq(api.effectiveModelName('deepseek', ''), 'deepseek-flash', "就是 'deepseek-flash'");
   eq(api.effectiveModelName('zhipu', 'glm-5.3-flash'), 'glm-5.3-flash', '填了就用自己的');
+  isTrue(api.VISION_TEXT_ONLY_MODELS.indexOf('deepseek-chat') !== -1,
+    'deepseek-chat 仍在"不支持识图"名单里（页面据此给"已停用，改成 deepseek-flash"）');
 
   // ---- 2. 请求体：URL / 模型 / 参数 / 超时 / 图片传法 ----
   block('识图 —— 请求体构造（模型 + Base64 Data URL + 45 秒超时）');
@@ -336,6 +357,13 @@ function run() {
     eq(content[1].image_url.url.indexOf('data:image/jpeg;base64,'), 0,
       '图片按 **Base64 Data URL** 传（官方支持这种传法）');
     isTrue(content[1].image_url.url.indexOf(SAMPLE_BASE64) !== -1, 'Data URL 里就是那张图');
+    // detail 是 **DeepSeek 侧**的字段，智谱这条分支绝不能带（未知字段可能被判参数错误）
+    isFalse(Object.prototype.hasOwnProperty.call(calls[0].payload, 'detail'),
+      '智谱的请求体顶层**没有** detail');
+    isFalse(Object.prototype.hasOwnProperty.call(content[1].image_url, 'detail'),
+      '智谱的 image_url 里也**没有** detail');
+    isTrue(JSON.stringify(calls[0].payload).indexOf('"detail"') === -1,
+      '整个智谱请求体里搜不到 detail（一个字段都不许漏过去）');
 
     // ---- 3. 成功响应的字段与归一化 ----
     block('识图 —— 成功响应的字段（events/deadlines/tasks 同长同序）');
@@ -780,6 +808,74 @@ function run() {
       isTrue(hintUnknown.text.indexOf('如果识别失败请更换模型') !== -1,
         '灰字文案就是那句"未在已知支持识图的列表里"：' + show(hintUnknown.text));
 
+      // ---- 15a. 提示行按"服务商 + 模型 + 是否停用"分流 ----
+      //   【事实依据】DeepSeek 官方 changelog https://api-docs.deepseek.com/updates/ ：
+      //   2026-09-10 的 V4.1-Flash（deepseek-flash）是**原生多模态**；2026-07-24 起
+      //   deepseek-chat / deepseek-reasoner **停止服务**。所以**永远不要**再写
+      //   "DeepSeek 不能识图 / 换服务商" —— 这条路径我们走错过一次。
+      block('识图 —— 提示行分流（停用模型改名字 / 同家换模型 / 没收录照试 / 支持）');
+      var hintRetired = T.visionHintOf('deepseek-chat', 'deepseek');
+      eq(hintRetired.state, false, '已停用的 deepseek-chat → 不能识图（state:false）');
+      eq(hintRetired.level, 'danger', '红字提示');
+      isTrue(hintRetired.text.indexOf('已停止服务') !== -1, '说明是"模型名已停服"：' + show(hintRetired.text));
+      isTrue(hintRetired.text.indexOf('deepseek-flash') !== -1, '给出替代名字 deepseek-flash');
+      isTrue(hintRetired.text.indexOf('2026-07-24') !== -1, '带上停服日期（用户可核对）');
+      isFalse(hintRetired.text.indexOf('换服务商') !== -1, '**不出现"换服务商"**');
+      isFalse(hintRetired.text.indexOf('智谱') !== -1, '也不出现"换成智谱"这种错建议');
+      isFalse(hintRetired.text.indexOf('没有识图') !== -1, '更不出现"没有识图接口"');
+      eq(T.visionHintOf('deepseek-reasoner', 'deepseek').state, false, 'deepseek-reasoner 同样已停用');
+
+      var hintDsOk = T.visionHintOf('deepseek-flash', 'deepseek');
+      eq(hintDsOk.state, true, '**deepseek-flash（V4.1-Flash）判成可用**');
+      eq(hintDsOk.level, 'ok', '绿字');
+      isFalse(hintDsOk.text.indexOf('不具备识图能力') !== -1, '可用时不出现红字劝退');
+
+      var hintDsUnknown = T.visionHintOf('deepseek-v99', 'deepseek');
+      eq(hintDsUnknown.state, 'unknown', 'DeepSeek + 没收录的名字 → unknown（允许尝试）');
+      eq(hintDsUnknown.level, 'muted', '灰字');
+      isFalse(hintDsUnknown.text.indexOf('换服务商') !== -1, '没收录也不劝人换服务商');
+
+      var hintZhipuText = T.visionHintOf('glm-4.7-flash', 'zhipu');
+      eq(hintZhipuText.state, false, '智谱 + 纯文本模型 → 不能识图');
+      isTrue(hintZhipuText.text.indexOf('glm-5.3-flash') !== -1,
+        '智谱这支的建议是 glm-5.3-flash / glm-ocr（原文案保持不变）');
+      isFalse(hintZhipuText.text.indexOf('换服务商') !== -1, '同样不出现"换服务商"');
+      isFalse(hintZhipuText.text.indexOf('智谱 Key') !== -1, '不需要他再填一个 Key');
+
+      var hintZhipuOk = T.visionHintOf('glm-5.3-flash', 'zhipu');
+      eq(hintZhipuOk.state, true, '智谱 + glm-5.3-flash → 可用');
+      eq(hintZhipuOk.level, 'ok', '绿字');
+      isFalse(hintZhipuOk.text.indexOf('不具备识图能力') !== -1, '可用时不该出现"不具备识图能力"');
+
+      var hintUnknownZhipu = T.visionHintOf('glm-9999-vision', 'zhipu');
+      eq(hintUnknownZhipu.state, 'unknown', '智谱 + 没收录的模型 → unknown（允许尝试）');
+      eq(hintUnknownZhipu.level, 'muted', '灰字');
+
+      // 停用名单的建议目标必须真的是"能识图的模型"，而且旧名字确实被标了停用
+      var retiredTable = T.RETIRED_MODELS || {};
+      isTrue(!!retiredTable['deepseek-chat'], '页面 RETIRED_MODELS 里有 deepseek-chat');
+      isTrue(!!retiredTable['deepseek-reasoner'], '页面 RETIRED_MODELS 里有 deepseek-reasoner');
+      Object.keys(retiredTable).forEach(function (oldName) {
+        var replacement = retiredTable[oldName];
+        isTrue(api.VISION_HINT_MODELS.indexOf(replacement) !== -1,
+          '停用的 ' + oldName + ' → 建议的 ' + replacement + ' 确实在"支持识图"名单里');
+        isTrue(api.VISION_TEXT_ONLY_MODELS.indexOf(oldName) !== -1,
+          '停用的 ' + oldName + ' 也仍在"不支持识图"名单里（两条口径不矛盾）');
+      });
+      // 云函数侧的同一件事：停用名单 + 建议语术
+      Object.keys(aiParseFn.RETIRED_MODELS).forEach(function (oldName) {
+        eq(aiParseFn.RETIRED_MODELS[oldName], retiredTable[oldName],
+          '页面与云函数对 ' + oldName + ' 的替代建议一致');
+      });
+      var cloudRetiredMsg = aiParseFn.visionUnsupportedMessage('deepseek-chat', 'deepseek');
+      isTrue(cloudRetiredMsg.indexOf('已停止服务') !== -1, '云函数那句也是"已停服"口径');
+      isFalse(cloudRetiredMsg.indexOf('换服务商') !== -1, '云函数那句也不再劝人换服务商');
+      var cloudDsMsg = aiParseFn.visionUnsupportedMessage('deepseek-v4-flash-vision-exp', 'deepseek');
+      isTrue(cloudDsMsg.indexOf('deepseek-flash') !== -1,
+        'DeepSeek 的服务商级建议只在**自己家**的模型里挑：' + show(cloudDsMsg));
+      isFalse(cloudDsMsg.indexOf('glm-') !== -1, '绝不把智谱的模型名建议给 DeepSeek 用户');
+      eq(aiParseFn.visionSuggestions('deepseek')[0], 'deepseek-flash', 'DeepSeek 的首选建议是 deepseek-flash');
+
       isTrue(T.isCourseTask({ repeat: 'weekly', periods: '3-5' }), 'weekly + 有节次 → 课表类任务');
       isFalse(T.isCourseTask({ repeat: 'weekly', periods: '' }), 'weekly 但没节次 → 不算（手写日程的形态）');
       isFalse(T.isCourseTask({ repeat: 'none', periods: '3-5' }), '没重复 → 不算');
@@ -907,6 +1003,83 @@ function run() {
       eq(ctx.page.data.tip, '已入库 3 条', '追加导入的文案与「我的」页一致：' + show(ctx.page.data.tip));
       eq(ctx.page.data.parsed, null, '追加后也清空结果列表');
 
+      // ---- 15d. 页面：DeepSeek 用户的两种情形（停用名字 / 新的多模态名字）----
+      block('识图 —— 页面：DeepSeek 下"停用名字先改名字、deepseek-flash 直接能用"');
+      reset();
+      tasksStubProvider = 'deepseek';
+      tasksStubModel = 'deepseek-chat';
+      ctx.page._imageBase64 = SAMPLE_BASE64;
+      ctx.page._imageMime = 'image/jpeg';
+      ctx.page.data.visionState = 'unknown';   // 先装作未知，逼页面自己重新读一次配置
+      ctx.page.loadAiConfig();
+      return settle();
+    }).then(function () {
+      eq(ctx.page.data.aiProvider, 'deepseek', '页面读到了服务商是 deepseek');
+      eq(ctx.page.data.aiModel, 'deepseek-chat', '模型名也对');
+      eq(ctx.page.data.visionState, false, '已停用的名字 → 判成"不能识图"');
+      eq(ctx.page.data.visionHintLevel, 'danger', '红字提示');
+      isTrue(ctx.page.data.visionHint.indexOf('已停止服务') !== -1,
+        '提示说的是"这个名字已停服"：' + show(ctx.page.data.visionHint));
+      isTrue(ctx.page.data.visionHint.indexOf('deepseek-flash') !== -1, '并给出替代名字');
+      isFalse(ctx.page.data.visionHint.indexOf('换服务商') !== -1, '**不劝他换服务商**');
+      isFalse(ctx.page.data.visionHint.indexOf('智谱') !== -1, '也不提智谱');
+
+      reset();
+      visionStub = stubPostJson(function () { return modelReply(MODEL_JSON); });
+      ctx.page.onRecognize();
+      return settle();
+    }).then(function () {
+      eq(visionStub.calls.length, 0, '**停用的模型名：一个请求都不发**');
+      visionStub.restore();
+      eq(callLog.filter(function (one) { return one.name === 'aiParse'; }).length, 0, '云函数侧的识图入口也没被调用');
+      eq(ctx.page.data.visionBusy, false, '没有卡在 loading 里');
+      isTrue(ctx.page.data.visionError.indexOf('已停止服务') !== -1,
+        '错误卡片给的是同一句：' + show(ctx.page.data.visionError));
+
+      // 换成 deepseek-flash：状态变可用，**能真的发出请求**（而且带 detail:high）
+      reset();
+      tasksStubModel = 'deepseek-flash';
+      ctx.page.loadAiConfig();
+      return settle();
+    }).then(function () {
+      eq(ctx.page.data.visionState, true, 'deepseek-flash → 判定可用');
+      eq(ctx.page.data.visionHintLevel, 'ok', '绿字（不再有红字劝退）');
+      reset();
+      // 【这里要换环境变量】页面只是把报文递给云函数，真正决定"用哪家/哪个模型"的是
+      // 云函数侧的环境变量（Key 只从服务端读）。所以这一步临时把 env 切成 DeepSeek，
+      // 才能验证"DeepSeek + deepseek-flash 这条链路真的能发出带 detail 的请求"。
+      ctx.restoreEnv = withEnv({
+        DEEPSEEK_API_KEY: 'test-key-not-used', LLM_PROVIDER: 'deepseek', LLM_MODEL: 'deepseek-flash'
+      });
+      visionStub = stubPostJson(function () { return modelReply(MODEL_JSON); });
+      ctx.page.onRecognize();
+      return settle();
+    }).then(function () {
+      ctx.restoreEnv();
+      eq(visionStub.calls.length, 1, '**deepseek-flash 会真的构造并发出请求**（页面不再误拦）');
+      eq(visionStub.calls[0].payload.model, 'deepseek-flash', '请求体里的模型就是 deepseek-flash');
+      eq(visionStub.calls[0].payload.messages[1].content[1].image_url.detail, 'high',
+        '页面这条链路也带上了 detail:high');
+      visionStub.restore();
+      isTrue(!!ctx.page.data.parsed && ctx.page.data.parsed.items.length === 3,
+        'DeepSeek 这条也能正常识别出课程列表');
+
+      // 顺手验"读配置失败"的兜底：拿不到 provider 也要有一句提示，且不弹 toast
+      reset();
+      tasksStubConfigFails = true;
+      ctx.page.data.visionHint = '';
+      ctx.page.loadAiConfig();
+      return settle();
+    }).then(function () {
+      eq(ctx.page.data.visionState, 'unknown', '读配置失败 → 不确定（不拦用户）');
+      eq(ctx.page.data.visionHintLevel, 'muted', '兜底是灰字');
+      isTrue(ctx.page.data.visionHint.indexOf('没能读到 AI 配置') !== -1,
+        '有一句如实的兜底提示：' + show(ctx.page.data.visionHint));
+      eq(toasts.length, 0, '**读配置失败不弹 toast**（既有口径不变）');
+      tasksStubConfigFails = false;
+      tasksStubProvider = 'zhipu';
+      tasksStubModel = 'glm-4.7-flash';
+
       // ---- 15c. 反向断言：用户主动发起的识图**失败时必须有 toast** ----
       //   （防止有人图省事给"用户点的操作"也加上 silent：那样失败了用户会以为没反应）
       block('识图 —— 反向断言：用户主动发起的识图失败时仍然弹 toast');
@@ -949,6 +1122,87 @@ function run() {
           '文本路径的返回字段与改动前一致（没有混进识图那些字段）');
         eq(textRes.events.length, 1, '文本解析照常工作');
       });
+    }).then(function () {
+      // ---- 17. DeepSeek 分支的请求体：新模型名 + detail ----
+      block('识图 —— DeepSeek 分支：deepseek-flash + detail:high（智谱那条不带）');
+      return runVision(MODEL_JSON, {}, {
+        env: {
+          DEEPSEEK_API_KEY: 'test-key-not-used',
+          LLM_PROVIDER: 'deepseek',
+          LLM_MODEL: 'deepseek-flash'
+        }
+      });
+    }).then(function (outDs) {
+      eq(outDs.calls.length, 1,
+        'DeepSeek 分支**会**发请求（deepseek-flash 在支持名单里 → 事前不拦）');
+      eq(outDs.calls[0].url, 'https://api.deepseek.com/v1/chat/completions', '打到 DeepSeek 的端点');
+      eq(outDs.calls[0].payload.model, 'deepseek-flash',
+        '**模型名是 deepseek-flash**（不是已停用的 deepseek-chat）');
+      eq(outDs.calls[0].timeoutMs, 45000, '图片路径同样是 45 秒超时（与文本路径分开）');
+      var dsImage = outDs.calls[0].payload.messages[1].content[1];
+      eq(dsImage.type, 'image_url', '图片同样用 image_url + Base64 Data URL');
+      eq(dsImage.image_url.detail, 'high',
+        '**DeepSeek 分支带 detail: high**（课表是密集小字，官方建议 high）');
+      isFalse(Object.prototype.hasOwnProperty.call(outDs.calls[0].payload, 'detail'),
+        'detail 放在 image_url 里（OpenAI 兼容接口的字段位置），不是请求体顶层');
+      eq(outDs.res.ok, true, 'DeepSeek 这条链路也走得通（解析 / 归一化都没变）');
+      eq(outDs.res.provider, 'deepseek', 'provider 回显 deepseek');
+      eq(outDs.res.model, 'deepseek-flash', 'model 回显 deepseek-flash');
+      eq(outDs.res.tasks[0].repeat, 'weekly', '课程字段照常（repeat/periods 都在）');
+
+      // 已停用的模型名走**事前拒绝**，而且文案是"改名字"不是"换服务商"
+      return runVision(MODEL_JSON, {}, {
+        env: { DEEPSEEK_API_KEY: 'test-key-not-used', LLM_PROVIDER: 'deepseek', LLM_MODEL: 'deepseek-chat' }
+      });
+    }).then(function (outRetired) {
+      eq(outRetired.calls.length, 0, '**已停用的 deepseek-chat 一个请求都不发**');
+      eq(outRetired.res.ok, false, '提前拒掉');
+      eq(outRetired.res.code, 'VISION_UNSUPPORTED', 'code 仍是 VISION_UNSUPPORTED');
+      isTrue(outRetired.res.error.indexOf('已停止服务') !== -1,
+        '文案说明"这个模型名已停服"：' + show(outRetired.res.error));
+      isTrue(outRetired.res.error.indexOf('deepseek-flash') !== -1, '并给出替代的模型名');
+      isFalse(outRetired.res.error.indexOf('换服务商') !== -1,
+        '**不出现"换服务商"**（同一家换个模型名就行）');
+      isFalse(outRetired.res.error.indexOf('没有识图') !== -1, '也不出现"没有识图接口"这种说法');
+    }).then(function () {
+      // ---- 18. silent 的**行为**契约（不是"传没传参数"）----
+      //   【为什么必须测行为】曾经出现过"封装声明了 options 形参、却忘了往 call() 转发"：
+      //   调用方以为自己关掉了提示、其实没关。只断言"我传了 {silent:true}"永远发现不了这种事 ——
+      //   唯一靠谱的证法是：**让请求真的失败，数一数到底弹了几次 toast**。
+      block('静默读契约 —— silent:true 不弹 toast / 默认照弹（数 toast 次数）');
+      reset();
+      tasksStubConfigFails = true;
+      return api.aiConfigGet({ silent: true }).then(function (res) {
+        eq(res.ok, false, '读配置失败 → 照旧 resolve {ok:false}（不 reject）');
+        isTrue(String(res.error).length > 0, 'error 里有原因（句子留给调用方决定怎么显示）');
+        eq(toasts.length, 0, '**api.aiConfigGet({silent:true}) 一次 toast 都不弹**');
+        reset();
+        return api.aiConfigGet();
+      }).then(function (res2) {
+        eq(res2.ok, false, '默认调用同样失败');
+        eq(toasts.length, 1, '**默认（不传 silent）照样弹一次 toast** —— 既有行为没被改坏');
+        reset();
+        tasksStubSettingsFails = true;
+        return api.getSettings({ silent: true });
+      }).then(function (res3) {
+        eq(res3.ok, false, 'getSettings 失败也照旧 resolve');
+        eq(toasts.length, 0, '**getSettings({silent:true}) 不弹 toast**（同一个开关）');
+        reset();
+        return api.getSettings();
+      }).then(function (res4) {
+        eq(res4.ok, false, '默认调用同样失败');
+        eq(toasts.length, 1, 'getSettings() 默认 → 弹一次');
+        reset();
+        // me 页那条绕行走法：api.call 是公开导出，两条路的行为必须一模一样
+        return api.call('ai_config_get', null, { silent: true });
+      }).then(function (res5) {
+        eq(res5.ok, false, 'api.call(action, payload, {silent:true}) 也失败');
+        eq(toasts.length, 0, '**api.call(...) 的静默写法同样一次都不弹**（me 页用它是对的）');
+        eq(callLog.length > 0, true, '（顺带）确认请求真的发出去了，不是"没发所以没弹"');
+        reset();
+        tasksStubConfigFails = false;
+        tasksStubSettingsFails = false;
+      });
     });
     // 【收尾的两行不能省】上面这条链是**嵌在** `.then(function (out) {...})` 里的：
     // 第一行 `});` 关掉最后一段 `.then(function (routed) {...})`，
@@ -989,6 +1243,9 @@ var toasts = [];
 var callLog = [];
 var modals = [];
 var tasksStubModel = 'glm-4.7-flash';   // tasks 桩里 ai_config_get 返回的模型名
+var tasksStubProvider = 'zhipu';        // 同上，服务商（提示行按它分流）
+var tasksStubConfigFails = false;       // true = ai_config_get 返回失败（验"读配置失败的兜底"）
+var tasksStubSettingsFails = false;     // true = settings_get 返回失败（验 silent 的**行为**：弹不弹 toast）
 var savedWx = global.wx;
 var savedGetApp = global.getApp;
 
@@ -1013,7 +1270,10 @@ function tasksStub(data) {
     return { ok: true, tasks: [], count: 0 };
   }
   if (action === 'ai_config_get') {
-    return { ok: true, provider: 'zhipu', model: tasksStubModel, hasKey: true, masked: '****test', updated_at: '' };
+    if (tasksStubConfigFails) return { ok: false, error: 'unexpected call: ai_config_get' };
+    return {
+      ok: true, provider: tasksStubProvider, model: tasksStubModel, hasKey: true, masked: '****test', updated_at: ''
+    };
   }
   if (action === 'bulk_add') {
     var list = (data && data.tasks) || [];
@@ -1024,6 +1284,7 @@ function tasksStub(data) {
     return { ok: true, removed: 2, inserted: rows.length, skipped: 0, duplicates: 0, errors: [], partial: false };
   }
   if (action === 'settings_get') {
+    if (tasksStubSettingsFails) return { ok: false, error: 'unexpected call: settings_get' };
     // 基准里放两节：'5' 会被截图里的同名列覆盖，'9' 不该被动到
     return { ok: true, semester_start: '2026-09-07', period_times: { '5': ['11:45', '12:25'], '9': ['19:00', '19:45'] } };
   }

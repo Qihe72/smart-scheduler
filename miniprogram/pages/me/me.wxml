@@ -112,7 +112,9 @@
         <!-- 1. 当前状态（只显示掩码，永远不显示 Key 原文） -->
         <view class="ai-status ai-status-{{aiStatusType}}" wx:if="{{!aiLoading}}">
           <text class="ai-status-text">{{aiStatusText}}</text>
-          <text class="ai-status-model" wx:if="{{aiModel}}">模型：{{aiModel}}</text>
+          <!-- 第二行：服务商 + 实际生效的模型。真机上用户抱怨"我用的明明是 deepseek，
+               它硬说我用的是智谱大模型" —— 就是因为原来只有「模型：X」，看不出服务商是哪家 -->
+          <text class="ai-status-model" wx:if="{{aiStatusDetail}}">{{aiStatusDetail}}</text>
         </view>
         <view class="ai-status" wx:else>
           <text class="ai-status-text">正在读取 AI 设置…</text>
@@ -160,6 +162,37 @@
           />
         </view>
 
+        <!-- 3a. Key 形状与服务商对不上 → 黄字提醒 + 一键切换。
+             服务商与 Key 必须来自同一家，否则一定报身份验证失败；
+             真机上用户就是粘了 DeepSeek 的 Key、服务商却停在智谱。
+             按钮**只改下拉选中项、不保存不提交**（绝不静默改用户配置）。 -->
+        <view class="ai-keywarn" wx:if="{{aiKeyShapeHint}}">
+          <text class="ai-keywarn-text">{{aiKeyShapeHint}}</text>
+          <view
+            class="ai-keywarn-btn"
+            wx:if="{{aiKeyShapeFixIndex >= 0}}"
+            hover-class="ai-keywarn-btn-hover"
+            bindtap="onAiFixProvider"
+          >{{aiKeyShapeFixLabel}}</view>
+        </view>
+
+        <!-- 3b. 模型（可留空）。后端一直支持用户自选模型，缺的就是这一格：
+             真机上用户说"模型改不了"，因为这里原来只有一个**只读**的「模型：X」。 -->
+        <view class="row">
+          <text class="row-label">模型</text>
+          <input
+            class="ai-key-input"
+            type="text"
+            placeholder="{{aiModelPlaceholder}}"
+            value="{{aiModelInput}}"
+            bindinput="onAiModelInput"
+          />
+        </view>
+        <view class="note" wx:if="{{aiDefaultModelText}}">{{aiDefaultModelText}}</view>
+        <view class="note" wx:if="{{aiModel}}">
+          当前生效：{{aiModel}}（上面留空就是继续用它；填了按你填的来）
+        </view>
+
         <!-- 4. 保存 / 清除 -->
         <view class="btn-row">
           <view
@@ -184,9 +217,9 @@
           「程序预置的 Key」是所有人共用的，额度有限、高峰期可能失败；填自己的更稳。
         </view>
         <view class="note">
-          免费获取：智谱开放平台
+          免费获取：{{aiKeyUrlLabel}}
           <text class="link-text" selectable="{{true}}">{{aiKeyUrl}}</text>
-          （免费档 glm-4.7-flash），注册后在「API Keys」页面复制即可。
+          （{{aiProviderHint}}），注册后在「API Keys」页面复制即可。
         </view>
         <view class="note">AI 页报错时也会引导你回到这里配置。</view>
       </block>

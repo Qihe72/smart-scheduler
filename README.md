@@ -538,7 +538,7 @@ Python 版原有的 82 个测试也仍然全过 —— 小程序是加进去的�
 - **程序预置**：配在 `aiParse` / `aiDecompose` 的云函数环境变量里（`ZHIPU_API_KEY` 或 `DEEPSEEK_API_KEY`），所有人共用，**消耗机主的额度**；
 - **用户自填**：在「我的 → AI 设置」里填自己的 Key，存在他自己的数据里、按 openid 隔离；服务端**永不回传原文**，只回 `hasKey` 和一个掩码（形如 `****abcd`，末 4 位），也不写日志。Key 不写进小程序代码——小程序代码可以被反编译看到，写进去等于公开。
 
-服务商默认**智谱 `glm-4.7-flash`（免费档）**，备选 **DeepSeek `deepseek-chat`**；用 `LLM_PROVIDER` / `LLM_MODEL` 两个环境变量就能切换，**没有写死在代码里**。显式指定了某一家而它没配 Key 时，程序**照实用它并报「没配 Key」**，不会偷偷换另一家——否则报错会指错方向。
+服务商默认**智谱 `glm-4.7-flash`（免费档）**，备选 **DeepSeek `deepseek-flash`**（V4.1-Flash，原生多模态）；用 `LLM_PROVIDER` / `LLM_MODEL` 两个环境变量就能切换，**没有写死在代码里**。显式指定了某一家而它没配 Key 时，程序**照实用它并报「没配 Key」**，不会偷偷换另一家——否则报错会指错方向。
 
 **怎么跑起来**：见 **[`miniprogram/README.md`](miniprogram/README.md)**（注册 AppID → 开通云开发 → 建三个集合并设权限 → 上传部署 4 个云函数 → 配 Key → 预览）。部署步骤这里不重复。
 
@@ -677,7 +677,7 @@ Python 版原有的 82 个测试也仍然全过 —— 小程序是加进去的�
 | requests | 2.34.2 | Apache-2.0 | 调用大模型 HTTP 接口（智谱 / DeepSeek） |
 | python-dotenv | 1.2.3 | BSD-3-Clause | 读取 `.env` 配置 |
 | 智谱 GLM API（`glm-4.7-flash`，默认） | — | [智谱开放平台](https://open.bigmodel.cn) 服务条款 | 自然语言解析、任务拆解、对话 |
-| DeepSeek API（`deepseek-chat`，备选） | — | DeepSeek 服务条款 | 自然语言解析、任务拆解、对话 |
+| DeepSeek API（`deepseek-flash`，备选） | — | DeepSeek 服务条款 | 自然语言解析、任务拆解、对话 |
 | `segno`（可选） | MIT | — | 手机扫码访问用的二维码；不装也能用，只是不显示二维码 |
 
 ### 小程序版的第三方归属
@@ -687,7 +687,8 @@ Python 版原有的 82 个测试也仍然全过 —— 小程序是加进去的�
 | **微信云开发**（云函数 / 云数据库 / 订阅消息） | 小程序的后端、存储、身份与消息通道 | 腾讯，按其服务条款使用。本项目只调用官方 SDK `wx-server-sdk`，未引入其它 npm 依赖 |
 | **微信开发者工具** | 编译、预览、上传部署 | 腾讯，按其许可使用 |
 | **智谱开放平台**（GLM） | 自然语言解析、任务拆解；**课表截图识别** | [open.bigmodel.cn](https://open.bigmodel.cn) 服务条款。项目里出现的模型名：默认文本模型 `glm-4.7-flash`（免费档）；识图推荐 `glm-5.3-flash`（原生多模态）与 `glm-ocr`（专做图文解析）。模型名与价格会变，**以智谱官方文档为准** |
-| **DeepSeek API**（`deepseek-chat`） | 自然语言解析、任务拆解的备选服务商 | DeepSeek 服务条款，按量计费 |
+| **DeepSeek API**（`deepseek-flash`） | 自然语言解析、任务拆解的备选服务商 | DeepSeek 服务条款，按量计费 |
+| 平台能力会变，必须查官方 changelog | 我们曾凭印象断言「DeepSeek 没有多模态接口」，并把已停服的 `deepseek-chat` 当作在用默认模型 —— 用户质疑后查证：DeepSeek 2026-09-10 发布的 `deepseek-flash`（V4.1-Flash）**原生多模态**，而 `deepseek-chat`/`deepseek-reasoner` **2026-07-24 已停服**。判断「某家有没有多模态 / 某个模型名还能不能用」必须以官方 changelog 为准，不能靠记忆。 |
 
 **API Key 的归属与存放**（这一条是评审会问的）：
 

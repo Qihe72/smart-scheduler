@@ -14,7 +14,8 @@
  *
  * 【服务商】不写死任何一家，由环境变量决定（详见文件里的 PROVIDERS 表）：
  *         * ZHIPU_API_KEY    → 智谱开放平台，默认模型 glm-4.7-flash（推荐，目前免费）
- *         * DEEPSEEK_API_KEY → DeepSeek，默认模型 deepseek-chat（备选）
+ *         * DEEPSEEK_API_KEY → DeepSeek，默认模型 deepseek-flash（V4.1-Flash，原生多模态；
+ *                              deepseek-chat / deepseek-reasoner 自 2026-07-24 起已停止服务）
  *         * LLM_PROVIDER     → 显式指定服务商（zhipu / deepseek）
  *         * LLM_MODEL        → 覆盖模型名，试新模型不用改代码
  *         没显式指定时「谁配了 Key 用谁」，两家都没配才报 AI 服务暂不可用。
@@ -142,17 +143,36 @@ const PROVIDERS = {
     name: 'deepseek',
     label: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com/v1',
-    defaultModel: 'deepseek-chat',
+    // 2026-09-10 发布的 DeepSeek-V4.1-Flash 是**原生多模态**（图像输入进了主模型），
+    // API 模型名就是 deepseek-flash —— 所以这里的默认模型也跟着换。
+    // 依据：DeepSeek 官方 changelog https://api-docs.deepseek.com/updates/ 与官方视觉指南。
+    // ⚠️ 我们**没有**在真机上打过这个接口（见文件末尾「未验证」说明），模型名以官方文档为准。
+    defaultModel: 'deepseek-flash',
     apiKeyEnv: 'DEEPSEEK_API_KEY',
     // DeepSeek 走标准 HTTP 语义，没有业务码，所以这几组留空、由 HTTP 状态兜底
     quotaCodes: [],
     authCodes: [],
     modelMissingCodes: [],
     paramCodes: [],
-    // 【识图能力】DeepSeek 目前没有多模态模型 → 支持列表为空，识图会被事前拒掉并提示换服务商。
-    visionModels: [],
+    // 【识图能力】DeepSeek 有原生多模态模型（V4.1-Flash）→ 支持列表**不再为空**。
+    // deepseek-v4-flash-vision-exp 官方已下线，但为了兼容仍临时路由到 V4.1-Flash，所以也认。
+    visionModels: ['deepseek-flash', 'deepseek-v4-flash-vision-exp'],
+    // 【已停用】这两个名字自 2026-07-24 起**停止服务**（官方 changelog）—— 它们不是
+    // "不支持识图"，而是"这个模型名已经没了"。文案上必须区分开（见 visionUnsupportedMessage）。
     textOnlyModels: ['deepseek-chat', 'deepseek-reasoner'],
   },
+};
+
+/**
+ * 已停用（官方公告停止服务）的模型名 → 建议改用的模型名。
+ *
+ * 【为什么要单独一张表】"不支持识图"和"这个名字已经停服了"是两件事，给用户的下一步也不同：
+ * 前者是"换个模型"，后者是"你存的名字已经不被服务了，改成 X"。
+ * 依据：DeepSeek 官方 changelog（2026-07-24 起 deepseek-chat / deepseek-reasoner 停止服务）。
+ */
+const RETIRED_MODELS = {
+  'deepseek-chat': 'deepseek-flash',
+  'deepseek-reasoner': 'deepseek-flash',
 };
 
 /** 环境变量名（集中在这里，方便与文档、自测对齐） */
@@ -1132,22 +1152,54 @@ function visionSupportOf(model, providerName) {
 
 /**
  * 「换一个能识图的模型」这句人话 —— 必须带**当前模型名**与**建议换的模型名**，
- * 用户才知道去哪儿改、改成什么。DeepSeek 目前没有多模态，所以要说清"换服务商"。
+ * 用户才知道去哪儿改、改成什么。
+ *
+ * 【关键：建议只在**同一家服务商**里挑，绝不劝人换服务商】
+ * 早先版本以为 DeepSeek 没有多模态，于是对 DeepSeek 用户说"换服务商 + 换 Key" ——
+ * 那是**错的**（DeepSeek 的 V4.1-Flash 就是原生多模态）。现在建议直接从
+ * `PROVIDERS[provider].visionModels` 里取，天然就是"同一家、不用换 Key"。
+ *
+ * 【已停用的模型名要先说清】deepseek-chat / deepseek-reasoner 自 2026-07-24 停止服务，
+ * 这不是"模型不支持识图"，而是"你存的名字已经没了"，所以单独一句、给的是替代名字。
  *
  * @param {string} model 当前模型名
  * @param {string} providerName 当前服务商
  * @returns {string}
  */
 function visionUnsupportedMessage(model, providerName) {
-  const suggestions = VISION_RECOMMENDED_MODELS
-    .map((name) => (name === 'glm-ocr' ? `${name}（专做图文解析）` : `${name}（原生多模态，推荐）`))
+  const key = normalizeModelKey(model);
+  if (RETIRED_MODELS[key]) {
+    return `当前模型 ${toStr(model)} 自 2026-07-24 起已停止服务，请到「我的 → AI 设置」`
+      + `把模型改成 ${RETIRED_MODELS[key]}（DeepSeek V4.1-Flash，自带识图能力），也可以继续用文字录入。`;
+  }
+
+  // 建议里**排除当前模型**（否则会出现"把 deepseek-v4-flash-vision-exp 换成 deepseek-v4-flash-vision-exp"）
+  const suggestion = visionSuggestions(providerName)
+    .filter((name) => normalizeModelKey(name) !== key);
+  if (!suggestion.length) {
+    return `当前模型 ${toStr(model)} 不具备识图能力，无法识别图片。`
+      + '请到「我的 → AI 设置」换一个支持识图的模型（同一家服务商里换就行，不用换 Key），'
+      + '也可以继续用文字录入。';
+  }
+  const listText = suggestion
+    .map((name) => (name === 'glm-ocr' ? `${name}（专做图文解析）` : `${name}（原生多模态）`))
     .join('或');
-  const name = toStr(providerName).toLowerCase();
-  const where = name === 'deepseek'
-    ? 'DeepSeek 目前没有支持识图的模型，请到「我的 → AI 设置」把服务商换成智谱（zhipu），模型填'
-    : '请到「我的 → AI 设置」把模型换成';
-  return `当前模型 ${toStr(model)} 不具备识图能力，无法识别图片。${where} ${suggestions}，`
-    + '也可以继续用文字录入。';
+  return `当前模型 ${toStr(model)} 不具备识图能力，无法识别图片。请到「我的 → AI 设置」`
+    + `把模型换成 ${listText}；换同一家的模型就行，不用换 Key。也可以继续用文字录入。`;
+}
+
+/**
+ * 给某个服务商挑两个"能识图的模型"作为建议（优先官方推荐的智谱那两个，其余按名单顺序）。
+ * 只在该服务商自己的 visionModels 里挑 —— 这是"不劝人换服务商"的技术保证。
+ *
+ * @param {string} providerName
+ * @returns {string[]} 最多 2 个模型名；这家一个都没有时返回空数组（调用方给通用文案）
+ */
+function visionSuggestions(providerName) {
+  const lists = visionModelLists(providerName);
+  const preferred = VISION_RECOMMENDED_MODELS.filter((name) => lists.vision.indexOf(name) !== -1);
+  const rest = lists.vision.filter((name) => preferred.indexOf(name) === -1);
+  return preferred.concat(rest).slice(0, 2);
 }
 
 /** 从报错体里抠出业务码（智谱是 error.code 的字符串数字） */
@@ -1807,6 +1859,21 @@ async function chatCompletionVision(messages, options) {
     // 【刻意不带 response_format】见本节开头：thinking 只能 enabled 时 JSON 模式不保证生效
   };
 
+  // 【按服务商分支的字段】DeepSeek 的视觉接口支持 image_url.detail（low / high(别名 original) / auto），
+  // 官方对"密集小字"场景（课表截图正是）建议 high；智谱那边没有这个字段，**绝不能带**
+  // （未知字段可能被判成参数错误）。放在 image_url 里面是 OpenAI 兼容接口的位置（DeepSeek 同形）。
+  // ⚠️ 未经真机/真接口验证：detail 的确切位置与 deepseek-flash 的实际行为都还没打过真实请求。
+  //    若官方文档写的是请求体顶层，把下面这段改成 `payload.detail = 'high';` 即可（断言位置一并改）。
+  if (provider.name === 'deepseek') {
+    messages.forEach((message) => {
+      if (!message || !Array.isArray(message.content)) return;
+      message.content.forEach((part) => {
+        if (!part || part.type !== 'image_url' || !part.image_url) return;
+        part.image_url.detail = 'high';
+      });
+    });
+  }
+
   // 日志一律过 scrubImagePayload：宁可少点信息，也不能把 base64 或 Key 写进日志
   const describe = (error) => scrubImagePayload(`[识图] ${provider.name}/${model}（${sourceLabel}）${error}`);
 
@@ -2142,6 +2209,8 @@ Object.assign(exports, {
   visionSupportOf,
   visionModelLists,
   visionUnsupportedMessage,
+  visionSuggestions,
+  RETIRED_MODELS,
   isVisionUnsupportedError,
   isImageTooLargeError,
   classifyVisionFailure,

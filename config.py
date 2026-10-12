@@ -49,7 +49,10 @@ LLM_PROVIDERS = {
     },
     "deepseek": {
         "label": "DeepSeek",
-        "model": "deepseek-chat",
+        # 【2026-10-13 更正】DeepSeek 的旧模型名 deepseek-chat / deepseek-reasoner
+  # 已于 2026-07-24 停止服务；现用 deepseek-flash（DeepSeek-V4.1-Flash，原生多模态）。
+  # 依据：https://api-docs.deepseek.com/updates/ 。仍可用 LLM_MODEL 覆盖。
+  "model": "deepseek-flash",
         "base_url": "https://api.deepseek.com/v1",
         "key_env": "DEEPSEEK_API_KEY",
     },

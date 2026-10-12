@@ -326,6 +326,37 @@ page {
   word-break: break-all;
 }
 
+/* Key 形状与服务商不匹配：黄字提醒 + 一键切换按钮（按钮只改下拉选中项，不保存） */
+.ai-keywarn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-top: 14rpx;
+  padding: 14rpx 16rpx;
+  background: #fff7e6;
+  border: 1rpx solid #ffe0a3;
+  border-radius: 10rpx;
+}
+
+.ai-keywarn-text {
+  font-size: 22rpx;
+  line-height: 1.6;
+  color: #8a5a00;
+}
+
+.ai-keywarn-btn {
+  margin-top: 14rpx;
+  padding: 10rpx 26rpx;
+  font-size: 24rpx;
+  color: #ffffff;
+  background: #d99a00;
+  border-radius: 32rpx;
+}
+
+.ai-keywarn-btn-hover {
+  background: #b98200;
+}
+
 .ghost-btn.btn-disabled {
   color: #a8aebd;
   background: #f4f6fa;

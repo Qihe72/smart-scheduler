@@ -16,6 +16,7 @@
  *                            character_string …，按 key 前缀）与各自长度格式约束 /
  *                            **长度按"权重"算（汉字/全角 = 2，真机证实）**及其截断保证 /
  *                            默认映射对齐真实模板（thing2 + date4 + short_thing19）/
+ *                            **date 形状被拒 → 自动降级为纯日期并记住（真机证实 date 不吃带时刻）**
  *                            47003 失败留痕能自证"哪个字段、发了什么值" /
  *                            配置类失败退回额度（不烧用户授权）/ 错误码分类
  *                            （43101 / 47003 / 40001）/ 额度绝不超发 / 单用户失败不中断整轮。
@@ -1240,7 +1241,7 @@ function envOf(overrides) {
   return merged;
 }
 
-testCase('8b.1 服务商表：两家都在，默认模型名正确', () => {
+testCase('8b.1 服务商表：两家都在，默认模型名正确（DeepSeek 旧名 deepseek-chat 已于 2026-07-24 停服 → 默认模型是 deepseek-flash）', () => {
   const names = aiParse.providerNames().sort();
   eq(names, ['deepseek', 'zhipu'], 'aiParse 支持两家');
   eq(aiDecompose.providerNames().sort(), ['deepseek', 'zhipu'], 'aiDecompose 也支持两家（两个函数都要读环境变量）');
@@ -1248,7 +1249,10 @@ testCase('8b.1 服务商表：两家都在，默认模型名正确', () => {
   eq(aiParse.PROVIDERS.zhipu.defaultModel, 'glm-4.7-flash', '智谱默认模型');
   eq(aiParse.PROVIDERS.zhipu.apiKeyEnv, 'ZHIPU_API_KEY', '智谱环境变量名');
   eq(aiParse.PROVIDERS.zhipu.baseUrl, 'https://open.bigmodel.cn/api/paas/v4', '智谱 base 地址');
-  eq(aiParse.PROVIDERS.deepseek.defaultModel, 'deepseek-chat', 'DeepSeek 默认模型');
+  // 【事实更新】DeepSeek 的默认模型换成 deepseek-flash（V4.1-Flash）：
+  // 依据官方 changelog（2026-09-10 发布原生多模态的 V4.1-Flash；2026-07-24 起
+  // deepseek-chat / deepseek-reasoner 停止服务），所以默认模型不能再是 deepseek-chat。
+  eq(aiParse.PROVIDERS.deepseek.defaultModel, 'deepseek-flash', 'DeepSeek 默认模型（V4.1-Flash）');
   eq(aiParse.PROVIDERS.deepseek.apiKeyEnv, 'DEEPSEEK_API_KEY', 'DeepSeek 环境变量名');
   eq(aiParse.PROVIDERS.deepseek.baseUrl, 'https://api.deepseek.com/v1', 'DeepSeek base 地址');
 
@@ -1265,7 +1269,7 @@ testCase('8b.1 服务商表：两家都在，默认模型名正确', () => {
   eq(aiParse.chatEndpoint({ baseUrl: 'https://x.example.com/v4//' }), 'https://x.example.com/v4/chat/completions', 'base 末尾斜杠容错');
 });
 
-testCase('8b.2 未指定服务商时「谁配了 Key 用谁」', () => {
+testCase('8b.2 未指定服务商时「谁配了 Key 用谁」（DeepSeek 侧默认模型 = deepseek-flash；旧名 deepseek-chat 2026-07-24 起停服）', () => {
   // 两个都没配 → 失败
   const none = aiParse.resolveProviderConfig(envOf());
   eq(none.ok, false, '两家都没配 Key → 不可用');
@@ -1277,7 +1281,7 @@ testCase('8b.2 未指定服务商时「谁配了 Key 用谁」', () => {
   const onlyDeepseek = aiParse.resolveProviderConfig(envOf({ DEEPSEEK_API_KEY: 'sk-test-deepseek' }));
   eq(onlyDeepseek.ok, true, '只有 DeepSeek Key → 可用');
   eq(onlyDeepseek.provider.name, 'deepseek', '选中 DeepSeek');
-  eq(onlyDeepseek.model, 'deepseek-chat', '用 DeepSeek 默认模型');
+  eq(onlyDeepseek.model, 'deepseek-flash', '用 DeepSeek 默认模型（deepseek-flash）');
 
   // 只有智谱有 Key → 用智谱
   const onlyZhipu = aiParse.resolveProviderConfig(envOf({ ZHIPU_API_KEY: 'test-zhipu-key' }));
@@ -2055,10 +2059,13 @@ testCase('10.7 默认映射对齐真实模板：thing2 / date4 / short_thing19 �
   eq(remind.fieldUnits(built.data.short_thing19.value), 4, '「截止」权重 = 4 ≤ 5');
   eq(built.truncated, [], '这个长度不该触发截断');
 
-  // 这个模板 + 默认映射下，**只有**一条"未最终证实"的提醒（date4 的带时刻写法），没有配置错误
+  // 这个模板 + 默认映射下，**只有**一条关于日期形状的提醒（不是配置错误，是"形状靠真机判定"）
   eq(built.warnings.length, 1, '恰好一条提醒');
   ok(built.warnings[0].indexOf('date4') !== -1, '提醒针对 date4');
-  ok(built.warnings[0].indexOf('尚未被真机证实') !== -1, '并且照实说是未证实，而不是"错了"');
+  ok(built.warnings[0].indexOf('年月日+时刻') !== -1 || built.warnings[0].indexOf('纯日期') !== -1,
+    '并且说清当前用的是哪种写法（而不是笼统的"可能有问题"）');
+  ok(built.warnings[0].indexOf('只能由真机判定') !== -1,
+    '照实说明：date 类收哪种形状只能由真机判定，代码不假装知道');
 
   // 类别标签三类都与前端 utils/periods.js 的 TYPE_LABELS 一致
   eq(remind.typeLabelOf('ddl'), '截止', 'ddl → 截止');
@@ -2649,6 +2656,150 @@ testCaseAsync('10.16c 配置类失败要把额度还回去（否则模板配错�
   await runScan(dbTwice, twiceSender);
   await runScan(dbTwice, twiceSender);
   eq(dbTwice.store.settings[0].remind_quota, 2, '连跑两轮 47003，额度仍是 2（没有被烧掉）');
+});
+
+testCaseAsync('10.16d 【真机证实】date 形状被拒 → 自动降级为纯日期并记住', async () => {
+  // 真机原文（第二轮）：
+  //   openapi.subscribeMessage.send fail: argument invalid data format,
+  //   invalid value of property: data.date4
+  //   thing2=【测试】到期提醒 | date4=2026年10月13日00:09 | short_thing19=截止
+  // 微信**没给期望形状** → 所以代码不猜：先用带时刻的，被点名拒绝就降级成纯日期并记住。
+  const DATE4_REJECT = {
+    ok: false,
+    errCode: 47003,
+    errMsg: 'openapi.subscribeMessage.send fail: argument invalid data format,'
+      + ' invalid value of property: data.date4',
+  };
+  const dueAt = R_NOW + 5 * MIN;
+
+  // ===== ① 第一次被拒（点名 date4）→ 自动降级重试 → 第二次成功 =====
+  const db = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'd1' })] });
+  const sender = stubSender([DATE4_REJECT, { ok: true }]);
+  const result = await runScan(db, sender);
+
+  eq(result.ok, true, '整轮不炸');
+  eq(result.sent, 1, 'sent = 1（降级后发成功了）');
+  eq(result.failed, 0, '不算失败');
+  eq(result.downgraded, 1, '汇总里报告"有 1 条是降级后才发出去的"');
+  eq(sender.calls.length, 2, '确实发了两次（第一次带时刻、第二次纯日期）');
+  // 第一次：带时刻
+  ok(sender.calls[0].data.date4.value.indexOf(':') !== -1, '第一次发的是"年月日+时刻"');
+  ok(/^\d{4}年\d{1,2}月\d{1,2}日\d{1,2}:\d{1,2}$/.test(sender.calls[0].data.date4.value), '第一次形状合法（本地校验通过）');
+  // 第二次：纯日期
+  ok(sender.calls[1].data.date4.value.indexOf(':') === -1, '第二次发的是纯日期（不含 :）');
+  ok(/^\d{4}年\d{1,2}月\d{1,2}日$/.test(sender.calls[1].data.date4.value),
+    '纯日期匹配 ^\\d{4}年\\d{1,2}月\\d{1,2}日$');
+  eq(sender.calls[1].data.date4.value, remind.formatDateOnlyText(dueAt), '纯日期的值就是 formatDateOnlyText');
+
+  // ===== ② 额度净变化必须是 -1（不能扣两次，也不能一次都不扣）=====
+  eq(db.store.settings[0].remind_quota, 2, '额度净变化 = -1（第一次失败被退回，第二次成功才真扣）');
+  eq(result.quota_refunded, 1, '汇总里报告退了 1 次（第一次的额度）');
+
+  // ===== ③ 降级结果被记住 =====
+  eq(db.store.settings[0][remind.SETTINGS_DATE_STYLE], remind.DATE_STYLE_DATE,
+    'remind_date_style = "date" 已落库');
+  eq(db.store.reminders.length, 1, '只落一条**成功**记录（失败那次不该当成"已提醒"）');
+  eq(db.store.reminders[0].ok, true, '记录是成功');
+  eq(db.store.reminders[0].date_style, remind.DATE_STYLE_DATE, '记录标明用的纯日期');
+  eq(db.store.reminders[0].attempts, 2, '记录标明试了 2 次');
+
+  // ===== ④ 已记住 style → 下一次**第一次就用纯日期**（不再浪费一次失败尝试）=====
+  const db2 = remindWorld({
+    quota: 3,
+    tasks: [ddlAt(dueAt, { _id: 'd2' })],
+  });
+  db2.store.settings[0][remind.SETTINGS_DATE_STYLE] = remind.DATE_STYLE_DATE; // 模拟"上次学到的"
+  const sender2 = stubSender([{ ok: true }]);
+  const result2 = await runScan(db2, sender2);
+  eq(result2.sent, 1, '第二次扫描（已记住 style）也发成功');
+  eq(sender2.calls.length, 1, '**只发一次**（不再先试带时刻）');
+  ok(sender2.calls[0].data.date4.value.indexOf(':') === -1, '第一次请求的 date4 就不含 :');
+  eq(sender2.calls[0].data.date4.value, remind.formatDateOnlyText(dueAt), '直接用纯日期');
+  eq(result2.downgraded, 0, '这次不算"降级"（本来就用纯日期）');
+  eq(db2.store.settings[0].remind_quota, 2, '额度同样只扣一次');
+
+  // ===== ⑤ 点名的是 thing2 → **绝不重试**（那是真问题，重试只会掩盖它）=====
+  const db3 = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'd3' })] });
+  const sender3 = stubSender([{
+    ok: false,
+    errCode: 47003,
+    errMsg: 'invalid value of property: data.thing2',
+  }]);
+  const result3 = await runScan(db3, sender3);
+  eq(sender3.calls.length, 1, '**只发生一次发送**（不重试）');
+  eq(result3.sent, 0, '没发成功');
+  eq(result3.failed, 1, '如实记 1 条失败');
+  eq(result3.quota_refunded, 1, '配置类失败照旧退额度');
+  eq(db3.store.settings[0].remind_quota, 3, '额度没被扣');
+  eq(db3.store.settings[0][remind.SETTINGS_DATE_STYLE], undefined, '**没有**写入 date style（不是日期的问题）');
+
+  // ===== ⑥ 两次都失败 → 返回的 error 里两次的字段值都在 =====
+  const db4 = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'd4', title: '交报告' })] });
+  const sender4 = stubSender([DATE4_REJECT, DATE4_REJECT]); // 降级之后还是被拒
+  const result4 = await runScan(db4, sender4);
+  eq(sender4.calls.length, 2, '试了两次');
+  eq(result4.failed, 1, '记失败');
+  eq(db4.store.settings[0].remind_quota, 3, '两次都失败 → 两次都退回，额度净变化 0');
+  const errText = result4.errors.join(' | ');
+  ok(errText.indexOf('两次尝试') !== -1, '错误里明确说"两次尝试都失败"');
+  ok(errText.indexOf('第 1 次') !== -1 && errText.indexOf('第 2 次') !== -1, '两次尝试都在');
+  ok(errText.indexOf('带时刻') !== -1, '第一次标注"带时刻"');
+  ok(errText.indexOf('纯日期') !== -1, '第二次标注"纯日期"');
+  // 关键：第一次的"带时刻"值不能被丢掉，否则"哪种形状不行"这个结论就查不到了
+  ok(errText.indexOf('2026年') !== -1, '第一次的实际值也在（年月日…）');
+  const recText = String(db4.store.reminders[0].error);
+  ok(recText.indexOf('两次尝试') !== -1, '失败记录里同样保留两次');
+  ok(Array.isArray(db4.store.reminders[0].attempts), '记录里有结构化的 attempts');
+  eq(db4.store.reminders[0].attempts.length, 2, 'attempts 有两条');
+  eq(db4.store.reminders[0].attempts.map((a) => a.date_style),
+    [remind.DATE_STYLE_DATETIME, remind.DATE_STYLE_DATE], 'attempts 记下每次用的形状');
+  ok(db4.store.reminders[0].attempts[0].sent_fields.find((f) => f.key === 'date4').value.indexOf(':') !== -1,
+    'attempts[0] 保留了第一次那个"带时刻"的值（这就是证据）');
+
+  // ===== ⑦ 降级只影响 date 类：thing2 / short_thing19 逐字不变 =====
+  const same = (field) => sender.calls[0].data[field].value === sender.calls[1].data[field].value;
+  eq(same('thing2'), true, 'thing2 两次逐字相同（降级没碰它）');
+  eq(same('short_thing19'), true, 'short_thing19 两次逐字相同');
+  eq(Object.keys(sender.calls[1].data).sort(), Object.keys(sender.calls[0].data).sort(), '字段集合也没变');
+
+  // ===== ⑧ 判定函数本身（它就是"该不该重试"的唯一口径）=====
+  const fm = remind.DEFAULT_FIELD_MAP;
+  eq(remind.extractOffendingField('invalid value of property: data.date4'), 'date4', '认 property: data.xxx 形状');
+  eq(remind.extractOffendingField('argument invalid! data.thing3.value invalid'), 'thing3', '也认 data.xxx.value 形状');
+  eq(remind.extractOffendingField('没有字段名的一句话'), '', '挖不到就给空串（不瞎猜）');
+  eq(remind.firstDateFieldOf(fm), 'date4', '默认映射里的 date 字段是 date4');
+  eq(remind.firstDateFieldOf({ thing1: 'title' }), '', '没有 date 字段时给空串');
+  eq(remind.decideDateDowngrade({
+    ok: false, errCode: 47003, errMsg: 'invalid value of property: data.date4', fieldMap: fm, style: 'datetime',
+  }).downgrade, true, '点名 date4 + 带时刻 → 降级');
+  eq(remind.decideDateDowngrade({
+    ok: false, errCode: 47003, errMsg: 'invalid value of property: data.thing2', fieldMap: fm, style: 'datetime',
+  }).downgrade, false, '点名 thing2 → 不降级');
+  eq(remind.decideDateDowngrade({
+    ok: false, errCode: 47003, errMsg: 'data.date4', fieldMap: fm, style: 'date',
+  }).downgrade, false, '已经是纯日期 → 无从再降，不重试');
+  eq(remind.decideDateDowngrade({
+    ok: false, errCode: 43101, errMsg: 'data.date4', fieldMap: fm, style: 'datetime',
+  }).downgrade, false, '43101 不是参数问题 → 不降级');
+  eq(remind.decideDateDowngrade({
+    ok: false, errCode: 47003, errMsg: 'invalid value of property: data.time9', fieldMap: { time9: 'due' }, style: 'datetime',
+  }).downgrade, false, '字段名对不上映射 → 不乱降级');
+
+  // ===== ⑨ status 的预览必须反映"实际会发出去的形状" =====
+  const deps = { env: { REMIND_TEMPLATE_ID: 'TPL-X' } };
+  const before = await remind.actionStatus(remindWorld({ quota: 1 }), 'me', deps);
+  eq(before.date_style, remind.DATE_STYLE_DATETIME, '还没学到 → 预览用带时刻');
+  ok(before.field_preview_text.indexOf(':') !== -1, 'field_preview_text 里能看到时刻');
+  eq(before.date_style_learned, false, '并标明这是"还没学过"的默认值');
+  const dbLearned = remindWorld({ quota: 1 });
+  dbLearned.store.settings[0][remind.SETTINGS_DATE_STYLE] = remind.DATE_STYLE_DATE;
+  const after = await remind.actionStatus(dbLearned, 'me', deps);
+  eq(after.date_style, remind.DATE_STYLE_DATE, '学到之后 → 预览改成纯日期');
+  eq(after.date_style_learned, true, '并标明是学到的');
+  ok(after.field_preview_text.indexOf('date4=') !== -1, '预览里仍有 date4');
+  const date4Preview = after.field_preview.find((f) => f.key === 'date4');
+  ok(/^\d{4}年\d{1,2}月\d{1,2}日$/.test(date4Preview.value), '预览的 date4 就是纯日期形状');
+  eq(after.field_preview_text.indexOf(':'), -1, '预览文本里没有时刻（与实际发送一致）');
 });
 
 testCaseAsync('10.17 未配模板：不扫描、不下发，并说清原因', async () => {

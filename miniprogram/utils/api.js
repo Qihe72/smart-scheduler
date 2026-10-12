@@ -105,6 +105,10 @@ var MAX_TOAST_CHARS = 30;
  *   AI_DEFAULT_MODELS       ↔ PROVIDERS[*].defaultModel（"没填模型 = 用哪个"）
  * utils/tests/ai_vision.test.js 会直接从云函数**源码文本**里把数组抽出来比对 ——
  * 只改一边就会红，不会出现"前端说支持、后端说不行"的分裂。
+ *
+ * ⚠️ 【踩过的坑】别再写"DeepSeek 没有多模态、要换服务商"这类话：DeepSeek 的
+ *    V4.1-Flash（deepseek-flash）就是原生多模态。模型名单会变，**以各家官方文档为准**，
+ *    改名单时三处一起改（aiParse / aiDecompose / 本文件），并跑 ai_vision.test.js。
  */
 var AI_PARSE_ACTION_PARSE_IMAGE = 'parse_image';
 
@@ -114,18 +118,30 @@ var VISION_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 /** base64 字符数上限（云函数 MAX_IMAGE_BASE64_CHARS，900000 ≈ 660KB 原图） */
 var MAX_IMAGE_BASE64_CHARS = 900000;
 
-/** 已知支持识图的模型（智谱的原生多模态 / 图文解析模型；DeepSeek 目前一个都没有） */
+/**
+ * 已知支持识图的模型（智谱的原生多模态 / 图文解析模型 + DeepSeek 的 V4.1-Flash）。
+ *
+ * 【事实依据】DeepSeek 官方 changelog（https://api-docs.deepseek.com/updates/）：
+ * 2026-09-10 发布的 DeepSeek-V4.1-Flash 是**原生多模态**（图像输入进主模型），
+ * API 模型名 `deepseek-flash`；`deepseek-v4-flash-vision-exp` 已下线但为了兼容仍临时路由过去。
+ * ⚠️ 这些名字来自官方文档，**我们尚未在真接口/真机上打过一次识图请求**。
+ */
 var VISION_HINT_MODELS = [
   'glm-5.3-flash', 'glm-5.3-flashx', 'glm-ocr',
   'glm-4v', 'glm-4v-plus', 'glm-4v-flash',
-  'glm-4.1v-thinking-flash', 'glm-4.5v', 'glm-4.6v'
+  'glm-4.1v-thinking-flash', 'glm-4.5v', 'glm-4.6v',
+  'deepseek-flash', 'deepseek-v4-flash-vision-exp'
 ];
 
-/** 已知**不**支持识图的模型（纯文本）：判成这一类就一个请求都不发，直接劝用户换模型 */
+/**
+ * 已知**不**支持识图的模型（纯文本）：判成这一类就一个请求都不发，直接劝用户换模型。
+ * deepseek-chat / deepseek-reasoner 另有一层含义：它们自 2026-07-24 起**停止服务**，
+ * 所以文案要说"这个名字已经停服了，改成 deepseek-flash"，而不是笼统说"不支持识图"。
+ */
 var VISION_TEXT_ONLY_MODELS = ['glm-4.7-flash', 'deepseek-chat', 'deepseek-reasoner'];
 
 /** 各服务商的默认模型（用户没填模型时云函数用哪个） */
-var AI_DEFAULT_MODELS = { zhipu: 'glm-4.7-flash', deepseek: 'deepseek-chat' };
+var AI_DEFAULT_MODELS = { zhipu: 'glm-4.7-flash', deepseek: 'deepseek-flash' };
 
 // ---------------------------------------------------------------------------
 // 小工具

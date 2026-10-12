@@ -14,7 +14,8 @@
  *
  * 【服务商】不写死任何一家，由环境变量决定（详见文件里的 PROVIDERS 表）：
  *         * ZHIPU_API_KEY    → 智谱开放平台，默认模型 glm-4.7-flash（推荐，目前免费）
- *         * DEEPSEEK_API_KEY → DeepSeek，默认模型 deepseek-chat（备选）
+ *         * DEEPSEEK_API_KEY → DeepSeek，默认模型 deepseek-flash（V4.1-Flash；
+ *                              deepseek-chat / deepseek-reasoner 自 2026-07-24 起已停止服务）
  *         * LLM_PROVIDER     → 显式指定服务商（zhipu / deepseek）
  *         * LLM_MODEL        → 覆盖模型名，试新模型不用改代码
  *         没显式指定时「谁配了 Key 用谁」，两家都没配才报 AI 服务暂不可用。
@@ -130,15 +131,18 @@ const PROVIDERS = {
     name: 'deepseek',
     label: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com/v1',
-    defaultModel: 'deepseek-chat',
+    // 与 aiParse 保持一致：V4.1-Flash（deepseek-flash）是原生多模态，也是新的默认模型。
+    // 依据：DeepSeek 官方 changelog（2026-09-10 发布 V4.1-Flash；2026-07-24 起
+    // deepseek-chat / deepseek-reasoner 停止服务）。
+    defaultModel: 'deepseek-flash',
     apiKeyEnv: 'DEEPSEEK_API_KEY',
     // DeepSeek 走标准 HTTP 语义，没有业务码，由 HTTP 状态兜底
     quotaCodes: [],
     authCodes: [],
     modelMissingCodes: [],
     paramCodes: [],
-    // 同 zhipu：占位以保持两边 PROVIDERS 一致；DeepSeek 目前没有多模态模型
-    visionModels: [],
+    // 同 zhipu：占位以保持两边 PROVIDERS 一致（aiDecompose 自己不识图）
+    visionModels: ['deepseek-flash', 'deepseek-v4-flash-vision-exp'],
     textOnlyModels: ['deepseek-chat', 'deepseek-reasoner'],
   },
 };
