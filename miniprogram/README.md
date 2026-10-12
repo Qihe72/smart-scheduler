@@ -33,9 +33,9 @@
 ### 第 1 步：注册小程序，拿到 AppID
 
 1. 到 <https://mp.weixin.qq.com> 注册**小程序**账号（个人主体即可，免费）。
-2. 后台左侧「开发管理 → 开发设置」里找到 **AppID**，形如 `wx1234567890abcdef`。
+2. 后台左侧「开发管理 → 开发设置」里找到 **AppID**（以 `wx` 开头的一串字符）。
 3. 把 AppID 填进两个地方：
-   - `project.config.json` 的 `"appid"`（现在还是占位符 `YOUR-APPID`）
+   - `project.config.json` 的 `"appid"`（仓库里是占位符 `YOUR-APPID`，填上你自己的即可）
    - 用微信开发者工具打开本项目时，工具也会问一次
 
 ### 第 2 步：开通云开发，拿到环境 ID
