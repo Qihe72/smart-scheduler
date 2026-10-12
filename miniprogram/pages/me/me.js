@@ -1517,7 +1517,12 @@ Page({
       this.saveCalibratedPeriods(true);
     }).catch((err) => {
       this.setData({ submitting: false });
-      wx.showToast({ title: `替换失败：${describeError(err)}`, icon: 'none' });
+      // 【为什么不用 describeError】"未知 action"意味着**云环境里部署的那份云函数版本过旧**，
+      // 是部署状态问题、不是数据问题；用户唯一能做的动作是重新部署。
+      // 所以这里把它翻译成"你该做什么"，并保留服务端原话在句尾（不吞线索）。
+      const friendly = explainCloudError('import_replace', describeError(err));
+      this.setData({ importResultText: `替换失败：${friendly}` });
+      toastText(`替换失败：${friendly}`);
     });
   },
 
@@ -1554,7 +1559,11 @@ Page({
       this.saveCalibratedPeriods(true);
     }).catch((err) => {
       this.setData({ submitting: false });
-      wx.showToast({ title: `入库失败：${describeError(err)}`, icon: 'none' });
+      // 与替换路径同款：把"未知 action"翻译成"云函数版本过旧，请重新部署"。
+      // 追加导入用的 bulk_add 虽然老版本也有，但同样可能因为部署错环境而报未知 action。
+      const friendly = explainCloudError('bulk_add', describeError(err));
+      this.setData({ importResultText: `入库失败：${friendly}` });
+      toastText(`入库失败：${friendly}`);
     });
   },
 
@@ -1659,6 +1668,11 @@ Page({
     REMIND_DOC: REMIND_DOC,
     REMIND_NO_TEMPLATE_TIP: REMIND_NO_TEMPLATE_TIP,
     FALLBACK_LEAD_OPTIONS: FALLBACK_LEAD_OPTIONS,
+    // 导入课表 · 云函数报错翻译
+    explainCloudError: explainCloudError,
+    isCourseTask: isCourseTask,
+    splitCoursesAndManual: splitCoursesAndManual,
+    mergePeriodTimes: mergePeriodTimes,
   },
 });
 
@@ -1867,6 +1881,53 @@ function describeError(err) {
 }
 
 /**
+ * 云函数名（提示里要指名道姓说"该重新部署哪一个"）。
+ * 优先用 utils/api.js 导出的事实来源，取不到才退回字面量 —— 免得哪天改了名字这里对不上。
+ */
+const CLOUD_FUNCTION_NAME = (api && api.CLOUD_FUNCTION_NAME) || 'tasks';
+
+/**
+ * 把云函数的报错翻译成"用户该做什么"。
+ *
+ * ===========================================================================
+ * 【为什么需要它】真机事故：用户点「替换导入」失败，界面上弹的是云函数原话
+ * ===========================================================================
+ *   「替换失败：未知 action：import_replace；支持 list / add / bulk_add / ...」
+ *   代码没问题 —— 是他云环境里部署的 tasks **还是旧版本**（不认识 import_replace）。
+ *   但这句原话对用户毫无帮助：他既不知道"未知 action"是什么意思，
+ *   更不知道唯一能做的动作是**重新部署云函数**。
+ *
+ *   「未知 action」是**部署状态**问题，不是数据问题：代码里已经写好了这个 action，
+ *   只是云端跑的那份还没有。所以提示必须直接告诉他"云函数版本过旧、请重新部署"，
+ *   而不是把服务端的术语原样丢给他。
+ *
+ * 【不吞信息】原始报错**保留在句尾**（「服务端原话：…」）。藏起来的话，
+ *   以后真出别的问题时就没法排查了 —— 这类"翻译"最容易犯的错就是把线索丢掉。
+ *
+ * @param {string} action 这次调用的 action（如 'import_replace'）；空/非字符串也能处理
+ * @param {string} errorText 服务端/网络层给的原始错误文案
+ * @returns {string} 给用户看的一句话
+ */
+function explainCloudError(action, errorText) {
+  const raw = str(errorText);
+  const name = str(action) || '（未知）';
+
+  // 服务端说"不认识这个 action" → 云端那份代码比小程序旧
+  if (raw.indexOf('未知 action') !== -1) {
+    const who = name === '（未知）'
+      ? `云函数 \`${CLOUD_FUNCTION_NAME}\``
+      : `云函数 \`${CLOUD_FUNCTION_NAME}\` 不认识 \`${name}\``;
+    return `${who}：你云环境里部署的版本过旧。`
+      + `请在微信开发者工具里右键 \`cloudfunctions/${CLOUD_FUNCTION_NAME}\` → `
+      + `「上传并部署：云端安装依赖」，然后再点一次。`
+      + `（服务端原话：${raw}）`;
+  }
+
+  // 其它情况一律原样返回，不做任何猜测 —— 网络抖动不能被误判成部署问题
+  return raw || '操作失败，请稍后重试';
+}
+
+/**
  * 弹一句短提示。toast 太长会被截断成省略号（还占不满一行就很难看），
  * 所以**完整句子一律写在卡片的结果行上**，toast 只给一句短的。
  */
@@ -1910,5 +1971,10 @@ module.exports = {
     REMIND_DOC: REMIND_DOC,
     REMIND_NO_TEMPLATE_TIP: REMIND_NO_TEMPLATE_TIP,
     FALLBACK_LEAD_OPTIONS: FALLBACK_LEAD_OPTIONS,
+    // 导入课表 · 云函数报错翻译（utils/tests/me_import.test.js 用）
+    explainCloudError: explainCloudError,
+    isCourseTask: isCourseTask,
+    splitCoursesAndManual: splitCoursesAndManual,
+    mergePeriodTimes: mergePeriodTimes,
   },
 };

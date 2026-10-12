@@ -562,6 +562,114 @@ function run() {
           });
         });
       }).then(function () {
+        // =====================================================================
+        // 云函数报错翻译：真机事故 —— 用户看到的是云函数原话「未知 action：import_replace」，
+        // 完全不知道该怎么办。根因是**他云环境里部署的 tasks 还是旧版本**，
+        // 唯一能做的动作是重新部署，所以提示必须直接说这件事。
+        // =====================================================================
+        block('云函数报错翻译 —— explainCloudError');
+
+        var T = registered.__test;
+        isTrue(!!T && typeof T.explainCloudError === 'function',
+          '__test 里暴露了 explainCloudError');
+
+        // ① 真机上那句原话
+        var rawReplace = '未知 action：import_replace；支持 list / add / bulk_add / update / remove / '
+          + 'stats / settings_get / settings_save / ai_config_get / ai_config_save / ai_config_clear';
+        var msgReplace = T.explainCloudError('import_replace', rawReplace);
+        isTrue(msgReplace.indexOf('版本过旧') !== -1,
+          '提示里点明"版本过旧"：' + show(msgReplace.slice(0, 60)) + '…');
+        isTrue(msgReplace.indexOf('上传并部署') !== -1, '并给出**具体该做什么**：上传并部署');
+        isTrue(msgReplace.indexOf('tasks') !== -1, '指名道姓说是哪个云函数（tasks）');
+        isTrue(msgReplace.indexOf('import_replace') !== -1,
+          '并说出它不认识哪个 action（import_replace）');
+        isTrue(msgReplace.indexOf('cloudfunctions/tasks') !== -1,
+          '给了右键的路径（cloudfunctions/tasks）');
+        isTrue(msgReplace.indexOf('未知 action：import_replace') !== -1,
+          '**保留服务端原话在句尾**（不许藏起来，否则以后没法排查）');
+        isTrue(msgReplace.indexOf('（服务端原话：') !== -1, '原话有明确标注');
+
+        // ② action 名没有被写死：换成 bulk_add 时提示里出现的是 bulk_add
+        var msgBulk = T.explainCloudError('bulk_add', '未知 action：bulk_add；支持 list / add / ...');
+        isTrue(msgBulk.indexOf('bulk_add') !== -1, '**action 名从参数来**：出现 bulk_add');
+        isTrue(msgBulk.indexOf('import_replace') === -1,
+          '没有把 import_replace 写死在提示里');
+        isTrue(msgBulk.indexOf('版本过旧') !== -1, '同样是"版本过旧"那句');
+
+        // ③ 边界：出现「未知 action」但 action 为空 / 非字符串 → 也给通用那句
+        var msgNoAction = T.explainCloudError('', '未知 action：（空）');
+        isTrue(msgNoAction.indexOf('版本过旧') !== -1, 'action 为空时仍给出"版本过旧"');
+        isTrue(msgNoAction.indexOf('tasks') !== -1, '并指明云函数是 tasks');
+        var msgBadAction = T.explainCloudError(null, '未知 action：foo');
+        isTrue(msgBadAction.indexOf('版本过旧') !== -1, 'action 为 null 也不抛异常，照样给那句');
+        var msgUndefAction = T.explainCloudError(undefined, '未知 action：foo');
+        isTrue(msgUndefAction.indexOf('版本过旧') !== -1, 'action 为 undefined 同样');
+        isTrue(msgUndefAction.indexOf('未知 action：foo') !== -1, '原话依旧保留');
+
+        // ④ 普通错误**原样**返回，绝不误判成部署问题（防网络抖动被当成版本问题）
+        var plain = ['设置服务异常', '网络异常，请稍后重试', 'Key 格式不正确', '任务不存在或无权修改'];
+        var allPlain = plain.every(function (t) {
+          var out = T.explainCloudError('import_replace', t);
+          return out === t && out.indexOf('版本过旧') === -1 && out.indexOf('部署') === -1;
+        });
+        isTrue(allPlain, '**普通错误一律原样返回**，不出现"版本过旧/部署"字样'
+          + '（防止把网络抖动误判成部署问题）');
+
+        // ⑤ errorText 为空 / 非字符串 → 不抛异常，给一句兜底人话
+        var threwOnEmpty = false;
+        var emptyOut = '';
+        try { emptyOut = T.explainCloudError('import_replace', ''); } catch (e) { threwOnEmpty = true; }
+        isFalse(threwOnEmpty, 'errorText 为空时不抛异常');
+        isTrue(emptyOut.length > 0, '并给出一句兜底文案：' + show(emptyOut));
+        isTrue(emptyOut.indexOf('版本过旧') === -1, '空错误不该被说成版本问题');
+
+        var threwOnObj = false;
+        var objOut = '';
+        try { objOut = T.explainCloudError('x', { foo: 1 }); } catch (e) { threwOnObj = true; }
+        isFalse(threwOnObj, 'errorText 传对象也不抛异常');
+        isTrue(objOut.length > 0, '同样给兜底文案');
+        var threwOnNull = false;
+        try { T.explainCloudError('x', null); } catch (e) { threwOnNull = true; }
+        isFalse(threwOnNull, 'errorText 传 null 也不抛异常');
+
+        // ⑥ 接进失败路径：doReplace / doAppend 的 catch 用的是翻译后的文案
+        block('云函数报错翻译 —— 已接进替换 / 追加的失败路径');
+        serve({ tasks: [], replaceFail: rawReplace });
+        var pErr = newPage();
+        pErr.onLoad();
+        return settle().then(function () {
+          pErr.pendingTasks = pendingOf(2);
+          pErr.setData({ importMode: 'replace' });
+          toasts.length = 0;
+          pErr.onConfirmImport();
+          return settle().then(function () {
+            var toastJoined = toasts.join('|');
+            isTrue(/版本过旧/.test(pErr.data.importResultText) || /版本过旧/.test(toastJoined),
+              '**替换失败时界面上出现的是"版本过旧"那句**（不再是云函数原话）');
+            isTrue(/上传并部署/.test(toastJoined) || /上传并部署/.test(pErr.data.importResultText),
+              '并告诉用户去"上传并部署"');
+            isTrue(/已替换|替换失败/.test(pErr.data.importResultText),
+              '结果行仍标明这是"替换失败"：' + show(pErr.data.importResultText.slice(0, 40)) + '…');
+
+            // 追加路径同款
+            serve({ tasks: [], bulkFail: '未知 action：bulk_add；支持 list / add / ...' });
+            var pErr2 = newPage();
+            pErr2.onLoad();
+            return settle().then(function () {
+              pErr2.pendingTasks = pendingOf(2);
+              pErr2.setData({ importMode: 'append' });
+              toasts.length = 0;
+              pErr2.onConfirmImport();
+              return settle().then(function () {
+                var joined2 = toasts.join('|') + '|' + pErr2.data.importResultText;
+                isTrue(/版本过旧/.test(joined2), '**追加失败时同样是"版本过旧"那句**');
+                isTrue(/bulk_add/.test(joined2), '并点出是 bulk_add 不认识');
+                return null;
+              });
+            });
+          });
+        });
+      }).then(function () {
         // 如实报告：替换断言跑在真实封装上还是桩上
         block('本轮 import_replace 的状态');
         isTrue(typeof api.importReplace === 'function', 'api.importReplace 现在可用');
