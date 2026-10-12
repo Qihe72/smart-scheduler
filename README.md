@@ -493,7 +493,13 @@ service worker **刻意不缓存 `/app`**：应用数据在服务器上且是多
 
 这是这一版里最该看的一处。两边各自的测试全绿**并不能**证明两边一致——只有把**同一份输入同时喂给 Python 和 JS、逐字段比对**才算证据。做法是：用项目自己的 `exporter.py` 生成一份 `.ics`（5 个 VEVENT，含每周课、单双周课、DDL、带分号的标题、没定时间的子任务），同一份文本喂给 Python 的 `importer.parse_ics()` 和 JS 的 `utils/ics.js`，按标题配对后逐条比对 `title / type / date / start_time / end_time / repeat / week_start / week_end / week_parity / periods / location` 这 11 个字段 → **13 项全过、exit 0**。同时登记了 6 处**有意的等价差异**：Python 对「不重复 / 不分单双周」的条目留空字符串，JS 直接填模型里的规范默认值（`none` / `all`），两者归一化后完全等价——这些差异照实打印出来，不隐藏。
 
-这次的差分脚本在开发工作目录里跑、**没有随仓库提交**；随仓库提交的是把 Python 的实际输出抄成期望值的 `miniprogram/utils/tests/ics.test.js`（文件头写明了每条断言依据的 Python 行号），所以能在仓库里复跑的是后者。
+**这个对比是随仓库提交的、你可以自己复跑**：`tools/verify_ics_cross.py` + `tools/ics_probe.js`（约 10 KB，零依赖、不联网、不需要云环境）。在仓库根目录执行
+
+```bash
+python tools/verify_ics_cross.py
+```
+
+它会用项目自己的 `exporter.py` 现生成一份 `.ics`、同时喂给两边、逐字段比对并打印结果（退出码 0 = 全一致）。另外 `miniprogram/utils/tests/ics.test.js` 把 Python 的实际输出抄成了期望值（文件头写明每条依据的 Python 行号），装了 node 就能单独跑 —— **两边都能复跑，不必信我这句结论。**
 
 **测试规模**（装了 node 就能跑，零依赖、不联网）：
 
@@ -555,6 +561,7 @@ service worker **刻意不缓存 `/app`**：应用数据在服务器上且是多
 ├── healthcheck.py       容器健康检查探针（40 行）
 ├── docker-compose.yml   一条命令起容器 + 数据卷
 ├── .streamlit/config.toml  主题配色 + 服务器设置
+├── tools/               跨语言一致性验证（Python 与 JS 逐字段比对，可复跑）
 ├── tests/               可复跑的验证（unittest，零新依赖）
 │   ├── _support.py      数据安全脚手架（真实数据只读隔离）
 │   ├── test_planner.py  缺口分析
