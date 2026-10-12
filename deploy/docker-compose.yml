@@ -1,0 +1,151 @@
+# ===========================================================================
+# docker-compose.yml —— 智能日程管家（多用户版）云服务器部署
+#
+#   ！！ 最重要的一句话 ！！
+#   你的日程数据在**具名卷 scheduler-data** 里（容器内路径 /app/data/app.db）。
+#   只要执行了 `docker compose down -v`（-v = 删卷），或者手动 `docker volume rm`，
+#   数据就**永久消失**，没有回收站。重建容器 / 重新 build 镜像都不会动它，
+#   但删卷会。要删之前先跑一次 deploy/backup.sh。
+#
+# ---------------------------------------------------------------------------
+# 目录结构（deploy/ 就放在项目根目录里）：
+#
+#   smart-scheduler/            <- 项目根（也是 build 的 context）
+#   ├── Dockerfile
+#   ├── main.py  storage.py  ...
+#   └── deploy/                 <- 本文件所在目录
+#       ├── docker-compose.yml
+#       ├── Caddyfile  index.html  manifest.webmanifest  sw.js
+#       ├── icons/icon-192.png  icons/icon-512.png
+#       ├── .env                <- 你自己建，.env.example 改名而来（不进 git）
+#       └── backup.sh
+#
+# 用法（在项目根目录执行；-f 指定文件后，相对路径都相对 deploy/ 解析）：
+#   docker compose -f deploy/docker-compose.yml up -d --build   # 起服务
+#   docker compose -f deploy/docker-compose.yml ps              # 看状态
+#   docker compose -f deploy/docker-compose.yml logs -f caddy   # 看证书申请
+#   docker compose -f deploy/docker-compose.yml restart caddy   # 改完 Caddyfile 重启
+#   docker compose -f deploy/docker-compose.yml down            # 停止（卷保留，数据还在）
+#
+#   嫌命令长就在 deploy/ 里执行（推荐，之后所有命令都能省掉 -f）：
+#     cd deploy && docker compose up -d --build
+#   Compose 会以 compose 文件所在目录为基准，两种写法等价。
+# ===========================================================================
+
+services:
+
+  # -------------------------------------------------------------------------
+  # app：Streamlit 应用本体。不对外暴露端口 —— 只有 Caddy 能连它。
+  # -------------------------------------------------------------------------
+  app:
+    # context 是项目根目录：Dockerfile 在根目录，且它要 COPY 根目录下的 .py 文件。
+    # dockerfile 相对 context 解析，所以写 "Dockerfile"。
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: smart-scheduler:multiuser
+    container_name: ss-app
+
+    environment:
+      # 时区：容器默认 UTC，比北京时间晚 8 小时。本项目大量按「今天/本周/当前节次」
+      # 判断状态，时区错了会整天错位（Dockerfile 里已装 tzdata）。
+      TZ: Asia/Shanghai
+      # 打开多用户模式：没有 ?u=<空间码> 的访客会被自动分配一个新空间码并写进 URL。
+      # 不设这个变量 = 单机自用模式（所有人共用 local 空间）。
+      SS_MULTIUSER: "1"
+      # DeepSeek Key：从 deploy/.env 读；没写就是空字符串，AI 解析功能会自己提示
+      # 「未配置 Key」，其余功能（手动录入、课表导入、周视图）照常可用。
+      # 写成 ${VAR:-} 的好处：没有 .env 时也不会报 "variable is not set" 的警告。
+      # 智谱（默认，有免费档）与 DeepSeek 填哪个用哪个，都不填就只用手动录入
+      ZHIPU_API_KEY: ${ZHIPU_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+
+    # 覆盖 Dockerfile 的 CMD：这里显式指定多用户部署需要的几个参数。
+    #   --server.address=0.0.0.0     容器内必须监听所有网卡，否则 Caddy 连不上
+    #   --server.headless=true       容器里没有浏览器，禁止 Streamlit 尝试打开
+    #   --server.baseUrlPath=app     应用挂在子路径 /app 下（外面靠 Caddy 反代）
+    #                                ！！这个值必须和 Caddyfile 的 /app* 一致！！
+    #   --browser.gatherUsageStats=false  关掉统计上报（国内网络下这个请求常超时）
+    # 注意：--server.baseUrlPath=app 之后，健康检查路径也变成 /app/_stcore/health。
+    command: >
+      streamlit run main.py
+      --server.address=0.0.0.0
+      --server.port=8501
+      --server.headless=true
+      --server.baseUrlPath=app
+      --browser.gatherUsageStats=false
+
+    volumes:
+      # ==== 数据卷：整份日程数据（SQLite 单文件 app.db）都在这里 ====
+      # 冒号左侧必须是**具名卷**（见文件末尾 volumes: 段），不要改成 bind mount 到
+      # 宿主机某个目录 —— 具名卷在 `docker compose down`（不带 -v）时不会被删。
+      - scheduler-data:/app/data
+
+    # 健康检查：打 Streamlit 自带的健康端点，并断言响应体正好是 ok。
+    # start_period 给 60 秒：第一次启动要解压依赖、预热，慢一点很正常；
+    # 这段时间内的失败不计入 retries，不会误判成 unhealthy。
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; assert urllib.request.urlopen('http://localhost:8501/app/_stcore/health', timeout=4).read().strip() == b'ok'"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # caddy：HTTPS 入口 + 静态启动页（带 manifest，手机才能「添加到主屏幕」）
+  # -------------------------------------------------------------------------
+  caddy:
+    image: caddy:2
+    container_name: ss-caddy
+
+    ports:
+      # 80 必须对外：Let's Encrypt 用它做 ACME 校验 + 自动跳转 https
+      # 443 对外：真正的服务端口
+      - "80:80"
+      - "443:443"
+      # 443/udp 是 HTTP/3；手机网络下能更快，但国内部分机房会拦 UDP，
+      # 拦了也不影响使用（浏览器会自动退回 HTTP/2），所以注释掉、按需打开：
+      # - "443:443/udp"
+
+    volumes:
+      # ---- 配置与静态文件（只读挂载：容器不需要写这些文件）----
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./index.html:/srv/index.html:ro
+      - ./manifest.webmanifest:/srv/manifest.webmanifest:ro
+      - ./sw.js:/srv/sw.js:ro
+      - ./icons:/srv/icons:ro
+      - ./.well-known:/srv/.well-known:ro
+      # ---- 证书与配置持久化 ----
+      # caddy-data 里存着 Let's Encrypt 签发的证书和私钥。
+      # 删了这个卷 = 证书要重新申请，而 Let's Encrypt 有「每周每域名 50 张」的
+      # 签发上限，反复删卷重建可能把自己卡住一段时间。别删。
+      - caddy-data:/data
+      - caddy-config:/config
+
+    # 等 app 起来再启动 Caddy：否则 Caddy 一启动就因为连不上上游而在日志里刷错误，
+    # 虽然它会自动重试、不影响最终结果，但日志会很难看。
+    # （用 service_started 而不是 service_healthy：证书申请没必要等应用健康。）
+    depends_on:
+      app:
+        condition: service_started
+
+    restart: unless-stopped
+
+# ===========================================================================
+# 具名卷：三个卷都由 Docker 管理，名字会带项目前缀（默认是 deploy_）。
+#   docker volume ls | grep deploy        # 看看它们
+#   docker volume inspect deploy_scheduler-data   # 看真实落盘位置
+# 备份请用 deploy/backup.sh（在线一致性快照），**不要**直接 cp 卷目录里的文件 ——
+# SQLite 开了 WAL，直接拷可能拷到一半的事务状态。
+# ===========================================================================
+volumes:
+  # 日程数据（app.db）。删它 = 所有人的日程和你自己的日程一起没了。
+  scheduler-data:
+  # Caddy 的证书、私钥、ACME 账号（删了要重新申请证书）
+  caddy-data:
+  # Caddy 的运行配置缓存
+  caddy-config:

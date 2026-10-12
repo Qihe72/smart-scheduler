@@ -1,0 +1,265 @@
+<!--
+  pages/edit/edit.wxml —— 添加 / 编辑任务表单。
+
+  【核心规矩】「未填」就是未填。
+    时间行的显示逻辑：form.start_time 有值 → 显示时间 + 「清除」；
+                      没有值       → 显示「未填」+「选择」。
+    picker 自己的 value 走 startPicker/endPicker，它只是控件的显示位置，
+    用户不动它就不会写进表单（详见 edit.js 文件头注释）。
+
+  【字段来源】都用到的字段都在 edit.js 的 data 里初始化过：
+    form{type,title,date,start_time,end_time,periods,location,priority,
+         estimate_min,repeat,week_start,week_end,week_parity,parent_id}
+    types / priorities / repeats / parities / weekOptions / durationOptions /
+    parentOptions / datePicker / startPicker / endPicker /
+    typeIndex / priorityIndex / repeatIndex / parityIndex / weekStartIndex /
+    weekEndIndex / durationIndex / parentIndex /
+    isDdl / isSubtask / isWeekly / customDuration / customDurationText /
+    taskId / isEdit / loading / saving / errorText / parentText /
+    weekRangeText / estimateText / submitText
+-->
+
+<view class="page">
+
+  <!-- 一、编辑模式下的读取失败 -->
+  <view class="state-box" wx:if="{{loading}}">
+    <text class="state-text">正在读取这条任务…</text>
+  </view>
+  <view class="state-box" wx:elif="{{errorText}}">
+    <text class="state-text">{{errorText}}</text>
+  </view>
+
+  <block wx:else>
+
+    <!-- 二、类型 -->
+    <view class="card">
+      <view class="field">
+        <text class="label">类型</text>
+        <picker
+          class="control"
+          mode="selector"
+          range="{{types}}"
+          range-key="label"
+          value="{{typeIndex}}"
+          bindchange="onTypeChange"
+        >
+          <view class="picker-view">{{types[typeIndex].label}}</view>
+        </picker>
+      </view>
+
+      <!-- 子任务：选一个父任务 -->
+      <view class="field" wx:if="{{isSubtask}}">
+        <text class="label">所属父任务</text>
+        <picker
+          class="control"
+          mode="selector"
+          range="{{parentOptions}}"
+          range-key="label"
+          value="{{parentIndex}}"
+          bindchange="onParentChange"
+        >
+          <view class="picker-view">{{parentText}}</view>
+        </picker>
+      </view>
+    </view>
+
+    <!-- 三、标题 -->
+    <view class="card">
+      <view class="field field-col">
+        <text class="label">标题</text>
+        <input
+          class="input"
+          type="text"
+          placeholder="例如：周三下午组会 / 周五前交实验报告"
+          value="{{form.title}}"
+          bindinput="onTitleInput"
+        />
+      </view>
+    </view>
+
+    <!-- 四、日期与时间 -->
+    <view class="card">
+      <view class="field">
+        <text class="label">日期</text>
+        <view class="control row-right">
+          <text class="value {{form.date ? '' : 'value-empty'}}">{{form.date || '未填（保存时按今天算）'}}</text>
+          <text class="mini-btn" wx:if="{{form.date}}" catchtap="onClearDate">清除</text>
+          <picker mode="date" value="{{datePicker}}" bindchange="onDateChange">
+            <view class="mini-btn mini-btn-main">选择</view>
+          </picker>
+        </view>
+      </view>
+
+      <!-- 日程 / 子任务：开始时间（可清空） -->
+      <view class="field" wx:if="{{!isDdl}}">
+        <text class="label">开始时间</text>
+        <view class="control row-right">
+          <text class="value {{form.start_time ? '' : 'value-empty'}}">{{form.start_time || '未填'}}</text>
+          <text class="mini-btn" wx:if="{{form.start_time}}" catchtap="onClearStart">清除</text>
+          <picker mode="time" value="{{startPicker}}" bindchange="onStartTimeChange">
+            <view class="mini-btn mini-btn-main">{{form.start_time ? '改' : '选择'}}</view>
+          </picker>
+        </view>
+      </view>
+
+      <!-- 截止：只有一个时刻，所以这一行的标题也跟着变 -->
+      <view class="field">
+        <text class="label">{{isDdl ? '截止时间' : '结束时间'}}</text>
+        <view class="control row-right">
+          <text class="value {{form.end_time ? '' : 'value-empty'}}">{{form.end_time || '未填'}}</text>
+          <text class="mini-btn" wx:if="{{form.end_time}}" catchtap="onClearEnd">清除</text>
+          <picker mode="time" value="{{endPicker}}" bindchange="onEndTimeChange">
+            <view class="mini-btn mini-btn-main">{{form.end_time ? '改' : '选择'}}</view>
+          </picker>
+        </view>
+      </view>
+      <view class="hint-line" wx:if="{{isDdl}}">截止只记录一个时刻，所以不显示开始时间。</view>
+
+      <!-- 节次：文本，例如 7-9 -->
+      <view class="field field-col">
+        <text class="label">节次</text>
+        <input
+          class="input"
+          type="text"
+          placeholder="例如 7-9（留空则按起止时间自动归到某一行）"
+          value="{{form.periods}}"
+          bindinput="onPeriodsInput"
+        />
+      </view>
+    </view>
+
+    <!-- 五、优先级 / 预计耗时 / 地点 -->
+    <view class="card">
+      <view class="field">
+        <text class="label">优先级</text>
+        <picker
+          class="control"
+          mode="selector"
+          range="{{priorities}}"
+          range-key="label"
+          value="{{priorityIndex}}"
+          bindchange="onPriorityChange"
+        >
+          <view class="picker-view">{{priorities[priorityIndex].label}}</view>
+        </picker>
+      </view>
+
+      <view class="field">
+        <text class="label">预计耗时</text>
+        <view class="control row-right">
+          <text class="value">{{estimateText}}</text>
+          <picker
+            wx:if="{{!customDuration}}"
+            mode="selector"
+            range="{{durationOptions}}"
+            range-key="label"
+            value="{{durationIndex}}"
+            bindchange="onDurationChange"
+          >
+            <view class="mini-btn mini-btn-main">选择</view>
+          </picker>
+          <input
+            wx:else
+            class="input input-mini"
+            type="number"
+            placeholder="分钟"
+            value="{{customDurationText}}"
+            bindinput="onDurationInput"
+          />
+          <text class="mini-btn" bindtap="onToggleCustomDuration">{{customDuration ? '用预设' : '自己填'}}</text>
+        </view>
+      </view>
+
+      <view class="field field-col">
+        <text class="label">地点</text>
+        <input
+          class="input"
+          type="text"
+          placeholder="例如：三教 305"
+          value="{{form.location}}"
+          bindinput="onLocationInput"
+        />
+      </view>
+    </view>
+
+    <!-- 六、重复 -->
+    <view class="card">
+      <view class="field">
+        <text class="label">重复</text>
+        <picker
+          class="control"
+          mode="selector"
+          range="{{repeats}}"
+          range-key="label"
+          value="{{repeatIndex}}"
+          bindchange="onRepeatChange"
+        >
+          <view class="picker-view">{{repeats[repeatIndex].label}}</view>
+        </picker>
+      </view>
+
+      <block wx:if="{{isWeekly}}">
+        <view class="field">
+          <text class="label">起始周</text>
+          <picker
+            class="control"
+            mode="selector"
+            range="{{weekOptions}}"
+            value="{{weekStartIndex}}"
+            bindchange="onWeekStartChange"
+          >
+            <view class="picker-view">第 {{form.week_start}} 周</view>
+          </picker>
+        </view>
+
+        <view class="field">
+          <text class="label">结束周</text>
+          <picker
+            class="control"
+            mode="selector"
+            range="{{weekOptions}}"
+            value="{{weekEndIndex}}"
+            bindchange="onWeekEndChange"
+          >
+            <view class="picker-view">第 {{form.week_end}} 周</view>
+          </picker>
+        </view>
+
+        <view class="field">
+          <text class="label">单双周</text>
+          <picker
+            class="control"
+            mode="selector"
+            range="{{parities}}"
+            range-key="label"
+            value="{{parityIndex}}"
+            bindchange="onParityChange"
+          >
+            <view class="picker-view">{{parities[parityIndex].label}}</view>
+          </picker>
+        </view>
+
+        <view class="hint-line">这门课会上 {{weekRangeText}}；周视图按这个范围显示。</view>
+      </block>
+    </view>
+
+    <!-- 七、底部按钮 -->
+    <view class="actions">
+      <view
+        class="submit-btn {{saving ? 'submit-btn-disabled' : ''}}"
+        hover-class="submit-btn-hover"
+        bindtap="onSave"
+      >{{saving ? '保存中…' : submitText}}</view>
+      <view
+        class="delete-btn"
+        wx:if="{{isEdit}}"
+        hover-class="delete-btn-hover"
+        bindtap="onRemove"
+      >删除</view>
+    </view>
+
+    <view class="tip-line">删除会一并删除其子任务，操作前会再确认一次。</view>
+
+  </block>
+
+</view>

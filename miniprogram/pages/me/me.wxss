@@ -1,0 +1,459 @@
+/* pages/me/me.wxss —— 「我的」页样式（无第三方 UI 库，全部手写；卡片风格与 week/tasks 页一致） */
+
+page {
+  background: #f2f4f8;
+  font-size: 26rpx;
+  color: #1f2430;
+}
+
+.page {
+  min-height: 100vh;
+  padding: 20rpx 20rpx 60rpx;
+  box-sizing: border-box;
+}
+
+/* 加载 / 失败 */
+.state-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 120rpx 32rpx;
+}
+
+.state-text {
+  font-size: 26rpx;
+  color: #8a90a2;
+  text-align: center;
+}
+
+.state-text + .state-text {
+  margin-top: 10rpx;
+}
+
+/* --------------------------------------------------------------------------
+   卡片
+   -------------------------------------------------------------------------- */
+.card {
+  padding: 24rpx 22rpx;
+  margin-bottom: 20rpx;
+  background: #ffffff;
+  border-radius: 14rpx;
+  box-shadow: 0 2rpx 8rpx rgba(31, 36, 48, 0.04);
+}
+
+.card-title {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #1f2430;
+}
+
+.card-sub {
+  margin-top: 8rpx;
+  font-size: 23rpx;
+  color: #8a90a2;
+  line-height: 1.55;
+}
+
+.sub-title {
+  margin: 20rpx 0 10rpx;
+  font-size: 26rpx;
+  font-weight: 600;
+  color: #4a5163;
+}
+
+/* 普通信息行 */
+.row {
+  display: flex;
+  align-items: center;
+  min-height: 72rpx;
+  margin-top: 8rpx;
+  border-bottom: 1rpx solid #f0f2f7;
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.row-label {
+  flex: none;
+  width: 150rpx;
+  font-size: 25rpx;
+  color: #6b7288;
+}
+
+.row-right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.row-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 26rpx;
+  color: #1f2430;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.row-value-plain {
+  flex: 1;
+  min-width: 0;
+  font-size: 24rpx;
+  color: #1f2430;
+  line-height: 1.5;
+}
+
+/* 说明小字 */
+.note {
+  margin-top: 14rpx;
+  font-size: 22rpx;
+  color: #8a90a2;
+  line-height: 1.6;
+}
+
+.note-warn {
+  color: #8a5a00;
+  background: #fff7e6;
+  border: 1rpx solid #ffe0a3;
+  border-radius: 10rpx;
+  padding: 14rpx 16rpx;
+}
+
+/* 小按钮（选择 / 复制） */
+.mini-btn {
+  flex: none;
+  margin-left: 12rpx;
+  padding: 8rpx 20rpx;
+  font-size: 24rpx;
+  color: #2f5bd7;
+  background: #eef2fe;
+  border-radius: 8rpx;
+}
+
+/* --------------------------------------------------------------------------
+   按钮
+   -------------------------------------------------------------------------- */
+.btn-row {
+  display: flex;
+  align-items: center;
+  margin-top: 22rpx;
+}
+
+.primary-btn {
+  flex: 1;
+  padding: 20rpx 0;
+  font-size: 28rpx;
+  text-align: center;
+  color: #ffffff;
+  background: #2f5bd7;
+  border-radius: 44rpx;
+}
+
+.primary-btn-hover {
+  background: #2449b3;
+}
+
+.btn-disabled {
+  background: #a9b8e6;
+  color: #f0f3fb;
+}
+
+.ghost-btn {
+  flex: none;
+  margin-left: 16rpx;
+  padding: 20rpx 36rpx;
+  font-size: 27rpx;
+  color: #4a5163;
+  background: #f2f4f8;
+  border-radius: 44rpx;
+}
+
+.ghost-btn-hover {
+  background: #e6eaf3;
+}
+
+/* --------------------------------------------------------------------------
+   作息表（只读）
+   -------------------------------------------------------------------------- */
+.period-list {
+  margin-top: 16rpx;
+  border: 1rpx solid #eef1f6;
+  border-radius: 10rpx;
+  overflow: hidden;
+}
+
+.period-item {
+  display: flex;
+  align-items: center;
+  padding: 14rpx 16rpx;
+  border-bottom: 1rpx solid #f2f4f9;
+}
+
+.period-item:last-child {
+  border-bottom: none;
+}
+
+.period-break {
+  background: #fafbfd;
+}
+
+.period-name {
+  flex: none;
+  width: 130rpx;
+  font-size: 25rpx;
+  font-weight: 600;
+  color: #1f2430;
+}
+
+.period-break .period-name {
+  color: #97a0b5;
+  font-weight: 500;
+}
+
+.period-time {
+  flex: 1;
+  min-width: 0;
+  font-size: 24rpx;
+  color: #6b7288;
+}
+
+.period-tag-cal {
+  flex: none;
+  padding: 2rpx 12rpx;
+  font-size: 20rpx;
+  color: #2f8f5b;
+  background: #eaf7f0;
+  border-radius: 6rpx;
+}
+
+.period-tag-default {
+  flex: none;
+  padding: 2rpx 12rpx;
+  font-size: 20rpx;
+  color: #9aa1b2;
+  background: #f4f6fa;
+  border-radius: 6rpx;
+}
+
+/* --------------------------------------------------------------------------
+   AI 设置
+   -------------------------------------------------------------------------- */
+.ai-status {
+  display: flex;
+  flex-direction: column;
+  margin-top: 16rpx;
+  padding: 16rpx 18rpx;
+  background: #f4f6fa;
+  border-left: 6rpx solid #c3c9d6;
+  border-radius: 10rpx;
+}
+
+/* 三态用左手边的色条区分：自己填的（绿）/ 预置的（蓝）/ 都没配（橙） */
+.ai-status-own {
+  background: #eaf7f0;
+  border-left-color: #2f8f5b;
+}
+
+.ai-status-preset {
+  background: #eef2fe;
+  border-left-color: #2f5bd7;
+}
+
+.ai-status-none {
+  background: #fff7e6;
+  border-left-color: #d99a00;
+}
+
+.ai-status-text {
+  font-size: 25rpx;
+  color: #1f2430;
+  line-height: 1.5;
+}
+
+.ai-status-model {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  color: #6b7288;
+}
+
+/* 下拉框（只读样式，点击弹出选择器） */
+.picker-value {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.picker-value-text {
+  font-size: 26rpx;
+  color: #2f5bd7;
+}
+
+.picker-arrow {
+  margin-left: 10rpx;
+  font-size: 22rpx;
+  color: #9aa1b2;
+}
+
+/* Key 输入框 */
+.ai-key-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 68rpx;
+  padding: 8rpx 16rpx;
+  font-size: 25rpx;
+  color: #1f2430;
+  background: #f6f7fb;
+  border-radius: 10rpx;
+  box-sizing: border-box;
+}
+
+/* 可长按选中的链接文本（小程序里没有真正的超链接，做成可选中复制） */
+.link-text {
+  color: #2f5bd7;
+  word-break: break-all;
+}
+
+.ghost-btn.btn-disabled {
+  color: #a8aebd;
+  background: #f4f6fa;
+}
+
+/* --------------------------------------------------------------------------
+   导入：结果 / 警告 / 预览
+   -------------------------------------------------------------------------- */
+.result-line {
+  margin-top: 16rpx;
+  padding: 14rpx 16rpx;
+  font-size: 25rpx;
+  color: #2f5bd7;
+  background: #eef2fe;
+  border-radius: 10rpx;
+}
+
+.warn-box {
+  display: flex;
+  flex-direction: column;
+  margin-top: 14rpx;
+  padding: 14rpx 16rpx;
+  background: #fff7e6;
+  border: 1rpx solid #ffe0a3;
+  border-radius: 10rpx;
+}
+
+.warn-title {
+  font-size: 23rpx;
+  font-weight: 600;
+  color: #8a5a00;
+}
+
+.warn-item {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  color: #8a5a00;
+  line-height: 1.5;
+}
+
+.preview-title {
+  margin: 20rpx 0 8rpx;
+  font-size: 25rpx;
+  font-weight: 600;
+  color: #4a5163;
+}
+
+.preview-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 12rpx 0;
+  border-bottom: 1rpx solid #f2f4f9;
+}
+
+.preview-tag {
+  flex: none;
+  margin-right: 10rpx;
+  padding: 2rpx 10rpx;
+  font-size: 20rpx;
+  color: #2f5bd7;
+  background: #eef2fe;
+  border-radius: 6rpx;
+}
+
+.preview-title-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 25rpx;
+  color: #1f2430;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.preview-meta {
+  flex: none;
+  margin-left: 10rpx;
+  font-size: 21rpx;
+  color: #8a90a2;
+}
+
+.preview-more {
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  color: #9aa1b2;
+}
+
+/* 导出预览代码块 */
+.code-box {
+  margin-top: 14rpx;
+  padding: 14rpx 16rpx;
+  font-size: 20rpx;
+  line-height: 1.5;
+  color: #4a5163;
+  background: #f6f7fb;
+  border-radius: 10rpx;
+  word-break: break-all;
+}
+
+/* --------------------------------------------------------------------------
+   关于
+   -------------------------------------------------------------------------- */
+.about-line {
+  margin-top: 12rpx;
+  font-size: 24rpx;
+  color: #4a5163;
+  line-height: 1.65;
+}
+
+.third-item {
+  display: flex;
+  flex-direction: column;
+  padding: 14rpx 0;
+  border-bottom: 1rpx solid #f2f4f9;
+}
+
+.third-item:last-child {
+  border-bottom: none;
+}
+
+.third-name {
+  font-size: 25rpx;
+  font-weight: 600;
+  color: #1f2430;
+}
+
+.third-desc {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  color: #6b7288;
+  line-height: 1.55;
+}
+
+.footer-tip {
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  color: #a8aebd;
+  text-align: center;
+}

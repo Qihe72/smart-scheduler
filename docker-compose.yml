@@ -1,0 +1,39 @@
+# ===========================================================================
+# 智能日程管家 —— 需要整套 Docker 部署时用这份配置。
+#
+# 用法（在本文件所在目录执行）：
+#   docker compose up -d         启动（第一次会先 build）
+#   docker compose logs -f       看日志
+#   docker compose down          停止并删除容器（数据卷保留，数据不丢）
+#   docker compose up -d --build 改了代码后重新构建
+#
+# 说明：对项目本身没有任何要求，它只读项目根目录下的 Dockerfile、
+# requirements.txt 和 .py 文件；data/ 会被存到名为 smart-scheduler-data
+# 的具名卷里，所以「删除容器」不会删除数据。
+# ===========================================================================
+
+services:
+  smart-scheduler:
+    build: .
+    image: smart-scheduler:1.0
+    container_name: smart-scheduler
+    ports:
+      # 左边是宿主机端口：被占用就改成 8502:8501（或 8503:8501…）
+      - "8501:8501"
+    volumes:
+      # 数据目录挂载：容器重建数据不丢
+      - smart-scheduler-data:/app/data
+    environment:
+      # 时区（Dockerfile 里已装 tzdata，这里可覆盖）
+      TZ: Asia/Shanghai
+      # 端口（与上面 ports 的容器侧端口保持一致；不改就保持 8501）
+      PORT: "8501"
+    # DeepSeek Key 从项目根目录的 .env 读取（该文件已在 .gitignore 里，不会被提交）。
+    # 用这种方式就不必把 Key 写进命令行历史；没有 .env 时注释掉这一行即可，
+    # 应用照样能用手动输入、课表导入、周视图。
+    env_file:
+      - .env
+    restart: unless-stopped
+
+volumes:
+  smart-scheduler-data:

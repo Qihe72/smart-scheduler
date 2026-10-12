@@ -1,0 +1,13 @@
+{
+  "name": "tasks",
+  "version": "1.0.0",
+  "description": "智能日程管家 - 任务增删改查 / 统计 / 设置云函数（身份只取 getWXContext().OPENID）",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "test": "node ../_selftest.js"
+  },
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

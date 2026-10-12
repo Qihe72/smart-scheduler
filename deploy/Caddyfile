@@ -1,0 +1,110 @@
+# ===========================================================================
+# Caddyfile —— 智能日程管家（多用户版）的 HTTPS 入口
+# ===========================================================================
+#
+# 【这个文件负责什么】
+#   1. 自动申请并续期 Let's Encrypt 证书（前提：域名 A 记录已指向这台服务器，
+#      且 80 / 443 端口对公网放行）；
+#   2. 提供「静态启动页」：/ 返回本目录的 index.html，
+#      它带着 manifest，手机才能「添加到主屏幕」；
+#   3. 把 /app/* 反代给 Streamlit 容器（含 WebSocket）。
+#
+# 【为什么要有这个启动页 —— 别删】
+#   Streamlit 不允许往 HTML 的 <head> 里注入内容，而手机「添加到主屏幕」
+#   要求页面里有 <link rel="manifest">。所以做法是：Caddy 自己发一个静态
+#   启动页（带 manifest），Streamlit 退到子路径 /app 上（应用侧用
+#   --server.baseUrlPath=app），启动页用一个 iframe 把它嵌进去。
+#
+# 【要改的三处（下面的域名/邮箱都在这里）】
+#   1) 把 `schedule.example.com` 换成你的域名（两处：站点地址 + 注释里的说明）；
+#   2) 把 `you@example.com` 换成你的真实邮箱（Let's Encrypt 用它在证书快过期
+#      或域名出问题时通知你，随便填会收不到通知）；
+#   3) 确认 `reverse_proxy app:8501` 里的 `app` 与 docker-compose.yml 里的
+#      服务名一致（默认就是 app，一般不用改）。
+#
+# 【怎么启动】
+#   本目录应该就是 docker-compose.yml 所在的目录（deploy/），在那里执行：
+#     docker compose up -d            # 起服务（第一次会 build 应用镜像）
+#     docker compose logs -f caddy    # 看证书申请过程（第一次启动看这里）
+#     docker compose restart caddy    # 改了本文件后重启（Caddy 不会热加载挂载的 Caddyfile）
+#   验证：
+#     curl -I https://你的域名/                     # 期望 200，且是 HTML
+#     curl    https://你的域名/app/_stcore/health    # 期望输出 ok
+#
+#   注意：申请证书需要 80 端口可达。第一次启动如果 80 被别的程序占用
+#   （比如宿主机上还跑着 nginx/apache），ACME 校验会失败，日志里是
+#   "challenge failed" 之类的报错 —— 先腾出 80 端口再重试。
+# ===========================================================================
+
+# 站点地址：只能写一个域名（Caddy 用它去申请证书）。
+# 本地先试效果、还没有域名时，把下面这行换成 `:80`，就能用 http://服务器IP/ 打开
+# （http 下浏览器不给装 Service Worker，所以「添加到主屏幕」要在正式域名上试）。
+schedule.example.com {
+	# 你的邮箱：证书到期提醒 / 域名异常通知
+	email you@example.com
+
+	# -------------------------------------------------------------------
+	# 一、压缩
+	# -------------------------------------------------------------------
+	# zstd 优先（新浏览器），gzip 兜底。Streamlit 的 JS/JS 包很大，
+	# 压缩后首屏能快不少。
+	encode zstd gzip
+
+	# -------------------------------------------------------------------
+	# 二、日志
+	# -------------------------------------------------------------------
+	# 输出到容器内 /data/access.log（/data 挂了 caddy-data 卷，重启不丢）。
+	# 想看实时访问日志：docker compose exec caddy tail -f /data/access.log
+	log {
+		output file /data/access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		format json
+	}
+
+	# ===================================================================
+	# 三、路由分工
+	# ===================================================================
+	# Caddy 的 handle 块按「从上到下、第一个匹配的胜出」求值，
+	# 所以顺序是：静态壳（精确路径） → 应用（/app*） → 兜底跳回首页。
+
+	# --- 3.1 静态壳 -----------------------------------------------------
+	# 只有这几个路径由 Caddy 自己发文件：启动页、manifest、Service Worker、图标。
+	# 它们都在 deploy/ 目录里，挂进容器后落在 /srv（见 docker-compose.yml）。
+	@static path / /index.html /manifest.webmanifest /sw.js /icons/* /.well-known/*
+	handle @static {
+		root * /srv
+		header /.well-known/assetlinks.json Content-Type "application/json"
+  file_server
+
+		# Service Worker 必须「每次回源校验」，否则浏览器可能长期用旧版 SW，
+		# 改了缓存策略却永远不生效。这也是 SW 的标准做法。
+		@sw path /sw.js
+		header @sw Cache-Control "no-cache"
+
+		# manifest 的 MIME 类型：有些浏览器会因为类型不对而忽略 manifest，
+		# 显式写死 application/manifest+json 最稳。
+		@manifest path /manifest.webmanifest
+		header @manifest Content-Type "application/manifest+json"
+
+		# 启动页是壳，改动后希望尽快生效；放 5 分钟缓存足够。
+		@html path / /index.html
+		header @html Cache-Control "public, max-age=300"
+	}
+
+	# --- 3.2 应用（Streamlit 子路径） ------------------------------------
+	# /app* 全部转给容器里的 Streamlit（8501）。
+	# WebSocket（Streamlit 的 _stcore/stream）Caddy 默认就会自动升级转发，
+	# 不需要额外写 header；X-Forwarded-* 也是自动加上的。
+	handle /app* {
+		reverse_proxy app:8501
+	}
+
+	# --- 3.3 兜底 -------------------------------------------------------
+	# 其它路径（/foo、/static/... 之类）统统跳回启动页，
+	# 避免用户看到 Caddy 的 404 而以为「网站坏了」。
+	handle {
+		redir / 302
+	}
+}

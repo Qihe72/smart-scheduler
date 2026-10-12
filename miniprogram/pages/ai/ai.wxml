@@ -1,0 +1,163 @@
+<!--
+  pages/ai/ai.wxml —— AI 录入 / 拆解页。
+
+  结构：
+    ① 顶部两个模式切换（录入 / 拆解）
+    ② 录入模式：输入框 + 「解析」→ 结果卡片（可勾选）+ 「确认添加」
+    ③ 拆解模式：选一条任务 + 「拆解」→ 子任务清单（可勾选）+ 「确认添加子任务」
+    ④ 提示条：绿色是成功、黄色是警告；AI 的失败文案原样显示（后端写好的那句）
+-->
+<view class="page ai-page">
+
+  <!-- ① 模式切换 -->
+  <view class="mode-switch">
+    <view class="mode-item {{mode === 'parse' ? 'is-active' : ''}}" bindtap="switchToParse">AI 录入</view>
+    <view class="mode-item {{mode === 'decompose' ? 'is-active' : ''}}" bindtap="switchToDecompose">任务拆解</view>
+  </view>
+
+  <!-- 提示条（成功 / 警告都走这里） -->
+  <view wx:if="{{tip}}" class="tip tip-{{tipType}}">{{tip}}</view>
+
+  <!-- ===================== ② 录入模式 ===================== -->
+  <block wx:if="{{mode === 'parse'}}">
+    <view class="card">
+      <view class="card-title">说一句话，我来排</view>
+      <textarea
+        class="ai-textarea"
+        value="{{inputText}}"
+        bindinput="onInput"
+        maxlength="500"
+        placeholder="例如：明天下午三点开组会，周五前交实验报告"
+        placeholder-class="form-placeholder"
+        auto-height
+      />
+      <view class="muted mt-8">支持一句话里有多件事；没写时间的会问你一句。最多 500 字。</view>
+      <view class="row mt-16">
+        <view class="btn-ghost btn-mini" bindtap="onClearInput">清空</view>
+        <view class="btn-primary btn-mini {{parsing ? 'btn-disabled' : ''}}" bindtap="onParse">
+          {{parsing ? '解析中…' : '解析'}}
+        </view>
+      </view>
+    </view>
+
+    <!-- 解析失败：原样显示后端文案 -->
+    <view wx:if="{{parseError}}" class="card ai-error">
+      <view class="ai-error-title">没能解析</view>
+      <view class="ai-error-text">{{parseError}}</view>
+    </view>
+
+    <!-- 反问（模型觉得信息不够） -->
+    <view wx:if="{{needClarification && clarification}}" class="card ai-ask">
+      <view class="ai-error-title">还需要一点信息</view>
+      <view class="ai-error-text">{{clarification}}</view>
+    </view>
+
+    <!-- 解析结果 -->
+    <view wx:if="{{parsed}}" class="card">
+      <view class="row">
+        <view class="card-title">解析出 {{parsed.items.length}} 条</view>
+        <view class="btn-ghost btn-mini" bindtap="onToggleAll">全选 / 全不选</view>
+      </view>
+
+      <view wx:if="{{!parsed.hasAny}}" class="empty">这次没有解析出可添加的日程</view>
+
+      <view
+        wx:for="{{parsed.items}}"
+        wx:key="index"
+        class="ai-item {{item.selected ? 'is-on' : ''}}"
+        data-index="{{index}}"
+        bindtap="onToggleItem"
+      >
+        <view class="ai-check">{{item.selected ? '✓' : ''}}</view>
+        <view class="flex-1">
+          <view class="row">
+            <text class="title ellipsis flex-1">{{item.title}}</text>
+            <text class="tag {{item.tagClass}} tag-line">{{item.priorityLabel}}</text>
+          </view>
+          <view class="muted">
+            {{item.typeLabel}} · {{item.date}} · {{item.timeText}}
+          </view>
+        </view>
+      </view>
+
+      <view wx:if="{{parsed.hasAny}}" class="mt-16">
+        <view
+          class="btn-primary btn-block {{submitting ? 'btn-disabled' : ''}}"
+          bindtap="onConfirmImport"
+        >{{submitting ? '添加中…' : '确认添加'}}</view>
+      </view>
+    </view>
+  </block>
+
+  <!-- ===================== ③ 拆解模式 ===================== -->
+  <block wx:if="{{mode === 'decompose'}}">
+    <view class="card">
+      <view class="row">
+        <view class="card-title">选一条任务来拆</view>
+        <view class="btn-ghost btn-mini" bindtap="loadCourses">刷新</view>
+      </view>
+
+      <view wx:if="{{picking}}" class="muted">读取任务中…</view>
+      <view wx:elif="{{!courses.length}}" class="empty">
+        还没有可以拆解的任务（需要有日期的未完成任务）
+      </view>
+
+      <view
+        wx:for="{{courses}}"
+        wx:key="_id"
+        class="ai-item {{pickedId === item._id ? 'is-on' : ''}}"
+        data-id="{{item._id}}"
+        bindtap="onPickCourse"
+      >
+        <view class="ai-check">{{pickedId === item._id ? '✓' : ''}}</view>
+        <view class="flex-1">
+          <view class="row">
+            <text class="title ellipsis flex-1">{{item.title}}</text>
+            <text class="tag tag-line">{{item.priorityLabel}}</text>
+          </view>
+          <view class="muted">{{item.date}}<text wx:if="{{item.repeatLabel}}"> · {{item.repeatLabel}}</text></view>
+        </view>
+      </view>
+
+      <view class="mt-16">
+        <view
+          class="btn-primary btn-block {{decomposing || !pickedId ? 'btn-disabled' : ''}}"
+          bindtap="onDecompose"
+        >{{decomposing ? '拆解中…' : '拆解这一步'}}</view>
+      </view>
+      <view wx:if="{{pickedTitle}}" class="muted mt-8">当前选中：{{pickedTitle}}（截止 {{pickedDate}}）</view>
+    </view>
+
+    <!-- 拆解失败 -->
+    <view wx:if="{{decomposeError}}" class="card ai-error">
+      <view class="ai-error-title">没能拆解</view>
+      <view class="ai-error-text">{{decomposeError}}</view>
+    </view>
+
+    <!-- 子任务清单 -->
+    <view wx:if="{{subtasks.length}}" class="card">
+      <view class="card-title">拆出 {{subtasks.length}} 步</view>
+      <view
+        wx:for="{{subtasks}}"
+        wx:key="index"
+        class="ai-item {{item.selected ? 'is-on' : ''}}"
+        data-index="{{index}}"
+        bindtap="onToggleSubtask"
+      >
+        <view class="ai-check">{{item.selected ? '✓' : ''}}</view>
+        <view class="flex-1">
+          <view class="title ellipsis">{{item.title}}</view>
+          <view class="muted">{{item.suggested_date}} · 预计 {{item.estimateText}}</view>
+        </view>
+      </view>
+      <view class="mt-16">
+        <view
+          class="btn-primary btn-block {{submitting ? 'btn-disabled' : ''}}"
+          bindtap="onConfirmSubtasks"
+        >{{submitting ? '添加中…' : '确认添加子任务'}}</view>
+      </view>
+    </view>
+  </block>
+
+  <view class="footer-hold"></view>
+</view>

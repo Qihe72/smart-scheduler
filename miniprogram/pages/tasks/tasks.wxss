@@ -1,0 +1,382 @@
+/* pages/tasks/tasks.wxss —— 任务列表样式（无第三方 UI 库，全部手写） */
+
+page {
+  background: #f2f4f8;
+  font-size: 26rpx;
+  color: #1f2430;
+}
+
+.page {
+  min-height: 100vh;
+  padding: 0 20rpx 40rpx;
+  box-sizing: border-box;
+}
+
+/* --------------------------------------------------------------------------
+   一、统计 + 筛选
+   -------------------------------------------------------------------------- */
+.topbar {
+  padding: 20rpx 4rpx 12rpx;
+}
+
+.stat-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 24rpx;
+  color: #6b7288;
+}
+
+.stat-strong {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: #1f2430;
+}
+
+.stat-sep {
+  margin: 0 10rpx;
+  color: #c3c9d6;
+}
+
+.filter-bar {
+  display: flex;
+  align-items: center;
+  margin-top: 16rpx;
+}
+
+.filter-item {
+  flex: none;
+  padding: 10rpx 26rpx;
+  margin-right: 12rpx;
+  font-size: 25rpx;
+  color: #4a5163;
+  background: #ffffff;
+  border-radius: 32rpx;
+  border: 1rpx solid #e3e7f0;
+}
+
+.filter-on {
+  color: #ffffff;
+  background: #2f5bd7;
+  border-color: #2f5bd7;
+}
+
+.filter-text {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-size: 23rpx;
+  color: #8a90a2;
+}
+
+/* --------------------------------------------------------------------------
+   AI 录入入口（顶部整句录入）
+   -------------------------------------------------------------------------- */
+.ai-bar {
+  margin-top: 16rpx;
+}
+
+.ai-btn {
+  display: flex;
+  align-items: baseline;
+  padding: 18rpx 22rpx;
+  background: #eef2fe;
+  border: 1rpx solid #d9e0f2;
+  border-radius: 14rpx;
+}
+
+.ai-btn-hover {
+  background: #e2e9fd;
+}
+
+.ai-btn-main {
+  flex: none;
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #2f5bd7;
+}
+
+.ai-btn-sub {
+  flex: 1;
+  min-width: 0;
+  margin-left: 14rpx;
+  font-size: 22rpx;
+  color: #6b7288;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ai-hint {
+  margin-top: 12rpx;
+  padding: 12rpx 16rpx;
+  font-size: 22rpx;
+  line-height: 1.55;
+  color: #8a5a00;
+  background: #fff7e6;
+  border: 1rpx solid #ffe0a3;
+  border-radius: 10rpx;
+}
+
+/* 加载 / 失败 / 空态 */
+.state-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 100rpx 32rpx;
+}
+
+.state-text {
+  font-size: 26rpx;
+  color: #8a90a2;
+  text-align: center;
+}
+
+.state-text + .state-text {
+  margin-top: 10rpx;
+}
+
+.state-box .add-btn {
+  margin-top: 32rpx;
+}
+
+/* --------------------------------------------------------------------------
+   二、任务卡片
+   -------------------------------------------------------------------------- */
+.list {
+  padding-top: 4rpx;
+}
+
+.card {
+  display: flex;
+  align-items: flex-start;
+  padding: 20rpx 18rpx;
+  margin-bottom: 14rpx;
+  background: #ffffff;
+  border-radius: 14rpx;
+  box-shadow: 0 2rpx 8rpx rgba(31, 36, 48, 0.04);
+}
+
+.card-hover {
+  background: #f7f9fd;
+}
+
+.card-done {
+  opacity: 0.62;
+}
+
+/* 勾选框 */
+.check {
+  flex: none;
+  width: 40rpx;
+  height: 40rpx;
+  margin: 2rpx 16rpx 0 0;
+  border: 2rpx solid #c3c9d6;
+  border-radius: 50%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.check-on {
+  background: #2f8f5b;
+  border-color: #2f8f5b;
+}
+
+.check-mark {
+  font-size: 24rpx;
+  line-height: 1;
+  color: #ffffff;
+}
+
+.card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.line-title {
+  display: flex;
+  align-items: center;
+}
+
+.c-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 29rpx;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.c-title-done {
+  text-decoration: line-through;
+  color: #8a90a2;
+}
+
+.priority {
+  flex: none;
+  margin-left: 10rpx;
+  padding: 2rpx 12rpx;
+  font-size: 21rpx;
+  color: #8a5a00;
+  background: #fff4d9;
+  border-radius: 20rpx;
+}
+
+.priority-high {
+  color: #b02a16;
+  background: #ffe6e1;
+}
+
+.line-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 10rpx;
+}
+
+.tag {
+  flex: none;
+  margin-right: 10rpx;
+  padding: 2rpx 12rpx;
+  font-size: 21rpx;
+  color: #2f5bd7;
+  background: #eef2fe;
+  border-radius: 6rpx;
+}
+
+.meta {
+  margin-right: 14rpx;
+  font-size: 24rpx;
+  color: #6b7288;
+}
+
+.meta-today {
+  color: #2f8f5b;
+  font-weight: 600;
+}
+
+.line-extra {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8rpx;
+}
+
+.extra {
+  margin-right: 14rpx;
+  padding: 2rpx 10rpx;
+  font-size: 21rpx;
+  color: #6b7288;
+  background: #f4f6fa;
+  border-radius: 6rpx;
+}
+
+.extra-est {
+  color: #2f5bd7;
+  background: #eef2fe;
+}
+
+.line-parent {
+  margin-top: 10rpx;
+}
+
+.parent-link {
+  display: inline-block;
+  max-width: 100%;
+  font-size: 22rpx;
+  color: #8a5a00;
+  background: #fff7e6;
+  border-radius: 6rpx;
+  padding: 4rpx 10rpx;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 卡片右侧的动作区：拆解 + 删除，竖排对齐（样式沿用原有卡片风格） */
+.card-actions {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  margin-left: 14rpx;
+}
+
+.ai-mini-btn {
+  padding: 8rpx 16rpx;
+  margin-bottom: 10rpx;
+  font-size: 23rpx;
+  text-align: center;
+  color: #2f5bd7;
+  background: #eef2fe;
+  border-radius: 8rpx;
+}
+
+.ai-mini-btn-hover {
+  background: #dde6fd;
+}
+
+/* 置灰版：仍然能点（点了说明原因），所以只降不透明度，不加 disabled */
+.ai-mini-disabled {
+  color: #9aa1b2;
+  background: #f4f6fa;
+}
+
+.del-btn {
+  flex: none;
+  padding: 8rpx 16rpx;
+  font-size: 23rpx;
+  text-align: center;
+  color: #c2402a;
+  background: #fff1ef;
+  border-radius: 8rpx;
+}
+
+/* --------------------------------------------------------------------------
+   三、分页与底部
+   -------------------------------------------------------------------------- */
+.more-box {
+  display: flex;
+  justify-content: center;
+  padding: 18rpx 0 8rpx;
+}
+
+.more-btn {
+  padding: 14rpx 48rpx;
+  font-size: 25rpx;
+  color: #2f5bd7;
+  background: #ffffff;
+  border: 1rpx solid #d9e0f2;
+  border-radius: 40rpx;
+}
+
+.more-btn-hover {
+  background: #eef2fe;
+}
+
+.more-end {
+  font-size: 22rpx;
+  color: #a8aebd;
+}
+
+.footer {
+  display: flex;
+  justify-content: center;
+  padding: 24rpx 0 40rpx;
+}
+
+.add-btn {
+  padding: 18rpx 56rpx;
+  font-size: 28rpx;
+  color: #ffffff;
+  background: #2f5bd7;
+  border-radius: 44rpx;
+}
+
+.add-btn-hover {
+  background: #2449b3;
+}

@@ -1,0 +1,319 @@
+<!--
+  pages/me/me.wxml —— 「我的」页：学期设置 / 节次作息 / 导入课表 / 导出备份 / 关于。
+
+  【原则】每一项要么真能用、要么明说"暂不支持"，不放点了没反应的按钮。
+    1. 学期设置      → 能改（picker 选日期 + 保存按钮）
+    2. 节次作息      → **只读**，卡片里明确写了"本版只读"
+    3. 导入课表      → 能用的完整流程；若解析器不可用则显示"当前版本不可用"并禁用按钮
+    4. 导出备份      → 能用的（复制到剪贴板）
+    5. 关于 / 数据说明 → 静态文案
+
+  【字段来源】用到字段都在 me.js 的 data 里初始化过：
+    loading / errorText /
+    semesterStart / datePicker / savingSemester / currentWeekNo / currentWeekText /
+    periodRows / periodSourceText / periodOverrideText /
+    icsAvailable / icsUnavailableText / importing / submitting / pickedFileName /
+    parsedCount / taskCount / warnings / previewItems / previewMore / importResultText /
+    exporting / exportTaskCount / exportPreview / exportHint /
+    version / cloudFunctionName / appName
+    periodRows[i] = { key, label, timeText, isBreak, calibrated }
+    previewItems[i] = { title, dateText, whenText, typeLabel }
+-->
+
+<view class="page">
+
+  <!-- ================= 加载 / 失败 ================= -->
+  <view class="state-box" wx:if="{{loading}}">
+    <text class="state-text">正在读取设置…</text>
+  </view>
+  <view class="state-box" wx:elif="{{errorText}}">
+    <text class="state-text">{{errorText}}</text>
+    <text class="state-text">下拉可以重试</text>
+  </view>
+
+  <block wx:else>
+
+    <!-- ================= 一、学期设置 ================= -->
+    <view class="card">
+      <view class="card-title">学期设置</view>
+      <view class="card-sub">周次与单双周都按这个日期算，请填开学第一周的周一。</view>
+
+      <view class="row">
+        <text class="row-label">开学日期</text>
+        <view class="row-right">
+          <text class="row-value">{{semesterStart || '未设置'}}</text>
+          <picker mode="date" value="{{datePicker}}" bindchange="onDateChange">
+            <view class="mini-btn">选择</view>
+          </picker>
+        </view>
+      </view>
+
+      <view class="row">
+        <text class="row-label">当前状态</text>
+        <text class="row-value-plain">{{currentWeekText}}</text>
+      </view>
+
+      <view class="btn-row">
+        <view
+          class="primary-btn {{savingSemester ? 'btn-disabled' : ''}}"
+          hover-class="primary-btn-hover"
+          bindtap="onSaveSemester"
+        >{{savingSemester ? '保存中…' : '保存开学日期'}}</view>
+      </view>
+      <view class="note">保存后云函数会把日期归一化成那一周的周一，课表页会立即按新周次显示。</view>
+    </view>
+
+    <!-- ================= 二、节次作息（只读） ================= -->
+    <view class="card">
+      <view class="card-title">节次作息</view>
+      <view class="card-sub">{{periodSourceText}}</view>
+
+      <view class="period-list">
+        <view
+          class="period-item {{item.isBreak ? 'period-break' : ''}}"
+          wx:for="{{periodRows}}"
+          wx:for-item="item"
+          wx:key="key"
+        >
+          <text class="period-name">{{item.label}}</text>
+          <text class="period-time">{{item.timeText}}</text>
+          <text class="period-tag-cal" wx:if="{{item.calibrated}}">已校准</text>
+          <text class="period-tag-default" wx:elif="{{!item.isBreak}}">默认</text>
+        </view>
+      </view>
+
+      <view class="note note-warn">
+        本版只读，不能在这里改上下课时间。
+        Python 版的作息是 config.py 里的 CLASS_PERIODS 常量（注释里写明"按自己学校的上下课时间改这里即可"）；
+        这里的「已校准」节次来自导入课表时的自动识别，不是手动设置项。
+        需要自定义作息，请在 Python 版修改，或等后续版本。
+      </view>
+      <view class="note" wx:if="{{periodOverrideText}}">{{periodOverrideText}}</view>
+    </view>
+
+    <!-- ================= 三、AI 设置 ================= -->
+    <view class="card">
+      <view class="card-title">AI 设置</view>
+      <view class="card-sub">填自己的 Key，AI 就用你的额度，不占别人的。</view>
+
+      <!-- 接口没就绪时明确禁用（不假装能用） -->
+      <block wx:if="{{!aiAvailable}}">
+        <view class="note note-warn">{{aiUnavailableText}}</view>
+      </block>
+
+      <block wx:else>
+        <!-- 1. 当前状态（只显示掩码，永远不显示 Key 原文） -->
+        <view class="ai-status ai-status-{{aiStatusType}}" wx:if="{{!aiLoading}}">
+          <text class="ai-status-text">{{aiStatusText}}</text>
+          <text class="ai-status-model" wx:if="{{aiModel}}">模型：{{aiModel}}</text>
+        </view>
+        <view class="ai-status" wx:else>
+          <text class="ai-status-text">正在读取 AI 设置…</text>
+        </view>
+
+        <!-- 没填自己的 Key 时，只把**规则**讲清楚，不断言"用不了"：
+             预置 Key 配在 aiParse / aiDecompose 的环境变量里（每个云函数的环境变量各自独立），
+             提供本接口的 tasks 云函数无从得知，所以这里不猜。
+             "到底有没有 Key"由知道答案的 AI 云函数在报错时去说。 -->
+        <view class="note" wx:if="{{aiStatusType === 'none'}}">
+          AI 优先用你自己填的 Key；没填时由程序预置的 Key 兜底（如果部署时配了）。
+          两边都没有的话，AI 页会提示不可用并引导你回到这里。
+        </view>
+
+        <!-- 2. 服务商：**只能是下拉框**（白名单）。放自定义地址等于把云函数变成
+             任意请求转发器（SSRF），所以界面上根本不给填地址的地方。 -->
+        <view class="row">
+          <text class="row-label">服务商</text>
+          <picker
+            class="row-right"
+            mode="selector"
+            range="{{providers}}"
+            range-key="label"
+            value="{{aiProviderIndex}}"
+            bindchange="onAiProviderChange"
+          >
+            <view class="picker-value">
+              <text class="picker-value-text">{{providers[aiProviderIndex].label}}</text>
+              <text class="picker-arrow">▾</text>
+            </view>
+          </picker>
+        </view>
+        <view class="note" wx:if="{{aiProviderHint}}">该服务商：{{aiProviderHint}}</view>
+
+        <!-- 3. Key 输入（password，别让旁边的人看到） -->
+        <view class="row">
+          <text class="row-label">API Key</text>
+          <input
+            class="ai-key-input"
+            type="text"
+            password="{{true}}"
+            placeholder="{{aiKeyPlaceholder}}"
+            value="{{aiKeyInput}}"
+            bindinput="onAiKeyInput"
+          />
+        </view>
+
+        <!-- 4. 保存 / 清除 -->
+        <view class="btn-row">
+          <view
+            class="primary-btn {{aiSaving ? 'btn-disabled' : ''}}"
+            hover-class="primary-btn-hover"
+            bindtap="onAiConfigSave"
+          >{{aiSaving ? '保存中…' : '保存'}}</view>
+          <view
+            class="ghost-btn {{(aiClearing || !aiHasKey) ? 'btn-disabled' : ''}}"
+            hover-class="ghost-btn-hover"
+            bindtap="onAiConfigClear"
+          >{{aiClearing ? '清除中…' : '清除'}}</view>
+        </view>
+        <view class="result-line" wx:if="{{aiResultText}}">{{aiResultText}}</view>
+
+        <!-- 5. 说明 -->
+        <view class="note">
+          你填的 Key 保存在你自己的数据里（按微信身份隔离），别人看不到；
+          界面只显示掩码 {{aiMasked || '****abcd'}}，不会回显原文。
+        </view>
+        <view class="note">
+          「程序预置的 Key」是所有人共用的，额度有限、高峰期可能失败；填自己的更稳。
+        </view>
+        <view class="note">
+          免费获取：智谱开放平台
+          <text class="link-text" selectable="{{true}}">{{aiKeyUrl}}</text>
+          （免费档 glm-4.7-flash），注册后在「API Keys」页面复制即可。
+        </view>
+        <view class="note">AI 页报错时也会引导你回到这里配置。</view>
+      </block>
+    </view>
+
+    <!-- ================= 四、导入课表 ================= -->
+    <view class="card">
+      <view class="card-title">导入课表（.ics）</view>
+
+      <!-- 解析器不可用时的明确说明（不假装能用） -->
+      <block wx:if="{{!icsAvailable}}">
+        <view class="note note-warn">{{icsUnavailableText}}</view>
+        <view class="btn-row">
+          <view class="primary-btn btn-disabled">导入课表（暂不可用）</view>
+        </view>
+      </block>
+
+      <block wx:else>
+        <view class="card-sub">从微信聊天记录里选一个 .ics 日历文件（先把文件发给自己或文件传输助手即可）。</view>
+        <view class="btn-row">
+          <view
+            class="primary-btn {{importing ? 'btn-disabled' : ''}}"
+            hover-class="primary-btn-hover"
+            bindtap="onPickIcs"
+          >{{importing ? '正在解析…' : '选择 .ics 文件'}}</view>
+        </view>
+
+        <!-- 解析结果 -->
+        <block wx:if="{{pickedFileName}}">
+          <view class="row">
+            <text class="row-label">文件</text>
+            <text class="row-value-plain">{{pickedFileName}}</text>
+          </view>
+          <view class="result-line" wx:if="{{importResultText}}">{{importResultText}}</view>
+
+          <!-- 警告必须显示，不能吞掉 -->
+          <view class="warn-box" wx:if="{{warnings.length}}">
+            <text class="warn-title">有 {{warnings.length}} 处没能识别：</text>
+            <text class="warn-item" wx:for="{{warnings}}" wx:for-item="w" wx:key="*this">· {{w}}</text>
+          </view>
+
+          <!-- 预览 -->
+          <block wx:if="{{previewItems.length}}">
+            <view class="preview-title">预览（前 {{previewItems.length}} 条）</view>
+            <view class="preview-item" wx:for="{{previewItems}}" wx:for-item="p" wx:key="title">
+              <text class="preview-tag">{{p.typeLabel}}</text>
+              <text class="preview-title-text">{{p.title}}</text>
+              <text class="preview-meta">{{p.dateText}}{{p.whenText ? ' · ' : ''}}{{p.whenText}}</text>
+            </view>
+            <view class="preview-more" wx:if="{{previewMore}}">还有 {{previewMore}} 条未展示…</view>
+
+            <view class="btn-row">
+              <view
+                class="primary-btn {{submitting ? 'btn-disabled' : ''}}"
+                hover-class="primary-btn-hover"
+                bindtap="onConfirmImport"
+              >{{submitting ? '正在入库…' : '确认导入 ' + taskCount + ' 条'}}</view>
+              <view class="ghost-btn" hover-class="ghost-btn-hover" bindtap="onCancelImport">取消</view>
+            </view>
+            <view class="note">导入是「新增」，不会覆盖已有任务；一次最多 200 条。</view>
+          </block>
+        </block>
+      </block>
+    </view>
+
+    <!-- ================= 五、导出备份 ================= -->
+    <view class="card">
+      <view class="card-title">导出备份</view>
+      <view class="card-sub">把当前全部任务导出成 JSON 文本，复制到剪贴板。</view>
+      <view class="btn-row">
+        <view
+          class="primary-btn {{exporting ? 'btn-disabled' : ''}}"
+          hover-class="primary-btn-hover"
+          bindtap="onExport"
+        >{{exporting ? '正在导出…' : '复制备份到剪贴板'}}</view>
+      </view>
+      <view class="note" wx:if="{{exportHint}}">{{exportHint}}</view>
+      <view class="note">粘贴到备忘录、发给自己或存进电脑即可备份。小程序里没有"下载成文件"的通用做法，剪贴板是最可靠的方式。</view>
+      <view class="code-box" wx:if="{{exportPreview}}">{{exportPreview}}…</view>
+    </view>
+
+    <!-- ================= 六、关于 ================= -->
+    <view class="card">
+      <view class="card-title">关于</view>
+      <view class="card-sub">{{appName}} · 微信小程序云开发版 · v{{version}}</view>
+      <view class="about-line">
+        把「课表 + 截止 + 子任务」放在一处的日程管家：左侧按节次排课表，任务按 DDL 与优先级管理，
+        数据全部存你自己的云环境，不需要任何第三方服务器。
+      </view>
+
+      <view class="sub-title">第三方资源与致谢</view>
+      <view class="third-item">
+        <text class="third-name">微信云开发</text>
+        <text class="third-desc">云函数、云数据库与 openid 身份识别；本项目的后端全部由它承载。</text>
+      </view>
+      <view class="third-item">
+        <text class="third-name">智谱 GLM（glm-4.7-flash）</text>
+        <text class="third-desc">自然语言解析与任务拆解的默认模型（免费档）。</text>
+      </view>
+      <view class="third-item">
+        <text class="third-name">DeepSeek</text>
+        <text class="third-desc">备选模型，可在配置里切换。</text>
+      </view>
+      <view class="note">以上第三方服务各有其许可与使用条款，本项目仅按公开接口调用，未修改也未再分发其代码。</view>
+
+      <view class="row">
+        <text class="row-label">云函数</text>
+        <text class="row-value-plain">{{cloudFunctionName}}</text>
+      </view>
+      <view class="row">
+        <text class="row-label">云环境 ID</text>
+        <view class="row-right">
+          <text class="row-value-plain">见 app.js</text>
+          <view class="mini-btn" bindtap="onCopyEnvId">复制</view>
+        </view>
+      </view>
+    </view>
+
+    <!-- ================= 七、数据说明 ================= -->
+    <view class="card">
+      <view class="card-title">你的数据在哪里</view>
+      <view class="about-line">
+        所有日程都保存在你自己的微信云开发环境里，并按微信 openid 做隔离：
+        每条记录的读写都会带上你的 openid 作为条件，别人即使拿到你的任务 id 也读不到、改不了。
+        本小程序没有自建服务器，也不会把你的日程发给第三方。
+      </view>
+      <view class="about-line">
+        换手机、重装微信都不会丢数据（它跟着你的微信身份走）；但删掉云开发环境就会一起删掉，
+        所以重要数据建议定期用上面的「导出备份」留一份。
+      </view>
+    </view>
+
+    <view class="footer-tip">{{appName}} · 数据存于你自己的云环境</view>
+
+  </block>
+
+</view>

@@ -1,0 +1,6 @@
+{
+  "navigationBarTitleText": "课表周视图",
+  "enablePullDownRefresh": true,
+  "backgroundTextStyle": "dark",
+  "usingComponents": {}
+}

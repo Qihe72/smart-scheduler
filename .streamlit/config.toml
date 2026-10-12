@@ -1,0 +1,28 @@
+[theme]
+primaryColor = "#4F7FFF"
+backgroundColor = "#F5F7FA"
+secondaryBackgroundColor = "#E8ECF4"
+textColor = "#2C3E50"
+
+[server]
+# headless：是否「不打开浏览器」。
+#   false —— 本地双击 启动.bat 时，Streamlit 会自己弹出浏览器（默认体验，回到原来的行为）；
+#   true  —— 容器 / 云服务器上用。Dockerfile 的 CMD 里已经显式传了 --server.headless=true，
+#            所以这里写 false 不会影响部署。
+# 这一行踩过坑（见 README 问题 18）：曾经设成 true，本地双击后浏览器不再自动打开，
+# 表现就是「应用打不开了」。launcher.py 现在也会自己开浏览器，双保险。
+headless = false
+
+# address：监听地址。留空时 Streamlit 1.64 的实际行为是监听 0.0.0.0
+# （手机同 WiFi 能直接打开），但这个默认值是官方一直在讨论收紧的点；
+# 这里显式写出 0.0.0.0，行为不再随版本漂移。
+# 只允许本机访问时改成 "localhost"。
+address = "0.0.0.0"
+
+# port：默认端口，被占用时用 --server.port 覆盖（launcher.py 就是自动顺延端口后再传这个参数）。
+port = 8501
+
+[browser]
+# 关闭使用量统计上报。国内网络下这个上报请求经常超时，启动时会多等几秒；
+# 关掉它启动更干脆，也只影响统计上报，不影响界面。
+gatherUsageStats = false

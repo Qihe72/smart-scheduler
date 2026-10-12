@@ -1,0 +1,40 @@
+{
+  "pages": [
+    "pages/week/week",
+    "pages/tasks/tasks",
+    "pages/edit/edit",
+    "pages/me/me",
+    "pages/ai/ai"
+  ],
+  "window": {
+    "navigationBarBackgroundColor": "#4F7FFF",
+    "navigationBarTextStyle": "white",
+    "navigationBarTitleText": "青年时间管理助手",
+    "backgroundColor": "#F5F7FA",
+    "backgroundTextStyle": "light",
+    "enablePullDownRefresh": false
+  },
+  "tabBar": {
+    "color": "#9AA3B2",
+    "selectedColor": "#4F7FFF",
+    "backgroundColor": "#FFFFFF",
+    "borderStyle": "white",
+    "list": [
+      {
+        "pagePath": "pages/week/week",
+        "text": "课表"
+      },
+      {
+        "pagePath": "pages/tasks/tasks",
+        "text": "任务"
+      },
+      {
+        "pagePath": "pages/me/me",
+        "text": "我的"
+      }
+    ]
+  },
+  "cloud": true,
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

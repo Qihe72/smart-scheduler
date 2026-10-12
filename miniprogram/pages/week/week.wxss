@@ -1,0 +1,338 @@
+/* pages/week/week.wxss —— 课表周视图样式（无第三方 UI 库，全部手写） */
+
+page {
+  background: #f2f4f8;
+  font-size: 26rpx;
+  color: #1f2430;
+}
+
+.page {
+  min-height: 100vh;
+  padding-bottom: 24rpx;
+  box-sizing: border-box;
+}
+
+/* --------------------------------------------------------------------------
+   一、顶部周切换
+   -------------------------------------------------------------------------- */
+.toolbar {
+  display: flex;
+  align-items: center;
+  padding: 16rpx 16rpx 12rpx;
+  background: #ffffff;
+  border-bottom: 1rpx solid #e6e9f0;
+}
+
+.nav-btn {
+  flex: none;
+  padding: 12rpx 16rpx;
+  margin-right: 8rpx;
+  font-size: 24rpx;
+  color: #2f5bd7;
+  background: #eef2fe;
+  border-radius: 10rpx;
+}
+
+.nav-btn:last-child {
+  margin-right: 0;
+}
+
+.nav-btn-hover {
+  background: #dde6fd;
+}
+
+.title-box {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 8rpx;
+}
+
+.title-main {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #1f2430;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.title-sub {
+  margin-top: 4rpx;
+  font-size: 22rpx;
+  color: #8a90a2;
+}
+
+/* 非致命提示（未设置开学日期等） */
+.hint {
+  margin: 12rpx 16rpx 0;
+  padding: 12rpx 16rpx;
+  font-size: 24rpx;
+  color: #8a5a00;
+  background: #fff7e6;
+  border: 1rpx solid #ffe0a3;
+  border-radius: 10rpx;
+}
+
+/* 加载 / 失败态 */
+.state-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 80rpx 32rpx;
+}
+
+.state-text {
+  margin-top: 10rpx;
+  font-size: 26rpx;
+  color: #8a90a2;
+  text-align: center;
+}
+
+/* --------------------------------------------------------------------------
+   二、课表主体
+   -------------------------------------------------------------------------- */
+.board-scroll {
+  /* 减掉顶部工具栏的大致高度，让课表自己滚 */
+  height: calc(100vh - 120rpx);
+  box-sizing: border-box;
+}
+
+.board-hscroll {
+  width: 100%;
+  white-space: nowrap;
+}
+
+.board {
+  display: inline-block;
+  min-width: 100%;
+  padding: 0 12rpx 12rpx;
+  box-sizing: border-box;
+}
+
+.board-row {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1rpx solid #e9ecf3;
+}
+
+/* 节次栏（左列，表头与数据行共用） */
+.period-col {
+  flex: none;
+  width: 122rpx;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 10rpx 8rpx 10rpx 4rpx;
+  background: #ffffff;
+  box-sizing: border-box;
+}
+
+.period-name {
+  font-size: 24rpx;
+  font-weight: 600;
+  color: #1f2430;
+  line-height: 1.25;
+  word-break: break-all;
+}
+
+.period-time {
+  margin-top: 4rpx;
+  font-size: 20rpx;
+  color: #8a90a2;
+  line-height: 1.2;
+}
+
+/* 日期列（7 列等宽） */
+.day-col {
+  flex: 1 1 0;
+  min-width: 150rpx;
+  display: flex;
+  flex-wrap: wrap;          /* 并排：一行放不下就换行，绝不互相覆盖 */
+  align-content: flex-start;
+  padding: 8rpx 6rpx;
+  background: #ffffff;
+  border-left: 1rpx solid #eef1f6;
+  box-sizing: border-box;
+}
+
+/* 今天那一列高亮 */
+.today {
+  background: #f5f8ff;
+}
+
+.header-row {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  border-bottom: 1rpx solid #dfe4ee;
+}
+
+.header-corner {
+  justify-content: center;
+  align-items: center;
+}
+
+.corner-text {
+  font-size: 22rpx;
+  color: #8a90a2;
+}
+
+.header-day {
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 12rpx 4rpx;
+}
+
+.day-weekday {
+  font-size: 24rpx;
+  font-weight: 600;
+  color: #1f2430;
+}
+
+.day-date {
+  margin-top: 2rpx;
+  font-size: 22rpx;
+  color: #8a90a2;
+}
+
+.day-free {
+  margin-top: 4rpx;
+  font-size: 20rpx;
+  color: #2f8f5b;
+  background: #eaf7f0;
+  border-radius: 8rpx;
+  padding: 2rpx 8rpx;
+}
+
+.header-day.today .day-weekday {
+  color: #2f5bd7;
+}
+
+.header-day.today .day-date {
+  color: #2f5bd7;
+}
+
+/* 午休 / 休息空档行：单独一行、灰底斜纹，行内不出现"空闲"字样 */
+.break-row .period-col {
+  background: #f6f7fa;
+}
+
+.break-row .period-name {
+  font-size: 22rpx;
+  color: #97a0b5;
+  font-weight: 500;
+}
+
+.break-row .day-col {
+  background: #fafbfd;
+}
+
+.break-row .today {
+  background: #f3f6fd;
+}
+
+/* --------------------------------------------------------------------------
+   三、任务条目（同一行同一天多条并排）
+   -------------------------------------------------------------------------- */
+.chip {
+  flex: 0 0 48%;
+  max-width: 48%;
+  margin: 0 1% 6rpx;
+  padding: 8rpx;
+  background: #eef2fe;
+  border-left: 6rpx solid #2f5bd7;
+  border-radius: 8rpx;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.chip-hover {
+  opacity: 0.7;
+}
+
+.chip-ddl {
+  background: #fff1ef;
+  border-left-color: #e0553f;
+}
+
+.chip-high {
+  box-shadow: 0 0 0 1rpx #f0b429 inset;
+}
+
+.chip-done {
+  opacity: 0.5;
+}
+
+.chip-top {
+  display: flex;
+  align-items: center;
+}
+
+.chip-mark {
+  flex: none;
+  width: 28rpx;
+  height: 28rpx;
+  margin-right: 6rpx;
+  font-size: 18rpx;
+  line-height: 28rpx;
+  text-align: center;
+  color: #ffffff;
+  background: #2f5bd7;
+  border-radius: 6rpx;
+}
+
+.chip-ddl .chip-mark {
+  background: #e0553f;
+}
+
+.chip-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 22rpx;
+  color: #1f2430;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chip-meta {
+  display: block;
+  margin-top: 4rpx;
+  font-size: 18rpx;
+  color: #6b7288;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* --------------------------------------------------------------------------
+   四、底部
+   -------------------------------------------------------------------------- */
+.footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20rpx 24rpx 40rpx;
+}
+
+.add-btn {
+  padding: 18rpx 56rpx;
+  font-size: 28rpx;
+  color: #ffffff;
+  background: #2f5bd7;
+  border-radius: 44rpx;
+}
+
+.add-btn-hover {
+  background: #2449b3;
+}
+
+.footer-tip {
+  margin-top: 12rpx;
+  font-size: 22rpx;
+  color: #9aa1b2;
+}

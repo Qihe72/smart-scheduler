@@ -1,0 +1,26 @@
+# 智能日程管家 —— 运行依赖
+# 安装：pip install -r requirements.txt
+# 启动：streamlit run main.py
+#
+# 说明：全项目 .py 文件里 import 的第三方库只有下面这几个，
+# 其余（csv/json/re/datetime/html/io/logging/os/socket/subprocess/sys/shutil/
+# pathlib/importlib/time）全部来自 Python 标准库。
+#   streamlit      —— 网页界面（st.set_page_config / columns / form / metric / download_button ...）
+#   requests       —— 调用 DeepSeek Chat Completions API（ai_parser.py）
+#   python-dotenv  —— 从 .env 文件读取大模型 API Key
+#                      （ZHIPU_API_KEY / DEEPSEEK_API_KEY，见 config.py）
+#
+# 下面是可选依赖：不是主流程必需，装上某个功能才完整。launcher.py 的依赖检查
+# 只查上面三个，所以少装这个不会影响启动。
+#   segno          —— 侧边栏「📱 手机上使用」里的二维码（ui_components._qr_html）；
+#                     没装也能用，页面会提示 pip install segno，手输地址一样能打开。
+#                     纯 Python、无第三方依赖，体积很小，装上手机同 WiFi 就能扫码进。
+#
+# 版本写法：>= 是最低可用版本，不锁死，方便在别的机器（含 Streamlit Cloud）上装到新版。
+# 本机验证过的版本（Python 3.14.0）：streamlit 1.64.0 / requests 2.34.2 /
+# python-dotenv 1.2.3。segno 本机未安装，无法核对版本。
+
+streamlit>=1.30.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+segno>=1.6.1

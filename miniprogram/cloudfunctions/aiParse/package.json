@@ -1,0 +1,13 @@
+{
+  "name": "aiParse",
+  "version": "1.0.0",
+  "description": "智能日程管家 - 自然语言解析云函数（DeepSeek，key 只读服务端环境变量 DEEPSEEK_API_KEY）",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "test": "node ../_selftest.js"
+  },
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

@@ -1,0 +1,117 @@
+<!--
+  pages/week/week.wxml —— 课表周视图。
+
+  【导航】< </> 是注释，不能在注释里写这种尖括号，这里只用文字说明：
+    顶部一行是「上一周 / 本周 / 下一周」三个按钮 + 中间标题；
+    下面是一张表：左列是节次（第N节 / 午休 / 休息），右边 7 列是周一 ~ 周日。
+
+  【字段来源】凡是用到的字段都在 week.js 的 data 里初始化过：
+    weekOffset / headerText / hintText / loading / errorText / rows / days
+    rows[i] = { key, number, label, timeText, isBreak }
+    days[d] = { weekday, date, short, isToday, freeCount, cells }
+    cells[i] = { key, tasks: [ { id, title, shortTitle, type, typeLabel, done,
+                                priority, periodText, timeText, metaText, mark,
+                                isDdl, isSubtask, highPriority } ] }
+-->
+
+<view class="page">
+
+  <!-- 一、周切换 -->
+  <view class="toolbar">
+    <view class="nav-btn" hover-class="nav-btn-hover" bindtap="onPrevWeek">上一周</view>
+    <view class="title-box">
+      <text class="title-main">{{headerText}}</text>
+      <text class="title-sub">共 {{rows.length}} 行 · 点条目可编辑</text>
+    </view>
+    <view class="nav-btn" hover-class="nav-btn-hover" bindtap="onThisWeek">本周</view>
+    <view class="nav-btn" hover-class="nav-btn-hover" bindtap="onNextWeek">下一周</view>
+  </view>
+
+  <!-- 二、非致命提示（例如还没设置开学日期） -->
+  <view class="hint" wx:if="{{hintText}}">{{hintText}}</view>
+
+  <!-- 三、加载中 -->
+  <view class="state-box" wx:if="{{loading}}">
+    <text class="state-text">正在加载课表…</text>
+  </view>
+
+  <!-- 四、加载失败 -->
+  <view class="state-box" wx:elif="{{errorText}}">
+    <text class="state-text">{{errorText}}</text>
+    <text class="state-text">下拉可以重试</text>
+  </view>
+
+  <!-- 五、课表主体 -->
+  <scroll-view class="board-scroll" scroll-y wx:else>
+    <scroll-view class="board-hscroll" scroll-x>
+
+      <view class="board">
+
+        <!-- 5.1 表头：日期（今天那列加 today 高亮）+ 空闲节数 -->
+        <view class="board-row header-row">
+          <view class="period-col header-corner">
+            <text class="corner-text">节次</text>
+          </view>
+          <view
+            class="day-col header-day {{day.isToday ? 'today' : ''}}"
+            wx:for="{{days}}"
+            wx:for-item="day"
+            wx:key="date"
+          >
+            <text class="day-weekday">{{day.weekday}}</text>
+            <text class="day-date">{{day.short}}</text>
+            <text class="day-free">空闲 {{day.freeCount}} 节</text>
+          </view>
+        </view>
+
+        <!-- 5.2 一天一行：左列节次名 + 时间；右列 7 格任务 -->
+        <!-- rowIndex 很关键：day.cells 与 rows 同下标（同一下标 = 同一行），不能拿 dayIndex 去取 -->
+        <view
+          class="board-row {{row.isBreak ? 'break-row' : ''}}"
+          wx:for="{{rows}}"
+          wx:for-item="row"
+          wx:for-index="rowIndex"
+          wx:key="key"
+        >
+          <view class="period-col">
+            <text class="period-name">{{row.label}}</text>
+            <text class="period-time" wx:if="{{row.timeText}}">{{row.timeText}}</text>
+          </view>
+
+          <view
+            class="day-col {{day.isToday ? 'today' : ''}}"
+            wx:for="{{days}}"
+            wx:for-item="day"
+            wx:for-index="dayIndex"
+            wx:key="date"
+          >
+            <!-- 同一行落在同一天的多条任务：并排展示（WXSS 里 flex-wrap + 每个占 48%） -->
+            <view
+              class="chip {{task.isDdl ? 'chip-ddl' : ''}} {{task.done ? 'chip-done' : ''}} {{task.highPriority ? 'chip-high' : ''}}"
+              wx:for="{{day.cells[rowIndex].tasks}}"
+              wx:for-item="task"
+              wx:key="id"
+              data-id="{{task.id}}"
+              bindtap="onTapTask"
+              hover-class="chip-hover"
+            >
+              <view class="chip-top">
+                <text class="chip-mark">{{task.mark}}</text>
+                <text class="chip-title">{{task.shortTitle}}</text>
+              </view>
+              <text class="chip-meta" wx:if="{{task.metaText}}">{{task.metaText}}</text>
+            </view>
+          </view>
+        </view>
+
+      </view>
+    </scroll-view>
+
+    <!-- 5.3 底部按钮：新增（不带 id 进编辑页 = 新增） -->
+    <view class="footer">
+      <view class="add-btn" hover-class="add-btn-hover" bindtap="onTapAdd">添加任务</view>
+      <text class="footer-tip">午休等空档行不计入「空闲 N 节」</text>
+    </view>
+  </scroll-view>
+
+</view>

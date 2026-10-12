@@ -1,0 +1,162 @@
+<!--
+  pages/tasks/tasks.wxml —— DDL / 子任务列表。
+
+  【结构】
+    顶部：三个筛选标签（进行中 / 全部 / 已完成）+ 一行统计
+    中间：任务卡片列表
+      左边  勾选框（catchtap，避免连带触发"进入编辑"）
+      中间  标题 / 类型 / 日期 / 时间或节次 / 优先级 / 预计耗时 / 重复
+            子任务多一行「↳ 属于：<父标题>」（点它跳父任务）
+      右边  删除按钮（catchtap，弹窗二次确认）
+    底部：「加载更多」或「已全部加载」
+
+  【字段来源】都用到的字段都在 tasks.js 的 data 里初始化过：
+    filters / taskFilter / filterText / visibleItems / hasMore / emptyText /
+    loading / errorText / busyId / totalCount / pendingCount / doneCount / todayCount
+    visibleItems[i] = { id, title, type, typeLabel, done, priority, priorityLabel,
+                        highPriority, dateText, isToday, whenText, location,
+                        estimateText, repeatText, parentId, parentTitle,
+                        showParent, childCount, subtaskOfOther }
+-->
+
+<view class="page">
+
+  <!-- 一、统计 + 筛选 -->
+  <view class="topbar">
+    <view class="stat-line">
+      <text class="stat-strong">进行中 {{pendingCount}}</text>
+      <text class="stat-sep">·</text>
+      <text class="stat-item">已完成 {{doneCount}}</text>
+      <text class="stat-sep">·</text>
+      <text class="stat-item">共 {{totalCount}}</text>
+      <text class="stat-sep">·</text>
+      <text class="stat-item">今天 {{todayCount}}</text>
+    </view>
+    <view class="filter-bar">
+      <view
+        class="filter-item {{taskFilter === item.key ? 'filter-on' : ''}}"
+        wx:for="{{filters}}"
+        wx:for-item="item"
+        wx:key="key"
+        data-key="{{item.key}}"
+        bindtap="onTapFilter"
+      >{{item.label}}</view>
+      <text class="filter-text">{{filterText}}</text>
+    </view>
+
+    <!-- AI 录入入口：整句自然语言录入（绝对路径 /pages/ai/ai） -->
+    <view class="ai-bar">
+      <view class="ai-btn" hover-class="ai-btn-hover" bindtap="onTapAiParse">
+        <text class="ai-btn-main">AI 录入</text>
+        <text class="ai-btn-sub">说一句话，自动拆成日程与截止</text>
+      </view>
+    </view>
+    <view class="ai-hint" wx:if="{{decomposeHint}}">{{decomposeHint}}</view>
+  </view>
+
+  <!-- 二、加载中 / 加载失败 -->
+  <view class="state-box" wx:if="{{loading}}">
+    <text class="state-text">正在加载任务…</text>
+  </view>
+  <view class="state-box" wx:elif="{{errorText}}">
+    <text class="state-text">{{errorText}}</text>
+    <text class="state-text">下拉可以重试</text>
+  </view>
+
+  <!-- 三、空态 -->
+  <view class="state-box" wx:elif="{{visibleItems.length === 0}}">
+    <text class="state-text">{{emptyText}}</text>
+    <view class="add-btn" hover-class="add-btn-hover" bindtap="onTapAdd">添加一条</view>
+  </view>
+
+  <!-- 四、列表 -->
+  <view class="list" wx:else>
+    <view
+      class="card {{item.done ? 'card-done' : ''}}"
+      wx:for="{{visibleItems}}"
+      wx:for-item="item"
+      wx:key="id"
+      data-id="{{item.id}}"
+      bindtap="onTapItem"
+      hover-class="card-hover"
+    >
+      <!-- 勾选框：catchtap 阻断冒泡，点它只完成，不进编辑页 -->
+      <view
+        class="check {{item.done ? 'check-on' : ''}}"
+        data-id="{{item.id}}"
+        catchtap="onToggleDone"
+      >
+        <text class="check-mark" wx:if="{{item.done}}">✓</text>
+      </view>
+
+      <view class="card-body">
+        <!-- 第一行：标题 + 优先级 -->
+        <view class="line-title">
+          <text class="c-title {{item.done ? 'c-title-done' : ''}}">{{item.title}}</text>
+          <text
+            class="priority {{item.highPriority ? 'priority-high' : ''}}"
+            wx:if="{{item.priority !== 'mid'}}"
+          >{{item.priorityLabel}}</text>
+        </view>
+
+        <!-- 第二行：类型 / 日期 / 时间或节次 -->
+        <view class="line-meta">
+          <text class="tag">{{item.typeLabel}}</text>
+          <text class="meta {{item.isToday ? 'meta-today' : ''}}">{{item.dateText}}</text>
+          <text class="meta" wx:if="{{item.whenText}}">{{item.whenText}}</text>
+        </view>
+
+        <!-- 第三行：预计耗时 / 地点 / 重复（有才显示） -->
+        <view class="line-extra" wx:if="{{item.estimateText || item.location || item.repeatText}}">
+          <text class="extra extra-est" wx:if="{{item.estimateText}}">{{item.estimateText}}</text>
+          <text class="extra" wx:if="{{item.location}}">{{item.location}}</text>
+          <text class="extra" wx:if="{{item.repeatText}}">{{item.repeatText}}</text>
+        </view>
+
+        <!-- 子任务：显示归属，点小字直接跳父任务 -->
+        <view class="line-parent" wx:if="{{item.showParent}}">
+          <text
+            class="parent-link"
+            data-parent-id="{{item.parentId}}"
+            catchtap="onTapParent"
+          >↳ 属于：{{item.parentTitle}}</text>
+        </view>
+      </view>
+
+      <!-- 删除 / AI 拆解：catchtap 阻断冒泡，点它们不会同时进编辑页 -->
+      <view class="card-actions">
+        <!-- 可拆解：真能点进去，走 /pages/ai/ai?mode=decompose&id=xxx -->
+        <view
+          class="ai-mini-btn"
+          wx:if="{{item.canDecompose}}"
+          hover-class="ai-mini-btn-hover"
+          data-id="{{item.id}}"
+          catchtap="onTapAiDecompose"
+        >拆解</view>
+        <!-- 不可拆解：说明原因并置灰（比"按钮直接消失"更容易理解） -->
+        <view
+          class="ai-mini-btn ai-mini-disabled"
+          wx:elif="{{item.decomposeBlockedText}}"
+          data-reason="{{item.decomposeBlockedText}}"
+          catchtap="onTapAiBlocked"
+        >拆解</view>
+
+        <view class="del-btn" data-id="{{item.id}}" catchtap="onDelete">删除</view>
+      </view>
+    </view>
+
+    <!-- 分页 -->
+    <view class="more-box" wx:if="{{hasMore}}">
+      <view class="more-btn" hover-class="more-btn-hover" bindtap="onLoadMore">加载更多</view>
+    </view>
+    <view class="more-box" wx:else>
+      <text class="more-end">已全部加载</text>
+    </view>
+  </view>
+
+  <!-- 五、底部新增（列表非空时才显示；空态里已经有一个按钮了） -->
+  <view class="footer" wx:if="{{!loading && !errorText && visibleItems.length > 0}}">
+    <view class="add-btn" hover-class="add-btn-hover" bindtap="onTapAdd">添加任务</view>
+  </view>
+
+</view>

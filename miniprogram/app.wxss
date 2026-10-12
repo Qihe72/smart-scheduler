@@ -1,0 +1,487 @@
+/**
+ * app.wxss —— 全局样式（简洁卡片风：主色 #4F7FFF，背景 #F5F7FA）
+ *
+ * 【关于页面清单的一句说明】
+ * 本版 app.json 注册了五个页面：
+ *   pages/week/week（课表）、pages/tasks/tasks（任务）、pages/edit/edit（新建/编辑）、
+ *   pages/me/me（我的）、pages/ai/ai（AI 录入 / 拆解）。
+ * 其中三个进了 tabBar：课表 / 任务 / 我的。
+ * **AI 页不在 tabBar 里** —— tabBar 的 list 必须与实际页面一致，而且每多一项就少一分
+ * 底部空间；AI 是"偶尔用一次"的功能，从「任务」页 wx.navigateTo 进去更合适。
+ * 另外：tabBar 项一律**不写 iconPath**（没有图片文件时写了会直接报错），
+ * 只给 text 是合法且够用的。
+ * 这一句只能写在这里，因为 JSON 不允许注释。
+ *
+ * 【注册页面的铁律】写进 app.json 的 pages 必须真的存在，否则小程序启动就报
+ * "page ... is not found" —— 先建文件，再注册。
+ *
+ * 【尺寸单位】小程序里用 rpx（750rpx = 屏幕宽），所以下面所有间距都按 rpx 写。
+ * 【命名约定】前缀区分用途：`.card`/`.row` 这类通用布局类全局共享；
+ * 页面私有样式（例如课表格子）请在页面自己的 wxss 里定义，不要往这里堆。
+ */
+
+/* ---------------------------------------------------------------------------
+ * 一、设计变量（小程序不支持 CSS 变量 everywhere，所以这里只作为口径写清楚）
+ *   主色        #4F7FFF   按钮、选中态、强调数字
+ *   主色浅      #EAF0FF   选中背景、标签底色
+ *   页面背景    #F5F7FA
+ *   卡片背景    #FFFFFF
+ *   正文文字    #1F2430
+ *   次要文字    #6B7280
+ *   更浅文字    #9AA3B2   占位、禁用
+ *   分隔线      #EEF1F5
+ *   危险色      #F26D6D   删除
+ * ------------------------------------------------------------------------- */
+
+/* ---------------------------------------------------------------------------
+ * 二、页面基础
+ * ------------------------------------------------------------------------- */
+page {
+  background-color: #F5F7FA;
+  color: #1F2430;
+  font-size: 28rpx;
+  line-height: 1.5;
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  /* 数字（时间、节次、统计）统一用等宽数字，纵向对齐更整齐 */
+  font-variant-numeric: tabular-nums;
+}
+
+/* 页面内容容器：所有页面在最外层套一个 .page */
+.page {
+  min-height: 100vh;
+  padding: 24rpx;
+  box-sizing: border-box;
+}
+
+/* ---------------------------------------------------------------------------
+ * 三、卡片与分组
+ * ------------------------------------------------------------------------- */
+.card {
+  background-color: #FFFFFF;
+  border-radius: 20rpx;
+  padding: 28rpx;
+  margin-bottom: 24rpx;
+  box-shadow: 0 2rpx 12rpx rgba(31, 36, 48, 0.05);
+}
+
+/* 一张卡里再分段（例如"今天"和"本周"），用一条浅线隔开 */
+.card-split {
+  border-top: 2rpx solid #EEF1F5;
+  margin-top: 24rpx;
+  padding-top: 24rpx;
+}
+
+/* 卡片小标题：左侧一道主色竖条 */
+.card-title {
+  display: flex;
+  align-items: center;
+  font-size: 30rpx;
+  font-weight: 600;
+  margin-bottom: 16rpx;
+}
+
+.card-title::before {
+  content: '';
+  width: 8rpx;
+  height: 30rpx;
+  border-radius: 4rpx;
+  background-color: #4F7FFF;
+  margin-right: 14rpx;
+}
+
+/* 没有标题时用这个（不带竖条） */
+.section-title {
+  font-size: 30rpx;
+  font-weight: 600;
+  margin: 8rpx 0 16rpx;
+}
+
+/* ---------------------------------------------------------------------------
+ * 四、行布局（列表项、表单行、统计行都用它）
+ * ------------------------------------------------------------------------- */
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* 两行文字的行：上面是标题、下面是说明 */
+.row-col {
+  display: flex;
+  flex-direction: column;
+}
+
+.row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22rpx 0;
+  border-bottom: 2rpx solid #EEF1F5;
+}
+
+/* 最后一行不要底线，卡片底部才干净 */
+.row-between:last-child {
+  border-bottom: none;
+}
+
+.flex-1 {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 左侧主色竖条：课表格子、任务条目用来说明"这是哪一类" */
+.bar {
+  width: 8rpx;
+  align-self: stretch;
+  border-radius: 4rpx;
+  background-color: #4F7FFF;
+  margin-right: 18rpx;
+}
+
+/* ---------------------------------------------------------------------------
+ * 五、文字
+ * ------------------------------------------------------------------------- */
+.title {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #1F2430;
+}
+
+.subtitle {
+  font-size: 26rpx;
+  color: #6B7280;
+}
+
+.muted {
+  color: #6B7280;
+  font-size: 24rpx;
+}
+
+.tiny {
+  font-size: 22rpx;
+  color: #9AA3B2;
+}
+
+/* 强调数字（统计里的 12 个待办） */
+.strong {
+  color: #4F7FFF;
+  font-weight: 600;
+}
+
+/* 已完成：划掉 + 变灰 */
+.done-text {
+  color: #9AA3B2;
+  text-decoration: line-through;
+}
+
+/* 超出一行就省略号（标题长了不能把行撑破） */
+.ellipsis {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 空列表提示：一句话居中 */
+.empty {
+  padding: 80rpx 0;
+  text-align: center;
+  color: #9AA3B2;
+  font-size: 26rpx;
+}
+
+/* ---------------------------------------------------------------------------
+ * 六、按钮
+ * ------------------------------------------------------------------------- */
+.btn-primary {
+  background-color: #4F7FFF;
+  color: #FFFFFF;
+  font-size: 30rpx;
+  font-weight: 500;
+  line-height: 88rpx;
+  height: 88rpx;
+  padding: 0 40rpx;
+  border-radius: 16rpx;
+  text-align: center;
+  border: none;
+}
+
+/* button 元素自带 after 边框，去掉才不会有"双层描边" */
+.btn-primary::after {
+  border: none;
+}
+
+.btn-primary.btn-block {
+  width: 100%;
+  display: block;
+}
+
+.btn-primary.btn-disabled,
+.btn-primary[disabled] {
+  background-color: #B9C8F5;
+  color: #FFFFFF;
+}
+
+.btn-ghost {
+  background-color: #FFFFFF;
+  color: #4F7FFF;
+  border: 2rpx solid #4F7FFF;
+  font-size: 28rpx;
+  line-height: 80rpx;
+  height: 80rpx;
+  padding: 0 32rpx;
+  border-radius: 16rpx;
+  text-align: center;
+}
+
+.btn-ghost::after {
+  border: none;
+}
+
+.btn-mini {
+  font-size: 24rpx;
+  line-height: 56rpx;
+  height: 56rpx;
+  padding: 0 24rpx;
+  border-radius: 12rpx;
+}
+
+.btn-danger {
+  color: #F26D6D;
+  border-color: #F26D6D;
+}
+
+/* 底部固定操作条（"新建任务"按钮就放这里） */
+.footer-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 16rpx 24rpx calc(16rpx + env(safe-area-inset-bottom));
+  background-color: #FFFFFF;
+  box-shadow: 0 -2rpx 12rpx rgba(31, 36, 48, 0.05);
+}
+
+/* 给固定操作条留出的空白，加在滚动内容最后 */
+.footer-hold {
+  height: 140rpx;
+}
+
+/* ---------------------------------------------------------------------------
+ * 七、标签 / 徽标
+ * ------------------------------------------------------------------------- */
+.tag {
+  display: inline-block;
+  font-size: 22rpx;
+  line-height: 36rpx;
+  padding: 0 14rpx;
+  border-radius: 8rpx;
+  background-color: #EAF0FF;
+  color: #4F7FFF;
+}
+
+.tag-gray {
+  background-color: #F2F4F7;
+  color: #6B7280;
+}
+
+.tag-high {
+  background-color: #FDECEC;
+  color: #F26D6D;
+}
+
+.tag-mid {
+  background-color: #FFF5E6;
+  color: #E8963C;
+}
+
+.tag-low {
+  background-color: #EAF7EF;
+  color: #2FA96B;
+}
+
+.tag-line {
+  margin-right: 12rpx;
+}
+
+/* ---------------------------------------------------------------------------
+ * 八、课表（周视图）通用网格
+ *    每节课一行 —— 第 7-9 节连堂就竖着占三行，一眼看得出是连堂。
+ * ------------------------------------------------------------------------- */
+.week-grid {
+  display: flex;
+  align-items: stretch;
+}
+
+/* 左侧节次栏（第1节 / 午休 / …） */
+.week-axis {
+  width: 148rpx;
+  flex-shrink: 0;
+}
+
+.week-axis-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 2rpx solid #EEF1F5;
+  padding: 8rpx 4rpx;
+  box-sizing: border-box;
+}
+
+.week-axis-label {
+  font-size: 24rpx;
+  color: #1F2430;
+}
+
+.week-axis-time {
+  font-size: 20rpx;
+  color: #9AA3B2;
+}
+
+/* 空档行（午休）用斜纹底，跟有课的格子区分开 */
+.week-axis-item.is-break {
+  background-color: #FAFBFC;
+}
+
+.week-axis-item.is-break .week-axis-label {
+  color: #9AA3B2;
+}
+
+/* 右侧 7 列（周一 ~ 周日） */
+.week-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.week-head {
+  display: flex;
+}
+
+.week-head-cell {
+  flex: 1;
+  text-align: center;
+  font-size: 24rpx;
+  color: #6B7280;
+  padding: 12rpx 0;
+}
+
+.week-head-cell.is-today {
+  color: #4F7FFF;
+  font-weight: 600;
+}
+
+.week-col {
+  flex: 1;
+  min-width: 0;
+  border-left: 2rpx solid #EEF1F5;
+  box-sizing: border-box;
+}
+
+.week-col.is-today {
+  background-color: #F7F9FF;
+}
+
+.week-cell {
+  border-bottom: 2rpx solid #EEF1F5;
+  padding: 6rpx;
+  box-sizing: border-box;
+}
+
+/* 课表块：主色浅底 + 左侧深色条 */
+.course-block {
+  background-color: #EAF0FF;
+  border-left: 8rpx solid #4F7FFF;
+  border-radius: 10rpx;
+  padding: 10rpx 12rpx;
+}
+
+.course-title {
+  font-size: 24rpx;
+  font-weight: 600;
+  color: #1F2430;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.course-meta {
+  font-size: 20rpx;
+  color: #6B7280;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------------------------------------------------------------------------
+ * 九、表单（新建 / 编辑页）
+ * ------------------------------------------------------------------------- */
+.form-item {
+  display: flex;
+  align-items: center;
+  padding: 24rpx 0;
+  border-bottom: 2rpx solid #EEF1F5;
+}
+
+.form-item:last-child {
+  border-bottom: none;
+}
+
+.form-label {
+  width: 160rpx;
+  flex-shrink: 0;
+  font-size: 28rpx;
+  color: #6B7280;
+}
+
+.form-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 28rpx;
+  color: #1F2430;
+}
+
+.form-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 28rpx;
+  color: #1F2430;
+}
+
+.form-placeholder {
+  color: #9AA3B2;
+}
+
+/* 分段选择（类型 / 优先级 / 单双周） */
+.segment {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.segment-item {
+  font-size: 26rpx;
+  line-height: 60rpx;
+  padding: 0 26rpx;
+  margin: 8rpx 16rpx 8rpx 0;
+  border-radius: 12rpx;
+  background-color: #F2F4F7;
+  color: #6B7280;
+}
+
+.segment-item.is-active {
+  background-color: #4F7FFF;
+  color: #FFFFFF;
+}
+
+/* ---------------------------------------------------------------------------
+ * 十、通用留白
+ * ------------------------------------------------------------------------- */
+.mt-8 { margin-top: 8rpx; }
+.mt-16 { margin-top: 16rpx; }
+.mt-24 { margin-top: 24rpx; }
+.mt-32 { margin-top: 32rpx; }
+.mb-16 { margin-bottom: 16rpx; }
+.mb-24 { margin-bottom: 24rpx; }
+.pd-24 { padding: 24rpx; }
+.text-center { text-align: center; }
+.text-right { text-align: right; }

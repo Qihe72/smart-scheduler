@@ -1,0 +1,28 @@
+{
+  "id": "/",
+  "name": "智能日程管家",
+  "short_name": "日程管家",
+  "description": "把课程表、作业 DDL 和待办收进一个页面：自然语言录入、本周空档、进度追踪。每人一个独立空间码，数据互不相通。",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#F5F7FA",
+  "theme_color": "#4F7FFF",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

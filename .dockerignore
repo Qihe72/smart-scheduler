@@ -1,0 +1,41 @@
+# ===========================================================================
+# 构建上下文排除清单：docker build 时这些文件不会被打包发给 docker daemon。
+#
+# 最要紧的两条是 data/ 与 .env —— 它们是本机私有数据：
+#   data/schedules.json  你的真实课表和日程（.gitignore 里也排除了）
+#   data/settings.json   学期起点、校准后的作息
+#   .env                 DEEPSEEK_API_KEY
+# 镜像里应该是「空数据」，真实数据靠 docker run -v 在运行时挂进来。
+# ===========================================================================
+
+# 本机私有数据与密钥
+data/
+.env
+.env.local
+.streamlit/secrets.toml
+
+# 个人课表原始文件
+*.ics
+课表*.csv
+
+# Python 缓存 / 虚拟环境
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# 仓库与文档（镜像运行不需要；README 可以在仓库里看）
+.git/
+.gitignore
+docs/
+*.md
+
+# 编辑器 / 系统垃圾
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.memsearch/

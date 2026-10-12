@@ -1,0 +1,47 @@
+{
+  "description": "智能日程管家 —— 微信小程序（云开发版）项目配置。appid 与云环境 ID 都要换成自己的。",
+  "appid": "wx0e4b0f36da29b1db",
+  "projectname": "smart-scheduler-miniprogram",
+  "compileType": "miniprogram",
+  "libVersion": "latest",
+  "cloudfunctionRoot": "cloudfunctions/",
+  "setting": {
+    "urlCheck": false,
+    "es6": true,
+    "enhance": true,
+    "postcss": true,
+    "minified": true,
+    "minifyWXSS": true,
+    "uglifyFileName": false,
+    "showShadowRootInWxmlPanel": true,
+    "babelSetting": {
+      "ignore": [],
+      "disablePlugins": [],
+      "outputPath": ""
+    }
+  },
+  "condition": {
+    "miniprogram": {
+      "list": [
+        {
+          "name": "课表（首页）",
+          "pathName": "pages/week/week",
+          "query": "",
+          "scene": null
+        },
+        {
+          "name": "任务列表",
+          "pathName": "pages/tasks/tasks",
+          "query": "",
+          "scene": null
+        },
+        {
+          "name": "新建任务",
+          "pathName": "pages/edit/edit",
+          "query": "",
+          "scene": null
+        }
+      ]
+    }
+  }
+}

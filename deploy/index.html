@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- viewport-fit=cover 让页面铺到刘海/圆角区域；不加的话 iPhone 上会留黑边 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+
+<!-- ===================================================================
+     为什么需要这个文件（别删）
+     Streamlit 不允许往 HTML 的 <head> 里注入内容，而手机「添加到主屏幕」
+     要求页面里有 <link rel="manifest">。所以 Caddy 在这里发一个静态启动页，
+     Streamlit 退到子路径 /app 上，下面用 iframe 把它整屏嵌进来。
+     =================================================================== -->
+
+<!-- 让浏览器知道这是个可安装的 Web 应用 -->
+<link rel="manifest" href="/manifest.webmanifest">
+
+<!-- 这三条 iOS Safari 专用：它不看 manifest，只看这几个 meta -->
+<meta name="theme-color" content="#4F7FFF">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="日程管家">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+
+<!-- 防止手机号被自动识别成电话号码链接（日程里常出现数字） -->
+<meta name="format-detection" content="telephone=no">
+
+<title>智能日程管家</title>
+
+<style>
+  /* 配色与 .streamlit/config.toml 的主题一致：主色 #4F7FFF、底色 #F5F7FA */
+  :root {
+    --brand: #4F7FFF;
+    --bg: #F5F7FA;
+    --text: #2C3E50;
+    --muted: #7A879C;
+  }
+  * { box-sizing: border-box; }
+
+  /* dvh 让高度随手机地址栏收缩，避免底部被切掉；老浏览器回退到 100% */
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+  }
+
+  /* 整屏的容器：iframe 铺满它 */
+  #stage {
+    position: fixed;
+    inset: 0;
+    height: 100dvh;
+  }
+
+  /* 注意：不要给 iframe 加 sandbox 属性。
+     Streamlit 依赖 localStorage / WebSocket / 脚本执行，
+     加了 sandbox 会导致白屏或「连接中断」。 */
+  #frame {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: var(--bg);
+  }
+
+  /* ---------------- 加载层 ---------------- */
+  /* 首次打开时 Streamlit 要下载几 MB 的 JS 并建立 WebSocket，
+     这段时间 iframe 里是白的 —— 用这层盖上，别让用户以为坏了。 */
+  #loading {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    background: var(--bg);
+    z-index: 10;
+    transition: opacity .28s ease;
+  }
+  #loading.hide {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid #D8E0F0;
+    border-top-color: var(--brand);
+    border-radius: 50%;
+    animation: spin .9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .title { font-size: 17px; font-weight: 600; }
+  .hint  { font-size: 13px; color: var(--muted); }
+  .tips  { font-size: 12px; color: var(--muted); max-width: 20em; line-height: 1.7; text-align: center; }
+
+  /* ---------------- 出错时的提示条 ---------------- */
+  #stuck {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: #FFF6E5;
+    border: 1px solid #F0D9A8;
+    color: #7A5B12;
+    font-size: 13px;
+    line-height: 1.6;
+    z-index: 20;
+    display: none;
+  }
+  #stuck.show { display: block; }
+  #stuck b { color: #5A420A; }
+</style>
+</head>
+<body>
+
+<!-- 加载层：iframe 里的应用一 ready 就淡出（见下面的 JS） -->
+<div id="loading">
+  <div class="spinner" aria-hidden="true"></div>
+  <div class="title">正在加载…（第一次会慢一点）</div>
+  <div class="hint">首次打开需要下载页面资源，之后会快很多</div>
+  <div class="tips">手机可以把本页「添加到主屏幕」，之后像 App 一样点开就用</div>
+</div>
+
+<div id="stage">
+  <!-- Streamlit 跑在子路径 /app 上（应用侧 --server.baseUrlPath=app） -->
+  <iframe
+    id="frame"
+    src="/app"
+    title="智能日程管家"
+    allow="clipboard-write; fullscreen"
+    referrerpolicy="same-origin"></iframe>
+</div>
+
+<div id="stuck">
+  <b>加载好像卡住了。</b>
+  先下拉刷新一次；还是不行的话，检查服务器 80/443 端口是否放行（反代要能升级
+  WebSocket），或者看看 <code>docker compose logs -f app</code>。
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var frame   = document.getElementById("frame");
+  var loading = document.getElementById("loading");
+  var stuck   = document.getElementById("stuck");
+  var revealed = false;
+
+  function reveal() {
+    if (revealed) return;
+    revealed = true;
+    loading.classList.add("hide");
+    // 动画结束后移出文档，别让它继续盖着 iframe 吃点击
+    setTimeout(function () {
+      if (loading && loading.parentNode) loading.parentNode.removeChild(loading);
+    }, 320);
+  }
+
+  // iframe 的 load 事件 = 启动页 + Streamlit 的 HTML 已经拿到。
+  // 此刻应用还在建 WebSocket，所以留一点点缓冲再撤加载层。
+  frame.addEventListener("load", function () {
+    setTimeout(reveal, 250);
+  });
+
+  // 兜底一：1.5 秒内 iframe 一点动静都没有（比如 /app 反代 502），
+  // 至少让用户看到界面，而不是一直盯着转圈。
+  setTimeout(reveal, 1500);
+
+  // 兜底二：25 秒还没加载完，给一句人话提示。
+  setTimeout(function () {
+    if (!revealed) return;
+    stuck.classList.add("show");
+  }, 25000);
+
+  // ---------------- 注册 Service Worker ----------------
+  // sw.js 只缓存这一个静态壳（启动页 / manifest / 图标），
+  // 绝不缓存 /app —— 应用数据在服务器上、且按空间码隔离，
+  // 缓存它就会看到过期日程。细节见 sw.js 里的注释。
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("/sw.js").catch(function (err) {
+        // 注册失败不影响使用（http 下浏览器本来就不给注册），只记日志
+        console.warn("[启动页] Service Worker 注册失败：", err);
+      });
+    });
+  }
+
+  // ---------------- 安装提示 ----------------
+  // 阻止浏览器自己的迷你弹窗，改由页面择机提示（这里只是先拦下来，
+  // 避免在小屏手机上突然从底部弹一条挡住界面）。
+  var deferredPrompt = null;
+  window.addEventListener("beforeinstallprompt", function (e) {
+    e.preventDefault();
+    deferredPrompt = e;
+    console.log("[启动页] 可以安装到桌面；手动安装：浏览器菜单 → 添加到主屏幕 / 安装应用");
+  });
+  window.addEventListener("appinstalled", function () {
+    deferredPrompt = null;
+    console.log("[启动页] 已安装到桌面");
+  });
+})();
+</script>
+</body>
+</html>

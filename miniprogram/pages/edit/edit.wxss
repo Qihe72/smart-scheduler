@@ -1,0 +1,199 @@
+/* pages/edit/edit.wxss —— 添加 / 编辑表单样式（无第三方 UI 库，全部手写） */
+
+page {
+  background: #f2f4f8;
+  font-size: 26rpx;
+  color: #1f2430;
+}
+
+.page {
+  min-height: 100vh;
+  padding: 20rpx 20rpx 60rpx;
+  box-sizing: border-box;
+}
+
+/* 读取中 / 读取失败 */
+.state-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 120rpx 32rpx;
+}
+
+.state-text {
+  font-size: 26rpx;
+  color: #8a90a2;
+  text-align: center;
+}
+
+/* --------------------------------------------------------------------------
+   卡片与字段行
+   -------------------------------------------------------------------------- */
+.card {
+  padding: 4rpx 20rpx;
+  margin-bottom: 20rpx;
+  background: #ffffff;
+  border-radius: 14rpx;
+  box-shadow: 0 2rpx 8rpx rgba(31, 36, 48, 0.04);
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  min-height: 92rpx;
+  padding: 16rpx 0;
+  border-bottom: 1rpx solid #f0f2f7;
+}
+
+.field:last-child {
+  border-bottom: none;
+}
+
+/* 标签 + 输入框上下排（标题、节次、地点这类长输入） */
+.field-col {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.label {
+  flex: none;
+  width: 172rpx;
+  font-size: 26rpx;
+  color: #4a5163;
+}
+
+.field-col .label {
+  width: auto;
+  margin-bottom: 12rpx;
+}
+
+.control {
+  flex: 1;
+  min-width: 0;
+}
+
+.row-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.value {
+  flex: 1;
+  min-width: 0;
+  font-size: 26rpx;
+  color: #1f2430;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 「未填」用灰字，一眼能看出"这里真的没值" */
+.value-empty {
+  color: #a8aebd;
+}
+
+.picker-view {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 56rpx;
+  font-size: 26rpx;
+  color: #2f5bd7;
+}
+
+.input {
+  width: 100%;
+  min-height: 68rpx;
+  padding: 8rpx 16rpx;
+  font-size: 27rpx;
+  color: #1f2430;
+  background: #f6f7fb;
+  border-radius: 10rpx;
+  box-sizing: border-box;
+}
+
+.input-mini {
+  flex: none;
+  width: 140rpx;
+  min-height: 56rpx;
+  margin-right: 12rpx;
+  padding: 4rpx 12rpx;
+  font-size: 25rpx;
+}
+
+/* 小按钮：选择 / 改 / 清除 / 自己填 */
+.mini-btn {
+  flex: none;
+  margin-left: 12rpx;
+  padding: 8rpx 20rpx;
+  font-size: 24rpx;
+  color: #4a5163;
+  background: #f2f4f8;
+  border-radius: 8rpx;
+}
+
+.mini-btn-main {
+  color: #2f5bd7;
+  background: #eef2fe;
+}
+
+/* 说明小字 */
+.hint-line {
+  padding: 0 0 16rpx;
+  font-size: 22rpx;
+  color: #8a90a2;
+  line-height: 1.5;
+}
+
+.field + .hint-line {
+  margin-top: -8rpx;
+}
+
+/* --------------------------------------------------------------------------
+   底部按钮
+   -------------------------------------------------------------------------- */
+.actions {
+  display: flex;
+  align-items: center;
+  margin-top: 28rpx;
+}
+
+.submit-btn {
+  flex: 1;
+  padding: 22rpx 0;
+  font-size: 30rpx;
+  text-align: center;
+  color: #ffffff;
+  background: #2f5bd7;
+  border-radius: 44rpx;
+}
+
+.submit-btn-hover {
+  background: #2449b3;
+}
+
+.submit-btn-disabled {
+  background: #a9b8e6;
+}
+
+.delete-btn {
+  flex: none;
+  margin-left: 20rpx;
+  padding: 22rpx 40rpx;
+  font-size: 28rpx;
+  color: #c2402a;
+  background: #fff1ef;
+  border-radius: 44rpx;
+}
+
+.delete-btn-hover {
+  background: #ffe1dc;
+}
+
+.tip-line {
+  margin-top: 18rpx;
+  font-size: 22rpx;
+  color: #a8aebd;
+  text-align: center;
+}

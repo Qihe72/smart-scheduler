@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "把 PWABuilder 给你的 package_name 填这里，例如 com.qihe.smartscheduler",
+      "sha256_cert_fingerprints": [
+        "把 PWABuilder 给你的 SHA-256 指纹填这里，例如 AB:CD:EF:01:23:...（去掉空格，用冒号分隔）"
+      ]
+    }
+  }
+]
