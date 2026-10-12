@@ -107,6 +107,43 @@ function aiConfigReady() {
     && typeof api.aiConfigClear === 'function');
 }
 
+// ---------------------------------------------------------------------------
+// 导入课表：替换 / 追加
+// ---------------------------------------------------------------------------
+/**
+ * 什么是"课表类任务"（替换模式下**只**清这一类）。
+ *
+ * 判据：`repeat === 'weekly'` **且** 有 `periods` —— 这正是 .ics 导入出来的课程形态
+ * （每周重复 + 明确节次）。用户手工加的日程 / 截止 / 子任务即便设了每周重复，
+ * 也不会写 periods，所以不会被误删。
+ *
+ * 【这是硬红线】用户要的是"新导入课表替换之前课表"，但替换绝不能把
+ * 他手写的日程一起清掉 —— 所以判据必须**窄**：宁可留下几门没被认出来的旧课，
+ * 也不能删掉一条手工任务。
+ */
+function isCourseTask(task) {
+  if (!task || typeof task !== 'object') return false;
+  if (String(task.repeat || '') !== 'weekly') return false;
+  return !!String(task.periods || '').trim();
+}
+
+/** 统计"会被替换掉的课表类任务" / "不受影响的手工任务" */
+function splitCoursesAndManual(tasks) {
+  const list = Array.isArray(tasks) ? tasks : [];
+  let courseCount = 0;
+  let manualCount = 0;
+  list.forEach((task) => {
+    if (isCourseTask(task)) courseCount += 1;
+    else manualCount += 1;
+  });
+  return { courseCount, manualCount };
+}
+
+/** 云函数侧是否已提供 import_replace（没就绪时"替换"选项禁用，不假装能用） */
+function importReplaceReady() {
+  return !!(api && typeof api.importReplace === 'function');
+}
+
 Page({
   data: {
     // --- 加载 / 错误 ---
@@ -148,6 +185,16 @@ Page({
     // --- 四、导入课表 ---
     icsAvailable: true,         // 解析器是否可用
     icsUnavailableText: '',
+    importMode: 'replace',      // 'replace' = 替换已有课表（默认）| 'append' = 追加
+    importModes: [
+      { value: 'replace', label: '替换已有课表' },
+      { value: 'append', label: '追加到现有任务' },
+    ],
+    importReplaceReady: true,   // 云函数 import_replace 是否就绪
+    importReplaceHint: '',      // 未就绪时的说明
+    courseCount: 0,             // 当前课表类任务数（替换会删这么多）
+    manualCount: 0,             // 手工任务数（替换不会碰）
+    replaceSummary: '',         // 「替换会删除 N 门课程；你手工添加的 M 条不受影响」
     importing: false,           // 正在读文件 / 解析
     submitting: false,          // 正在入库
     pickedFileName: '',
@@ -178,12 +225,19 @@ Page({
     // AI 设置依赖 utils/api.js 上的三个封装（另一位同学正在加）。没就绪就把这一块
     // 明确置为"暂不可用"，绝不让 aiConfigGet is not a function 把整页带崩。
     const aiReady = aiConfigReady();
+    // 「替换」依赖云函数的 import_replace（另一位同学在做）。没就绪就把这个选项
+    // 明确标出来并禁用，绝不让用户点了确认才发现删不掉。
+    const replaceReady = importReplaceReady();
     this.setData({
       icsAvailable: ready,
       icsUnavailableText: ready
         ? ''
         : `课表解析模块暂不可用，导入功能已停用（${icsLoadError || 'utils/ics.js 尚未就绪'}）。`
           + '其余功能不受影响；解析模块就绪后本页会自动恢复导入。',
+      importReplaceReady: replaceReady,
+      importReplaceHint: replaceReady
+        ? ''
+        : '「替换已有课表」需要云函数的 import_replace（尚未就绪），当前只能追加。',
       aiAvailable: aiReady,
       aiUnavailableText: aiReady
         ? ''
@@ -220,6 +274,9 @@ Page({
     // AI 配置独立读：它失败不该让"学期设置 / 作息表"跟着变成错误态，
     // 反过来也一样。所以两条链路各自处理自己的错误（见 loadAiConfig）。
     this.loadAiConfig();
+    // 任务列表也顺手拉一次：用来算"替换会删掉几门课、不碰几条手工任务"，
+    // 好让用户在点确认**之前**就看到数字。失败不影响本页（下面各自兜底）。
+    this.refreshImportCounts();
     return api.getSettings().then((result) => {
       // api.js 失败时 resolve {ok:false,error}（不 reject），必须显式判 ok，
       // 否则会把"没读到设置"显示成"还没设置过"，把人误导到错误方向。
@@ -528,6 +585,57 @@ Page({
   // 四、导入课表（.ics）
   // =========================================================================
 
+  /**
+   * 拉一次任务列表，算出"替换会删几门课 / 不碰几条手工任务"。
+   *
+   * 失败**不报错**：这只是给确认框用的一组参考数字。读不到就不显示数字，
+   * 但绝不能因此拦住导入（那才是本末倒置）。
+   * @returns {Promise<void>}
+   */
+  refreshImportCounts() {
+    return api.listTasks().then((result) => {
+      if (result && result.ok === false) throw new Error(describeError(result));
+      this.applyImportCounts(extractTasks(result));
+    }).catch((err) => {
+      this.tasksForCounts = null;
+      console.warn('[me] 读取任务用于统计替换条数失败（不影响导入）：', describeError(err));
+    });
+  },
+
+  /** 把统计结果写进 data（也用于"拉不到"时的兜底文案） */
+  applyImportCounts(tasks) {
+    if (!tasks) {
+      this.setData({
+        courseCount: 0,
+        manualCount: 0,
+        replaceSummary: '替换会先清空已有课表（只清课程，不动你手工添加的任务）。',
+      });
+      return;
+    }
+    this.tasksForCounts = tasks;
+    const split = splitCoursesAndManual(tasks);
+    this.setData({
+      courseCount: split.courseCount,
+      manualCount: split.manualCount,
+      replaceSummary: split.courseCount
+        ? `替换会先删除现有 ${split.courseCount} 门课程；你手工添加的 ${split.manualCount} 条任务不受影响。`
+        : `当前没有可替换的课程；你手工添加的 ${split.manualCount} 条任务不受影响。`,
+    });
+  },
+
+  /** 切换导入方式（替换 / 追加），默认是替换 */
+  onImportModeChange(event) {
+    const mode = str(event && event.currentTarget && event.currentTarget.dataset
+      ? event.currentTarget.dataset.mode
+      : '');
+    if (mode !== 'replace' && mode !== 'append') return;
+    if (mode === 'replace' && !this.data.importReplaceReady) {
+      wx.showToast({ title: '替换功能尚未就绪，请先用追加', icon: 'none' });
+      return;
+    }
+    this.setData({ importMode: mode, importResultText: '' });
+  },
+
   /** 从聊天记录里挑一个 .ics 文件 */
   onPickIcs() {
     if (!icsReady()) {
@@ -628,11 +736,96 @@ Page({
     }
   },
 
-  /** 确认入库（bulk_add） */
+  /**
+   * 确认导入。
+   *
+   * 两种模式：
+   *   * 替换（默认）：先弹二次确认，**文案里必须写清会删几门课、不会碰什么**，
+   *     确认后调 import_replace（scope='courses'），由云函数保证"删+插"是一次事务；
+   *   * 追加：沿用原来的 bulk_add，直接入库。
+   */
   onConfirmImport() {
     const tasks = this.pendingTasks || [];
     if (!tasks.length || this.data.submitting) return;
 
+    if (this.data.importMode !== 'replace') {
+      this.doAppend(tasks);
+      return;
+    }
+    if (!this.data.importReplaceReady) {
+      wx.showToast({ title: '替换功能尚未就绪，请改用「追加」', icon: 'none' });
+      return;
+    }
+
+    // 确认前把数字摆出来：会删多少、导入多少、不碰多少。
+    // 这些数字来自导入前的快照（loadAll / 选文件时拉的），用户点确认前就能看到。
+    const willRemove = this.data.courseCount;
+    const willInsert = tasks.length;
+    const keepManual = this.data.manualCount;
+    const content = `将删除现有 ${willRemove} 门课程，再导入 ${willInsert} 门；`
+      + `你手动添加的 ${keepManual} 条日程与截止不受影响。`;
+
+    wx.showModal({
+      title: '替换已有课表？',
+      content,
+      confirmText: '替换',
+      confirmColor: '#e0553f',
+      success: (res) => {
+        if (!res || !res.confirm) return;
+        this.doReplace(tasks);
+      },
+    });
+  },
+
+  /**
+   * 替换导入：调云函数的 import_replace（scope 固定 'courses' = 只清课表类任务）。
+   *
+   * 【为什么不能前端先删再插】那样"删完、插失败"会把用户课表清空 ——
+   * 所以整件事必须由云函数一次完成（删与插同生共死），前端只发一次请求。
+   */
+  doReplace(tasks) {
+    // 再挡一道：调用方（onConfirmImport）已经检查过，但这里是真正发请求的地方。
+    // 没有这道守卫，api.importReplace 不存在时会抛 TypeError（红屏式报错），
+    // 那是最糟的失败方式 —— 用户只该看到一句人话。
+    if (!importReplaceReady()) {
+      wx.showToast({ title: '替换功能尚未就绪，请改用「追加」', icon: 'none' });
+      return;
+    }
+    this.setData({ submitting: true });
+    api.importReplace(tasks).then((result) => {
+      if (result && result.ok === false) throw new Error(describeError(result));
+      // 平铺形状：{ ok, removed, inserted, skipped, errors }（与本文件 ai_config 的取值口一致）
+      const data = (result && result.data) || result || {};
+      const removed = Number(data.removed) || 0;
+      const inserted = Number(data.inserted) || 0;
+      const skipped = Number(data.skipped) || 0;
+      const errors = Array.isArray(data.errors) ? data.errors : [];
+
+      const parts = [`已替换：删除 ${removed} 门、导入 ${inserted} 门`];
+      if (skipped) parts.push(`跳过 ${skipped} 条`);
+      const text = parts.join('、');
+
+      this.pendingTasks = [];
+      this.setData({
+        submitting: false,
+        importResultText: text,
+        warnings: errors.length ? errors.slice(0, 5) : this.data.warnings,
+        previewItems: [],
+        previewMore: 0,
+        taskCount: 0,
+        parsedCount: 0,
+      });
+      wx.showToast({ title: text, icon: inserted ? 'success' : 'none' });
+      // 课表变了，重新统计一次"替换会删几门课"
+      this.refreshImportCounts();
+    }).catch((err) => {
+      this.setData({ submitting: false });
+      wx.showToast({ title: `替换失败：${describeError(err)}`, icon: 'none' });
+    });
+  },
+
+  /** 追加导入（原来的行为，bulk_add） */
+  doAppend(tasks) {
     this.setData({ submitting: true });
     api.bulkAdd(tasks).then((result) => {
       if (result && result.ok === false) throw new Error(describeError(result));
@@ -658,6 +851,7 @@ Page({
         parsedCount: 0,
       });
       wx.showToast({ title: text, icon: inserted ? 'success' : 'none' });
+      this.refreshImportCounts();
     }).catch((err) => {
       this.setData({ submitting: false });
       wx.showToast({ title: `入库失败：${describeError(err)}`, icon: 'none' });

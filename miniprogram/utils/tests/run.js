@@ -364,6 +364,11 @@ chain = chain.then(function () {
   var weekFree = loadTest('week_free.test.js');
   return waitFor(weekFree);
 }).then(function () {
+  // 我的页：导入课表的"替换 / 追加"（装全局桩，所以放在这条串行链里）。
+  // 它钉住的红线：替换时**只清课表类任务**，用户手工加的日程一条都不能删。
+  var meImport = loadTest('me_import.test.js');
+  return waitFor(meImport);
+}).then(function () {
   // 别人的文件（ICS 解析）如果存在就一起跑；不存在就明确说"未包含"，不算失败。
   // 这样"文件还没建好"和"文件坏了"是两件能分清的事。
   var ics = loadTest('ics.test.js');
@@ -376,5 +381,5 @@ chain = chain.then(function () {
 chain.then(function () {
   console.log('\n已加载的测试文件：' + loaded.join(', '));
   if (skipped.length) console.log('未包含（文件不存在）：' + skipped.join(', '));
-  H.report('periods + planner + tasks + AI 契约 + AI 页入口 + 课表页空闲统计');
+  H.report('periods + planner + tasks + AI 契约 + AI 页入口 + 课表页空闲统计 + 我的页导入');
 });

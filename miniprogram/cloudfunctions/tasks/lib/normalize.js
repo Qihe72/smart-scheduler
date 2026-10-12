@@ -882,6 +882,60 @@ function normalizeSettings(raw, options) {
   return { settings, errors };
 }
 
+// ---------------------------------------------------------------------------
+// 课表类任务 / 去重键
+// ---------------------------------------------------------------------------
+
+/**
+ * 判断一条任务是不是「**课表类任务**」（`.ics` 导入产生的那种）。
+ *
+ * 【判据：`repeat === 'weekly'` **且** `periods` 非空】
+ *
+ * 为什么是这两个条件、以及它的已知边界（**文档里必须照实写，不能含糊**）：
+ *   * `.ics` 导入出来的课一定是 `repeat:'weekly'`（RRULE FREQ=WEEKLY），
+ *     并且会带节次 `periods`（如 `'3-4'`，来自 DESCRIPTION）。
+ *   * 用户**手工**添加的日程 / DDL / 子任务默认是 `repeat:'none'` 或 `periods:''`，
+ *     因此不会被误删 —— 这是 `import_replace` 敢按这个判据删数据的前提。
+ *   * ⚠️ 已知边界一：用户**手工**建的"每周重复 + 填了节次"的课，长得和课表一样，
+ *     会被一并替换掉。这是接受的代价（见 docs/数据库与索引.md）。
+ *   * ⚠️ 已知边界二：`.ics` 里**没写节次**的 weekly 课（`periods === ''`）**不算**课表类，
+ *     因此不会被 `import_replace` 删掉 —— 宁可少删（用户手工删一条），
+ *     也不能因为"猜"而多删（那会悄悄吞掉用户的数据）。
+ *     想清理这种残留，只能手工删或用 `remove`。
+ *
+ * @param {object} task 任务
+ * @returns {boolean}
+ */
+function isCourseTask(task) {
+  if (!isPlainObject(task)) return false;
+  return toStr(task.repeat) === 'weekly' && toStr(task.periods) !== '';
+}
+
+/**
+ * 计算任务的「去重键」：**标题 + 日期 + 开始时间**。
+ *
+ * 【为什么用这三个字段】
+ *   * 它们一起构成"用户眼里的同一条日程"：同一件事、同一天、同一时刻。
+ *     重复导入课表时，这三样必然完全相同，所以能稳定认出重复。
+ *   * 不把 `type` 放进去：同样一件事换个类型仍是同一条（而且类型容错后会归一）。
+ *   * 不把 `end_time` / `location` / `estimate_min` 放进去：这些是"细节"，
+ *     用户改了结束时间不该算成新的一条（否则去重会失效，又翻倍）。
+ *   * 不把 `repeat` / `week_*` 放进去：同一门课改周次仍是同一门课。
+ *   * **`start_time` 参与**：同一天同名但上午一场、下午一场是两件真事，不能误杀。
+ *
+ * 返回空串表示"这条没有可比性"（缺标题，调用方通常已经先拦掉了）。
+ *
+ * @param {object} task 任务（**应该先归一化**，否则 `9:5` 与 `09:05` 会被当成两条）
+ * @returns {string} 形如 `开会\u0000 2026-10-12\u000009:00`
+ */
+function taskDedupeKey(task) {
+  if (!isPlainObject(task)) return '';
+  const title = toStr(task.title);
+  if (!title) return '';
+  // 用 \u0000 分隔：标题里不可能出现它，避免"开会 2026"这种拼接歧义
+  return [title, toStr(task.date), toStr(task.start_time)].join('\u0000');
+}
+
 /** 读取设置并补默认值（settings 集合里没有记录时也能用） */
 function withSettingsDefaults(raw) {
   const source = isPlainObject(raw) ? raw : {};
@@ -946,6 +1000,9 @@ module.exports = {
   // 删除 / 分页
   collectRemoveIds,
   chunk,
+  // 课表类任务 / 去重
+  isCourseTask,
+  taskDedupeKey,
   // 统计
   lastOccurrenceDate,
   isTaskFinished,

@@ -207,6 +207,36 @@ function bulkAdd(list) {
 }
 
 /**
+ * **替换式**导入：先删掉旧的课表类任务，再把新的插进去（云函数 tasks 的 import_replace）。
+ *
+ * ===========================================================================
+ * 【⚠️ 这个调用会删数据】不是"追加"，是"替换"
+ * ===========================================================================
+ *   它只删「**每周重复 + 有节次**」的课表类任务（云函数侧的 scope='courses' 红线），
+ *   一次性日程、DDL、子任务都**不受影响**。用户重新导一份正确课表时用它；
+ *   只想补几门课的话用 bulkAdd()，别用这个。
+ *
+ * 【scope 为什么写死】它是"会删数据"的开关，暴露得越少越好：这里固定传 'courses'，
+ *   不做成参数（云函数也只认这一个值，且是精确匹配 —— 'COURSES' / 'courses ' 都会被拒）。
+ *
+ * 【失败时可能已经删了】云函数会返回 partial:true 表示"旧的可能删掉了、但新的没插全"
+ *   （实现上是靠"删除条数是否等于预期"来判断的）。**页面必须把 partial 如实告诉用户**，
+ *   不能让用户以为"失败了就当没发生过"——那份课表此时可能已经被删掉一部分了。
+ *
+ * @param {Array<Object>} list 新的课表类任务数组（与 bulkAdd 同一套字段）
+ * @returns {Promise<{ok, data, error}>} 成功时 data 是**平铺**的这些字段：
+ *          removed    删掉了几条旧课表
+ *          inserted   插入了几条
+ *          skipped    因为不合法被跳过的条数
+ *          duplicates 判定为重复、没重复插入的条数
+ *          errors     被跳过/失败的具体原因（数组）
+ *          partial    true = 删成功但插不全，**需要如实告知用户**
+ */
+function importReplace(list) {
+  return call('import_replace', { tasks: Array.isArray(list) ? list : [], scope: 'courses' });
+}
+
+/**
  * 修改一条任务（部分字段）。
  *
  * @param {string} id 任务 _id
@@ -459,6 +489,7 @@ module.exports = {
   listTasks: listTasks,
   addTask: addTask,
   bulkAdd: bulkAdd,
+  importReplace: importReplace,
   updateTask: updateTask,
   removeTask: removeTask,
   stats: stats,

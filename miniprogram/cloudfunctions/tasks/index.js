@@ -52,6 +52,15 @@ const MAX_BULK_INPUT = 200;
 /** 一次请求最多处理多少个待删 id（自己 + 子任务） */
 const MAX_REMOVE_IDS = 200;
 
+/**
+ * `import_replace` 允许的 scope 白名单。
+ *
+ * 【为什么只给一个值、且不给"全部"】`all` 这种口子一旦存在，前端一个手滑就能清空
+ * 用户全部数据（而用户还会以为自己在"导课表"）。所以只认 `'courses'`，
+ * 其它值一律拒绝并说明 —— 想清空全部请让用户自己一条条删。
+ */
+const SCOPE_COURSES = ['courses'];
+
 /** 解析入参时忽略的身份类字段（列出来是为了"显式忽略"，不是要用它们） */
 const IDENTITY_KEYS = ['openid', '_openid', 'OPENID', 'user', 'user_id', 'unionid', 'uid'];
 
@@ -203,42 +212,211 @@ async function actionAdd(db, openid, payload) {
   return ok({ id, task: Object.assign({ _id: id }, doc) });
 }
 
-/** bulk_add：批量新增（一次最多 20 条，自动分批） */
-async function actionBulkAdd(db, openid, payload) {
-  const input = Array.isArray(payload.tasks) ? payload.tasks : [];
-  if (!input.length) return fail('tasks 不能为空');
-  if (input.length > MAX_BULK_INPUT) return fail(`一次最多导入 ${MAX_BULK_INPUT} 条任务`);
-
-  const now = N.nowIso();
-  const ready = [];
+/**
+ * 把一批任务写进库（分 20 条一批串行提交）。
+ *
+ * 【为什么内部吞掉单批失败而不是往外抛】调用方需要"如实报告插了几条"，
+ * 而不是收到一个笼统的异常 —— `import_replace` 靠这个数字返回 `partial`。
+ * 抛出去的话整个接口会变成 `{ok:false,'服务异常'}`，前端就没法告诉用户
+ * "删了 N 条、只补回 M 条"，反而更容易让人以为数据还在。
+ *
+ * @returns {Promise<{ids: string[], failed: number, errors: string[]}>}
+ */
+async function insertTasks(db, openid, docs) {
+  const ids = [];
   const errors = [];
+  let failed = 0;
+  const batches = N.chunk(docs, N.BULK_CHUNK);
+  for (let i = 0; i < batches.length; i += 1) {
+    const batch = batches[i];
+    // 云数据库没有"批量插入"接口，只能逐条 add；串行分批避免触发并发写限流。
+    // 用 allSettled：一批里有几条失败时，成功的那几条照样要记账。
+    // eslint-disable-next-line no-await-in-loop
+    const results = await Promise.allSettled(
+      batch.map((doc) => db.collection(COLLECTION_TASKS).add({ data: doc }))
+    );
+    results.forEach((item) => {
+      if (item.status === 'fulfilled') {
+        ids.push((item.value && (item.value._id || item.value.id)) || '');
+      } else {
+        failed += 1;
+        errors.push(`第 ${i + 1} 批有一条写入失败：${(item.reason && item.reason.message) || item.reason}`);
+      }
+    });
+  }
+  return { ids, failed, errors };
+}
+
+/**
+ * 归一化一批待入库的任务，并做**去重**。
+ *
+ * 去重键 = 标题 + 日期 + 开始时间（见 normalize.js 的 taskDedupeKey 说明）。
+ * 重复的来源有两种，都要挡：
+ *   1. **同一批里**自己重复（用户一次框选了两遍、或 .ics 里有重复条目）；
+ *   2. **与库里已有任务**重复（用户把同一份课表又导了一遍 → 以前就是这样翻倍的）。
+ *
+ * @param {Array} input 原始任务数组
+ * @param {string} openid 归属
+ * @param {Set<string>} seedKeys 库里已有任务的去重键（调用方算好传入）
+ * @returns {{docs: Array, errors: string[], duplicates: number}}
+ */
+function prepareBatch(input, openid, seedKeys) {
+  const now = N.nowIso();
+  const docs = [];
+  const errors = [];
+  const existing = seedKeys instanceof Set ? seedKeys : new Set();
+  // 同一批内部的去重：边收集边把键塞进去，后面的重复就进不来了
+  const seen = new Set();
+  let duplicates = 0;
+
   input.forEach((raw, index) => {
     const normalized = N.normalizeTask(raw, { today: N.todayStr() });
-    // 同 actionAdd：有校验错误的一律跳过（单条不合法不影响整批）
+    // 有校验错误的一律跳过（单条不合法不影响整批）
     if (!normalized.task || normalized.errors.length) {
       errors.push(`第 ${index + 1} 条：${normalized.errors.join('；') || '参数错误'}`);
       return;
     }
-    ready.push(Object.assign({}, normalized.task, {
+    const key = N.taskDedupeKey(normalized.task);
+    if (key && (existing.has(key) || seen.has(key))) {
+      duplicates += 1;
+      return; // 重复：跳过，不计入 errors（这不是"错"，是预期内的幂等行为）
+    }
+    if (key) seen.add(key);
+    docs.push(Object.assign({}, normalized.task, {
       _openid: openid,
       created_at: now,
       updated_at: now,
     }));
   });
 
-  const ids = [];
-  const batches = N.chunk(ready, N.BULK_CHUNK);
+  return { docs, errors, duplicates };
+}
+
+/** 算出库里现有任务的去重键集合（供 prepareBatch 挡"与已有重复"） */
+function collectDedupeKeys(tasks) {
+  const keys = new Set();
+  (Array.isArray(tasks) ? tasks : []).forEach((task) => {
+    const key = N.taskDedupeKey(task);
+    if (key) keys.add(key);
+  });
+  return keys;
+}
+
+/**
+ * bulk_add：批量新增（一次最多 20 条一批，自动分批；**自动去重**）。
+ *
+ * 去重语义：标题 + 日期 + 开始时间完全相同 → 视为重复，**跳过并计入 skipped**（不报错）。
+ * 这样即便调用方用的是"追加"语义，重复导入同一份课表也不会翻倍。
+ *
+ * @returns {Promise<object>} {ok, ids, inserted, skipped, duplicates, errors}
+ */
+async function actionBulkAdd(db, openid, payload) {
+  const input = Array.isArray(payload.tasks) ? payload.tasks : [];
+  if (!input.length) return fail('tasks 不能为空');
+  if (input.length > MAX_BULK_INPUT) return fail(`一次最多导入 ${MAX_BULK_INPUT} 条任务`);
+
+  const existing = collectDedupeKeys(await fetchMyTasks(db, openid));
+  const prepared = prepareBatch(input, openid, existing);
+  const written = await insertTasks(db, openid, prepared.docs);
+
+  return ok({
+    ids: written.ids,
+    inserted: written.ids.length,
+    // skipped 保持原来的语义：没写进库的条数（不合法 + 重复 + 写失败的），前端已有的用法不受影响
+    skipped: prepared.errors.length + prepared.duplicates + written.failed,
+    duplicates: prepared.duplicates,
+    errors: written.errors.concat(prepared.errors),
+  });
+}
+
+/**
+ * import_replace：**替换**导入 —— 先删掉旧的课表类任务，再插入新的。
+ *
+ * ===========================================================================
+ * 与 bulk_add 的区别（前端要按这个选）
+ * ===========================================================================
+ *   * `bulk_add`     = 追加 + 去重（重复的跳过）。安全，但旧数据会留着。
+ *   * `import_replace` = 先删旧课表再导入。**用户重新导一份正确课表**时用它。
+ *
+ * ===========================================================================
+ * 【红线】scope='courses' 时只能删「课表类任务」
+ * ===========================================================================
+ * 判据：`repeat === 'weekly'` **且** `periods` 非空（见 normalize.js 的 isCourseTask）。
+ * 用户手工加的日程 / DDL / 子任务（`repeat='none'` 或没节次）**一条都不会被删**。
+ * 已接受的边界（文档里照实写了）：
+ *   * 手工建的"每周重复 + 填了节次"的课会被一起替换（它确实长得跟课表一样）；
+ *   * `.ics` 里没写节次的 weekly 课不算课表类 → 不会被删（宁可少删，不可误删）。
+ *
+ * 【原子性】先把要删的 id 与要插的文档都算出来，再执行。
+ * 删成功而插失败时，**如实返回 partial**（removed 与 inserted 都是真实发生的数字），
+ * 让前端能告诉用户"删了 N 条、只补回 M 条"。绝不假装成功。
+ *
+ * @param payload {{tasks: Array, scope: string}}
+ * @returns {Promise<{ok:true, removed:number, inserted:number, skipped:number,
+ *                    duplicates:number, errors:string[], partial:boolean}>}
+ */
+async function actionImportReplace(db, openid, payload) {
+  // --- scope 白名单：只认 'courses'，不提供"清空全部"的口子 ---
+  // 【刻意用**精确匹配**，不做 trim / 大小写归一】这是个会删数据的开关：
+  // 'courses ' / 'COURSES' / 'courses\n' 都说明调用方写错了，宁可让它当场报错，
+  // 也不要"顺手纠正"成一个会删数据的操作 —— 宽容在这里是危险而不是友好。
+  const scope = payload.scope;
+  if (SCOPE_COURSES.indexOf(scope) === -1) {
+    return fail(
+      `scope 只能是 ${SCOPE_COURSES.map((item) => `'${item}'`).join(' / ')}（精确匹配，区分大小写），`
+      + `收到：${JSON.stringify(scope === undefined ? null : scope)}；本接口不提供"清空全部"的用法`
+    );
+  }
+  const input = Array.isArray(payload.tasks) ? payload.tasks : [];
+  if (!input.length) return fail('tasks 不能为空');
+  if (input.length > MAX_BULK_INPUT) return fail(`一次最多导入 ${MAX_BULK_INPUT} 条任务`);
+
+  // --- 第一阶段：只读，把要删的与要插的都算出来（此时还没动库） ---
+  const mine = await fetchMyTasks(db, openid);
+  const courseIds = mine.filter((task) => N.isCourseTask(task)).map((task) => N.toStr(task._id)).filter(Boolean);
+
+  // 去重的种子 = 删掉课表之后**仍然留在库里**的任务（手工日程等），
+  // 免得"替换"把用户手填的、与新导入同名同日的日程又插一份。
+  const surviving = mine.filter((task) => courseIds.indexOf(N.toStr(task._id)) === -1);
+  const prepared = prepareBatch(input, openid, collectDedupeKeys(surviving));
+
+  // --- 第二阶段：删旧课表（分 100 一批，单次 remove 上限） ---
+  let removed = 0;
+  const deleteErrors = [];
+  const batches = N.chunk(courseIds, N.PAGE_SIZE);
   for (let i = 0; i < batches.length; i += 1) {
-    const batch = batches[i];
-    // 云数据库没有"批量插入"接口，只能逐条 add；这里串行执行避免触发并发写限流
-    // eslint-disable-next-line no-await-in-loop
-    const results = await Promise.all(batch.map((doc) => db.collection(COLLECTION_TASKS).add({ data: doc })));
-    results.forEach((added) => {
-      ids.push((added && (added._id || added.id)) || '');
-    });
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await db.collection(COLLECTION_TASKS)
+        .where({ _openid: openid, _id: db.command.in(batches[i]) })
+        .remove();
+      removed += (result && (result.stats ? result.stats.removed : result.removed)) || 0;
+    } catch (error) {
+      deleteErrors.push(`删除第 ${i + 1} 批失败：${(error && error.message) || error}`);
+    }
   }
 
-  return ok({ ids, inserted: ids.length, skipped: errors.length, errors });
+  // --- 第三阶段：插新课表 ---
+  const written = await insertTasks(db, openid, prepared.docs);
+  const inserted = written.ids.length;
+
+  // 只有"计划全做完"才算不 partial；删失败、插失败、或插少了都如实标出来
+  const partial = deleteErrors.length > 0 || written.failed > 0 || inserted !== prepared.docs.length;
+
+  console.log(
+    `[tasks] import_replace：scope=${scope} 已替换课表（删 ${removed} / 计划删 ${courseIds.length}，`
+    + `插 ${inserted} / 计划插 ${prepared.docs.length}，重复跳过 ${prepared.duplicates}，`
+    + `不合法跳过 ${prepared.errors.length}，partial=${partial}）`
+  );
+
+  return ok({
+    removed, // 真实删掉的条数 —— 前端用它写确认框"将替换 N 门课"
+    inserted,
+    skipped: prepared.errors.length + prepared.duplicates + written.failed,
+    duplicates: prepared.duplicates,
+    errors: deleteErrors.concat(written.errors, prepared.errors),
+    partial,
+  });
 }
 
 /** update：只允许改白名单字段 */
@@ -418,6 +596,7 @@ const HANDLERS = {
   list: actionList,
   add: actionAdd,
   bulk_add: actionBulkAdd,
+  import_replace: actionImportReplace,
   update: actionUpdate,
   remove: actionRemove,
   stats: actionStats,
@@ -487,6 +666,13 @@ module.exports = {
   loadSettings,
   loadSettingsRow,
   writeSettingsFields,
+  // 批量导入（去重 / 替换）
+  insertTasks,
+  prepareBatch,
+  collectDedupeKeys,
+  actionBulkAdd,
+  actionImportReplace,
+  SCOPE_COURSES,
   // AI 配置
   actionAiConfigGet,
   actionAiConfigSave,

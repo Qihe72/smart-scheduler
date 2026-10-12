@@ -811,6 +811,258 @@ testCaseAsync('7b.5 未知 action 列表里已包含新的三个 action', async 
 });
 
 // ===========================================================================
+// 7c. import_replace（替换导入）与 bulk_add 去重
+// ===========================================================================
+/** 造一条"课表类"任务：.ics 导入的产物 = repeat='weekly' + 有节次 */
+function makeCourse(overrides) {
+  return makeTask(Object.assign({
+    type: 'event',
+    repeat: 'weekly',
+    periods: '3-4',
+    week_start: 1,
+    week_end: 16,
+    week_parity: 'all',
+    start_time: '10:00',
+    end_time: '11:40',
+    location: '致理楼 305',
+  }, overrides || {}));
+}
+
+/** 造一条"手工日程"：repeat='none' + 没节次 —— 这类**绝不能**被替换删掉 */
+function makeManual(overrides) {
+  return makeTask(Object.assign({ type: 'event', repeat: 'none', periods: '' }, overrides || {}));
+}
+
+testCaseAsync('7c.1 import_replace：只删课表类，手工日程/DDL/子任务一条不动', async () => {
+  // 3 条课表课 + 2 条手工日程 + 1 条 DDL + 1 条子任务，共 7 条
+  const seed = [
+    makeCourse({ _id: 'c1', title: '高等数学', date: '2026-09-07', periods: '1-2' }),
+    makeCourse({ _id: 'c2', title: '大学物理', date: '2026-09-08', periods: '3-4' }),
+    makeCourse({ _id: 'c3', title: '线性代数', date: '2026-09-09', periods: '5-6' }),
+    makeManual({ _id: 'm1', title: '和导师开会', date: '2026-10-12', start_time: '15:00' }),
+    makeManual({ _id: 'm2', title: '体检', date: '2026-10-15' }),
+    makeTask({ _id: 'd1', title: '交实验报告', type: 'ddl', date: '2026-10-16', end_time: '23:59' }),
+    makeTask({ _id: 's1', title: '查文献', type: 'subtask', date: '2026-10-13', parent_id: 'd1' }),
+  ];
+  const db = createFakeDb({ tasks: seed });
+
+  const result = await tasksFn.handleAction(db, 'me', {
+    action: 'import_replace',
+    scope: 'courses',
+    tasks: [makeCourse({ title: '高等数学', date: '2026-09-07', periods: '1-2' })],
+  });
+
+  eq(result.ok, true, '替换成功');
+  eq(result.removed, 3, 'removed = 3（真实删掉的课表条数，前端拿它写确认框）');
+  eq(result.inserted, 1, 'inserted = 1（新课表 1 条）');
+  eq(result.partial, false, '不是 partial');
+
+  const leftIds = db.store.tasks.map((t) => t._id).sort();
+  // 4 条非课表类**逐条**断言还在
+  ['d1', 'm1', 'm2', 's1'].forEach((id) => {
+    ok(leftIds.indexOf(id) !== -1, `手工任务 ${id} 必须原样还在`);
+  });
+  // 3 条旧课被删掉
+  ['c1', 'c2', 'c3'].forEach((id) => {
+    ok(leftIds.indexOf(id) === -1, `旧课 ${id} 已被替换删掉`);
+  });
+  eq(db.store.tasks.length, 5, '库里剩 4 条手工 + 1 条新课');
+
+  // 剩下的那条手工日程内容没被动过
+  const manual = db.store.tasks.filter((t) => t._id === 'm1')[0];
+  eq(manual.title, '和导师开会', '手工日程标题未被改动');
+  eq(manual.start_time, '15:00', '手工日程时间未被改动');
+  eq(manual.repeat, 'none', '手工日程仍是不重复');
+});
+
+testCaseAsync('7c.2 import_replace：判据边界 —— 手工的"每周重复但没节次"不算课表类', async () => {
+  const db = createFakeDb({
+    tasks: [
+      makeCourse({ _id: 'c1', title: '有节次的课' }),
+      // 手工建的每周重复日程，但**没填节次** → 不算课表类（宁可少删，不可误删）
+      makeTask({ _id: 'w1', title: '每周组会', repeat: 'weekly', periods: '', week_end: 16 }),
+      makeManual({ _id: 'm1', title: '买菜' }),
+    ],
+  });
+
+  const result = await tasksFn.handleAction(db, 'me', {
+    action: 'import_replace',
+    scope: 'courses',
+    tasks: [makeCourse({ title: '新课' })],
+  });
+
+  eq(result.removed, 1, '只删了那一条真正带节次的课');
+  const leftIds = db.store.tasks.map((t) => t._id).sort();
+  ok(leftIds.indexOf('w1') !== -1, '没节次的 weekly 日程没被删（边界：宁少删）');
+  ok(leftIds.indexOf('m1') !== -1, '普通日程没被删');
+});
+
+testCaseAsync('7c.3 import_replace：scope 白名单（不提供"清空全部"的口子）', async () => {
+  const db = createFakeDb({ tasks: [makeCourse({ _id: 'c1' })] });
+
+  for (const value of ['all', 'tasks', '', 'COURSES', 'courses ', 'everything']) {
+    // eslint-disable-next-line no-await-in-loop
+    const bad = await tasksFn.handleAction(db, 'me', {
+      action: 'import_replace', scope: value, tasks: [makeCourse({ title: 'x' })],
+    });
+    ok(bad.ok === false, `scope=${JSON.stringify(value)} 被拒绝`);
+    ok(bad.error.indexOf('scope') !== -1, `scope=${JSON.stringify(value)} 的错误信息点名 scope`);
+    ok(bad.error.indexOf('courses') !== -1, '错误信息说明只接受 courses');
+  }
+  eq(db.store.tasks.length, 1, '所有非法请求都没动库');
+  eq(db.store.tasks[0]._id, 'c1', '原数据完好');
+
+  // 合法值正常工作
+  const good = await tasksFn.handleAction(db, 'me', {
+    action: 'import_replace', scope: 'courses', tasks: [makeCourse({ title: '新课' })],
+  });
+  eq(good.ok, true, 'scope=courses 正常');
+});
+
+testCaseAsync('7c.4 import_replace：越权 —— 别人的课一条都不能被删', async () => {
+  const db = createFakeDb({
+    tasks: [
+      makeCourse({ _id: 'mine1', title: '我的课' }),
+      makeCourse({ _id: 'theirs1', title: '别人的课', _openid: 'other-user' }),
+      makeCourse({ _id: 'theirs2', title: '别人的课2', _openid: 'other-user' }),
+    ],
+  });
+
+  const result = await tasksFn.handleAction(db, 'me', {
+    action: 'import_replace', scope: 'courses', tasks: [makeCourse({ title: '新课' })],
+  });
+
+  eq(result.removed, 1, '只删掉自己的那 1 条');
+  const left = db.store.tasks.filter((t) => t._openid === 'other-user').map((t) => t._id).sort();
+  eq(left, ['theirs1', 'theirs2'], '别人的课表课一条都没动');
+  ok(db.store.tasks.filter((t) => t._id === 'mine1').length === 0, '自己的旧课已被替换');
+});
+
+testCaseAsync('7c.5 import_replace：空 tasks / 没有任何课表时的行为', async () => {
+  const db = createFakeDb({ tasks: [makeManual({ _id: 'm1' })] });
+
+  const empty = await tasksFn.handleAction(db, 'me', {
+    action: 'import_replace', scope: 'courses', tasks: [],
+  });
+  ok(empty.ok === false, '空 tasks 被拒绝');
+  ok(empty.error.indexOf('tasks') !== -1, '错误信息点名 tasks');
+  eq(db.store.tasks.length, 1, '被拒绝时没动库');
+
+  const missing = await tasksFn.handleAction(db, 'me', { action: 'import_replace', scope: 'courses' });
+  ok(missing.ok === false, '缺 tasks 也被拒绝');
+
+  // 库里没有任何课表类：removed 应该是 0，而不是报错
+  const noCourses = await tasksFn.handleAction(db, 'me', {
+    action: 'import_replace', scope: 'courses', tasks: [makeCourse({ title: '第一门课' })],
+  });
+  eq(noCourses.ok, true, '库里没课表时也能导入');
+  eq(noCourses.removed, 0, 'removed = 0（首次导入没有旧课可删）');
+  eq(noCourses.inserted, 1, '新导入 1 条');
+  eq(db.store.tasks.length, 2, '手工那条 + 新课 1 条');
+
+  const tooMany = await tasksFn.handleAction(db, 'me', {
+    action: 'import_replace', scope: 'courses', tasks: new Array(500).fill(makeCourse({ title: 'x' })),
+  });
+  ok(tooMany.ok === false, '超过 200 条被拒绝');
+});
+
+testCaseAsync('7c.6 import_replace：删成功但插失败 → 如实返回 partial，不假装成功', async () => {
+  const db = createFakeDb(
+    { tasks: [makeCourse({ _id: 'c1', title: '旧课A' }), makeCourse({ _id: 'c2', title: '旧课B' })] },
+    { failAddAfter: 0 } // 从第一次 add 开始就抛错
+  );
+
+  const result = await tasksFn.handleAction(db, 'me', {
+    action: 'import_replace',
+    scope: 'courses',
+    tasks: [makeCourse({ title: '新课1' }), makeCourse({ title: '新课2' })],
+  });
+
+  // 删除是成功的（2 条旧课没了），插入全失败
+  eq(result.removed, 2, 'removed 如实报告删掉的 2 条');
+  eq(result.inserted, 0, 'inserted 如实报告 0 条');
+  eq(result.partial, true, '**partial=true**：删成功但插失败，不能假装成功');
+  ok(result.errors.length > 0, 'errors 里有说明');
+  eq(db.store.tasks.length, 0, '库里确实空了（说明确实删了）—— 前端据此提示用户重新导入');
+});
+
+testCaseAsync('7c.7 bulk_add 去重：同一批内重复 + 与库里已有重复都只写一条', async () => {
+  const db = createFakeDb({
+    tasks: [makeManual({ _id: 'e1', title: '开组会', date: '2026-10-12', start_time: '15:00' })],
+  });
+
+  const result = await tasksFn.handleAction(db, 'me', {
+    action: 'bulk_add',
+    tasks: [
+      { title: '开组会', date: '2026-10-12', start_time: '15:00' }, // 与库里已有重复
+      { title: '新课A', date: '2026-10-13', start_time: '08:00' },  // 新
+      { title: '新课A', date: '2026-10-13', start_time: '08:00' },  // 同一批内重复
+      { title: '新课A', date: '2026-10-13', start_time: '08:00' },  // 又来一条
+      { title: '新课B', date: '2026-10-13', start_time: '08:00' },  // 换个标题 → 新
+    ],
+  });
+
+  eq(result.ok, true, '成功');
+  eq(result.inserted, 2, '只写了 2 条（新课A + 新课B）');
+  eq(result.duplicates, 3, 'duplicates = 3（1 条撞库里 + 2 条撞同一批）');
+  eq(result.skipped, 3, 'skipped 把重复也算进去');
+  eq(result.errors, [], '重复**不报错**（这是预期行为，不是错误）');
+  eq(db.store.tasks.length, 3, '库里 = 原有 1 条 + 新写 2 条');
+});
+
+testCaseAsync('7c.8 bulk_add 去重：日期或开始时间不同就不算重复（别误杀）', async () => {
+  const db = createFakeDb({ tasks: [] });
+
+  const result = await tasksFn.handleAction(db, 'me', {
+    action: 'bulk_add',
+    tasks: [
+      { title: '开会', date: '2026-10-12', start_time: '09:00' },
+      { title: '开会', date: '2026-10-13', start_time: '09:00' }, // 换了一天 → 不是重复
+      { title: '开会', date: '2026-10-12', start_time: '14:00' }, // 换了时刻 → 不是重复
+      { title: '开会', date: '2026-10-12', start_time: '' },      // 没填时刻 → 与上面都不同
+      { title: '开会', date: '2026-10-12', start_time: '09:00' }, // 与第一条完全相同 → 重复
+    ],
+  });
+
+  eq(result.inserted, 4, '4 条都写进去了（只有最后那条重复）');
+  eq(result.duplicates, 1, 'duplicates = 1');
+  eq(db.store.tasks.length, 4, '库里 4 条');
+});
+
+testCaseAsync('7c.9 bulk_add 去重：键与归一化后的值比较（9:5 与 09:05 视为同一条）', async () => {
+  const db = createFakeDb({ tasks: [] });
+
+  const result = await tasksFn.handleAction(db, 'me', {
+    action: 'bulk_add',
+    tasks: [
+      { title: '开会', date: '2026-10-12', start_time: '9:5' },
+      { title: '  开会  ', date: '2026-10-12', start_time: '09:05' }, // 首尾空白 + 补零后同一条
+    ],
+  });
+
+  eq(result.inserted, 1, '只有 1 条入库');
+  eq(result.duplicates, 1, '识别为重复');
+  eq(db.store.tasks[0].start_time, '09:05', '存的是归一化后的时刻');
+  eq(db.store.tasks[0].title, '开会', '存的是裁掉空白的标题');
+});
+
+testCaseAsync('7c.10 bulk_add：不合法数据仍单独计数，与重复分得清', async () => {
+  const db = createFakeDb({ tasks: [] });
+  const result = await tasksFn.handleAction(db, 'me', {
+    action: 'bulk_add',
+    tasks: [
+      { title: '正常', date: '2026-10-12' },
+      { title: '', date: '2026-10-12' },        // 不合法
+      { title: '正常', date: '2026-10-12' },     // 重复
+    ],
+  });
+  eq(result.inserted, 1, '写入 1 条');
+  eq(result.duplicates, 1, '重复 1 条');
+  eq(result.errors.length, 1, '不合法 1 条且在 errors 里有说明');
+  eq(result.skipped, 2, 'skipped = 不合法 + 重复');
+});
+
+// ===========================================================================
 // 8. aiParse：脏 JSON 容错解析
 // ===========================================================================
 const CLEAN_JSON = '{"events":[{"title":"开组会","date":"2026-10-12","start_time":"15:00","end_time":"","type":"日程","priority":"中"}],"deadlines":[],"needs_clarification":false,"clarification_question":""}';

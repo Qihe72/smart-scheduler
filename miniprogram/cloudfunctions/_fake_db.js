@@ -40,12 +40,16 @@
  * 造一个内存假数据库。
  *
  * @param {{tasks?: Array, settings?: Array}} [seed] 预置数据（会被就地修改）
+ * @param {{failAddAfter?: number}} [options] 故障注入：写到第 N 次 add 之后开始抛错。
+ *        用来测"删旧成功、插新失败"时接口是否**如实返回 partial**，而不是假装成功。
  * @returns {object} 形如 wx-server-sdk `db` 的对象，另带 `store` / `stats` 便于断言
  *        * `db.store.tasks` / `db.store.settings` —— 直接看"库里现在有什么"
  *        * `db.stats.listGetCalls` / `addCalls` / `updateCalls` / `removeCalls`
  *          —— 用来验证"分页取全""批量分批"这类行为
  */
-function createFakeDb(seed) {
+function createFakeDb(seed, options) {
+  const opts = options || {};
+  const failAddAfter = typeof opts.failAddAfter === 'number' ? opts.failAddAfter : Infinity;
   const store = { tasks: (seed && seed.tasks) || [], settings: (seed && seed.settings) || [] };
   const stats = { listGetCalls: 0, addCalls: 0, removeCalls: 0, updateCalls: 0 };
 
@@ -108,6 +112,9 @@ function createFakeDb(seed) {
         where: (condition) => queryOf(name, condition),
         async add({ data }) {
           stats.addCalls += 1;
+          if (stats.addCalls > failAddAfter) {
+            throw new Error('模拟写入失败（故障注入）');
+          }
           const doc = Object.assign({}, data);
           if (!doc._id) doc._id = `${name}_${store[name].length + 1}_${Math.random().toString(36).slice(2, 7)}`;
           store[name].push(doc);

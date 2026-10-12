@@ -369,7 +369,114 @@ function contractOfBrokenCloud() {
 }
 
 // ---------------------------------------------------------------------------
-// 五、纯函数层面：toTaskList / extractJsonObject 的容错（不经过 api.js）
+// 五、导入替换 import_replace（会删数据的那个接口）
+// ---------------------------------------------------------------------------
+// 【为什么单独盯它】它是唯一一个"会删用户数据"的写接口：
+//   1. scope 必须**恒为 'courses'** —— 绝不能让它变成可传参的开关（那是删库口子）；
+//   2. 返回是**平铺**的，partial 必须能被页面读到（"删成功但插不全"要如实告知）；
+//   3. payload 形状要锁死，防止有人"顺手"再加一个可选开关进来。
+// ---------------------------------------------------------------------------
+function contractOfImportReplace() {
+  block('导入替换契约 —— import_replace（会删数据，payload 必须锁死）');
+
+  var factory = loadFakeDb();
+  isTrue(typeof factory === 'function', 'require 到了 _fake_db.js（本组要打真实 handler）');
+  if (typeof factory !== 'function') return Promise.resolve();
+
+  var db = factory({ tasks: [], settings: [] });
+  var originalCall = global.wx.cloud.callFunction;
+  global.wx.cloud.callFunction = function (options) {
+    var name = options && options.name;
+    var data = (options && options.data) || {};
+    callLog.push({ name: name, data: data });
+    if (name === 'tasks') {
+      return tasksFn.handleAction(db, 'me', data).then(function (r) { return { result: r }; });
+    }
+    return Promise.reject({ errMsg: 'cloud function not found: ' + name });
+  };
+
+  var sample = [
+    { title: '高等数学', type: 'event', date: '2026-09-07', start_time: '08:00', end_time: '09:40',
+      repeat: 'weekly', week_start: 1, week_end: 16, week_parity: 'odd', periods: '1-2' }
+  ];
+
+  // ---- 1. 入参契约：action 名、scope 恒为 'courses'、payload 形状 ----
+  reset();
+  return api.importReplace(sample).then(function (res) {
+    eq(callLog.length, 1, 'importReplace() 发了一次请求（桩确实被调用到）');
+    eq(lastCall().name, 'tasks', '转发给 tasks 云函数');
+    eq(lastCall().data.action, 'import_replace', "action 是 'import_replace'");
+    eq(lastCall().data.scope, 'courses', "**scope 恒为 'courses'**（写死，不做参数）");
+    eq(Object.keys(lastCall().data).sort().join(','), 'action,scope,tasks',
+      'payload 恰好是 {tasks, scope}（+ action）—— 没有别的可选开关');
+    eq(lastCall().data.tasks.length, 1, 'tasks 原样带过去');
+    eq(lastCall().data.tasks[0].title, '高等数学', 'tasks 内容没被加工');
+
+    // ---- 2. 负向断言：不许出现 scope 以外的开关 ----
+    //   （防止以后有人加 scope:'all' / force:true / wipe:true 这种口子）
+    var ALLOWED = ['action', 'tasks', 'scope'];
+    var extra = Object.keys(lastCall().data).filter(function (k) { return ALLOWED.indexOf(k) === -1; });
+    eq(extra.join(','), '', '**没有任何 scope 以外的可选开关**（多出来的键：' + show(extra) + '）');
+    eq(deepCarriesKey(lastCall().data), '', '顺带：payload 里也没有 Key 类字段（它不该碰 AI 配置）');
+
+    // ---- 3. 返回形状：平铺在 data 上，字段齐全 ----
+    eq(res.ok, true, '成功 → ok:true');
+    eq(res.error, null, '成功时 error 为 null');
+    var d = res.data || {};
+    eq(d.ok, true, 'data.ok 为 true（平铺）');
+    eq(d.data, undefined, '**data 上没有嵌套的 data**（平铺，不要去取 .data.data）');
+    ['removed', 'inserted', 'skipped', 'duplicates', 'errors', 'partial'].forEach(function (key) {
+      isTrue(Object.prototype.hasOwnProperty.call(d, key),
+        'data 上必须有 ' + key + '（契约字段）');
+    });
+    isTrue(Number(d.inserted) >= 1, '真的插进去了至少 1 条（inserted=' + show(d.inserted) + '）');
+    isTrue(Array.isArray(d.errors), 'errors 是数组');
+    eq(typeof d.partial, 'boolean', 'partial 是布尔值');
+    console.log('       （实测 import_replace 返回：' + Object.keys(d).sort().join(', ') + '）');
+
+    // ---- 4. scope 传错必须被云函数拒（这里直接打 handler 验那条红线）----
+    reset();
+    return tasksFn.handleAction(db, 'me', { action: 'import_replace', tasks: sample, scope: 'all' });
+  }).then(function (raw) {
+    eq(raw.ok, false, "scope:'all' → ok:false（云函数只认 'courses'）");
+    isTrue(String(raw.error).indexOf('scope') > -1, '错误文案点明 scope：' + show(raw.error));
+
+    reset();
+    return tasksFn.handleAction(db, 'me', { action: 'import_replace', tasks: sample, scope: 'COURSES' });
+  }).then(function (raw) {
+    eq(raw.ok, false, "scope:'COURSES' → ok:false（精确匹配、区分大小写，别指望大小写宽容）");
+
+    // ---- 5. 失败形状：{ok:false, error} 且不 reject ----
+    reset();
+    global.wx.cloud.callFunction = function (options) {
+      callLog.push({ name: options.name, data: options.data });
+      return Promise.reject({ errMsg: 'cloud.callFunction:fail function not found' });
+    };
+    return api.importReplace(sample);
+  }).then(function (res) {
+    eq(res.ok, false, '调用失败 → ok:false（**不 reject**）');
+    eq(res.data, null, '失败时 data 为 null');
+    isTrue(typeof res.error === 'string' && res.error.length > 0, '带回了错误文案：' + show(res.error));
+    isTrue(toasts.length >= 1, '弹了 toast（失败一定要让用户看见）');
+
+    // ---- 6. 回归：bulk_add 的包装没被这次改动弄坏（回应那条"误报的 bug"）----
+    //   有人报过"bulkAdd 没把 result 包进 data"——实测是误报：callCloudFunction 早就包了。
+    //   这条断言把它钉住：一旦有人真去"补"第二层包装，这里立刻红。
+    reset();
+    global.wx.cloud.callFunction = originalCall;
+    return api.bulkAdd(sample);
+  }).then(function (res) {
+    eq(lastCall().data.action, 'bulk_add', 'bulkAdd 的 action 没变');
+    eq(res.ok, true, 'bulkAdd 成功 → ok:true');
+    eq(res.data.data, undefined, '**bulkAdd 的 data 上也没有嵌套 data**（只有一层包装）');
+    isTrue(Object.prototype.hasOwnProperty.call(res.data, 'inserted'),
+      'bulkAdd 的 data.inserted 可以直接读到（me.js 就是读这个）');
+    global.wx.cloud.callFunction = originalCall;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 六、纯函数层面：toTaskList / extractJsonObject 的容错（不经过 api.js）
 // ---------------------------------------------------------------------------
 function contractOfPureFunctions() {
   block('AI 契约 —— 纯函数容错（不经过 api.js）');
@@ -872,6 +979,7 @@ var done = (function () {
     .then(function () {
       contractOfPureFunctions();
     })
+    .then(contractOfImportReplace)
     .then(contractOfAiConfig)
     .then(function () {
       restoreGlobals();   // 跑完立刻把全局还回去，不影响后面的测试文件

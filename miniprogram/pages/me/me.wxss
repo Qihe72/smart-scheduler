@@ -323,6 +323,54 @@ page {
 }
 
 /* --------------------------------------------------------------------------
+   导入方式（替换 / 追加）
+   -------------------------------------------------------------------------- */
+.mode-title {
+  margin-top: 20rpx;
+  font-size: 25rpx;
+  font-weight: 600;
+  color: #4a5163;
+}
+
+.mode-bar {
+  display: flex;
+  margin-top: 12rpx;
+}
+
+.mode-item {
+  flex: 1;
+  padding: 16rpx 0;
+  font-size: 26rpx;
+  text-align: center;
+  color: #4a5163;
+  background: #f2f4f8;
+  border: 1rpx solid #e3e7f0;
+  border-radius: 10rpx;
+}
+
+.mode-item + .mode-item {
+  margin-left: 12rpx;
+}
+
+.mode-on {
+  color: #ffffff;
+  background: #2f5bd7;
+  border-color: #2f5bd7;
+}
+
+/* 功能没就绪的选项：置灰（点了会说明原因，不是死按钮） */
+.mode-disabled {
+  color: #a8aebd;
+  background: #f7f8fb;
+  border-color: #eceff5;
+}
+
+.note-strong {
+  color: #1f2430;
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
    导入：结果 / 警告 / 预览
    -------------------------------------------------------------------------- */
 .result-line {

@@ -277,6 +277,98 @@ function run() {
   eq(builtF.freeCounts[0], DEFAULT_ROWS, 'periods 解析不出来的任务不占任何课节行（空闲仍是 13）');
 
   // -------------------------------------------------------------------------
+  // 连堂卡片的高度：跨 N 节就要占 N 行高
+  // （真机上曾经只有一格高，用户说"明明两节课的时间只占了一节课的空格"）
+  // -------------------------------------------------------------------------
+  block('连堂卡片高度 —— 跨 N 节占 N 行高');
+  isTrue(typeof T.chipHeightOf === 'function', '__test.chipHeightOf 暴露出来了');
+  isTrue(typeof T.ROW_HEIGHT_RPX === 'number' && T.ROW_HEIGHT_RPX > 0,
+    '行高常量可用：ROW_HEIGHT_RPX = ' + show(T.ROW_HEIGHT_RPX));
+  isTrue(typeof T.CHIP_GAP_RPX === 'number' && T.CHIP_GAP_RPX >= 0,
+    '间隙常量可用：CHIP_GAP_RPX = ' + show(T.CHIP_GAP_RPX));
+
+  var ROW = T.ROW_HEIGHT_RPX;
+  var GAP = T.CHIP_GAP_RPX;
+  eq(T.chipHeightOf(1), ROW - GAP, '跨 1 节 → 行高 − 间隙 = ' + (ROW - GAP) + 'rpx');
+  eq(T.chipHeightOf(2), 2 * ROW - GAP, '跨 2 节 → 2 × 行高 − 间隙 = ' + (2 * ROW - GAP) + 'rpx');
+  eq(T.chipHeightOf(3), 3 * ROW - GAP, '跨 3 节 → 3 × 行高 − 间隙 = ' + (3 * ROW - GAP) + 'rpx');
+  eq(T.chipHeightOf(4), 4 * ROW - GAP, '跨 4 节 → 4 × 行高 − 间隙 = ' + (4 * ROW - GAP) + 'rpx');
+  eq(T.chipHeightOf(0), ROW - GAP, '非法跨数（0）按 1 节兜底，不给 0 或负高度');
+  eq(T.chipHeightOf(-5), ROW - GAP, '负数同样兜底成 1 节');
+
+  // 高度必须严格随节数线性增长：每多一节正好多一个行高
+  eq(T.chipHeightOf(3) - T.chipHeightOf(2), ROW, '每多跨一节，高度正好多一个行高');
+  eq(T.chipHeightOf(9) - T.chipHeightOf(1), 8 * ROW, '跨 1 → 跨 9：高度差 = 8 个行高');
+
+  // 从**渲染结果**核：连堂卡的 inline style 高度确实 = 跨的节数 × 行高 − 间隙
+  var builtSpan = T.buildGrid(perDayOf({
+    0: [course('h1', '三节连堂', '3-5'), course('h2', '单节课', '7')]
+  }), null, WEEK_MONDAY);
+  var blockCard = builtSpan.days[0].cells[rowIndexOf(builtSpan.rows, '3')].tasks[0];
+  eq(blockCard.spanCount, 3, '第 3-5 节的卡片 spanCount = 3');
+  eq(blockCard.blockHeight, 3 * ROW - GAP, '它的 blockHeight = 3 × 行高 − 间隙');
+  isTrue(blockCard.blockStyle.indexOf('height:' + (3 * ROW - GAP) + 'rpx') !== -1,
+    'inline style 里真的带上了这个高度：' + show(blockCard.blockStyle));
+  isTrue(blockCard.isBlock === true, '标记为跨节卡片（用于加阴影）');
+  isTrue(blockCard.blockStyle.indexOf('z-index:2') !== -1, '跨节卡片 z-index 抬高，能盖住跨过的行');
+
+  var singleCard = builtSpan.days[0].cells[rowIndexOf(builtSpan.rows, '7')].tasks[0];
+  eq(singleCard.spanCount, 1, '单节课的卡片 spanCount = 1');
+  eq(singleCard.blockHeight, ROW - GAP, '单节课仍然只占一格高');
+  isTrue(singleCard.blockStyle.indexOf('z-index:1') !== -1, '单节卡片用基础层级');
+
+  // 第 4、5 节那两行仍然**没有卡片**（既有设计：连堂只画在起始行）
+  eq(titlesAt(builtSpan, 0, '4').length, 0, '第 4 节行没有卡片（连堂不重复画）');
+  eq(titlesAt(builtSpan, 0, '5').length, 0, '第 5 节行没有卡片');
+  isTrue(titlesAt(builtSpan, 0, '3').indexOf('三节连堂') !== -1, '只有起始行（第 3 节）画了那一张');
+
+  // 冲突：连堂卡跨的行里另有别的课 —— 两张卡都不能消失
+  block('连堂跨行冲突 —— 跨的行里另有别的课');
+  var builtConflict = T.buildGrid(perDayOf({
+    0: [course('k1', '三节连堂', '3-5'), course('k2', '插在第四节的课', '4')]
+  }), null, WEEK_MONDAY);
+  isTrue(titlesAt(builtConflict, 0, '3').indexOf('三节连堂') !== -1, '冲突时连堂卡仍在起始行');
+  isTrue(titlesAt(builtConflict, 0, '4').indexOf('插在第四节的课') !== -1,
+    '**第 4 节那门课也没有被吞掉**（它在自己格的 DOM 里，且后画的行层级更高）');
+  eq(builtConflict.days[0].cells[rowIndexOf(builtConflict.rows, '4')].tasks.length, 1,
+    '冲突格子里就是那 1 张卡');
+  eq(builtConflict.freeCounts[0], DEFAULT_ROWS - 3, '冲突数据下空闲仍按并集算：13 − 3 = 10');
+  isTrue(builtConflict.rows.length === DEFAULT_ROWS, '冲突不会多出行来');
+
+  // -------------------------------------------------------------------------
+  // 行高同源：JS 常量与 WXSS 里的 .board-row 高度必须一致
+  // （小程序里 JS 与 WXSS 没法共享常量，只能靠这条断言把它们对起来）
+  // -------------------------------------------------------------------------
+  block('行高同源 —— week.js 的常量 vs week.wxss 的 .board-row');
+  var fs = require('fs');
+  var wxssPath = path.join(ROOT, 'pages', 'week', 'week.wxss');
+  var wxss = fs.readFileSync(wxssPath, 'utf8');
+  var rowBlock = /\.board-row\s*\{([^}]*)\}/.exec(wxss);
+  isTrue(!!rowBlock, 'wxss 里能找到 .board-row 规则块');
+  var rowHeightMatch = rowBlock ? /height:\s*(\d+)rpx/.exec(rowBlock[1]) : null;
+  isTrue(!!rowHeightMatch, '.board-row 上写了固定高度');
+  eq(rowHeightMatch ? Number(rowHeightMatch[1]) : -1, T.ROW_HEIGHT_RPX,
+    '**两处的行高一致**（js=' + T.ROW_HEIGHT_RPX + 'rpx）');
+  // 间隙也一样：卡片 margin-bottom（单节卡走流式布局时靠它留缝）
+  var chipBlock = /\.chip\s*\{([^}]*)\}/.exec(wxss);
+  var gapMatch = chipBlock ? /margin-bottom:\s*(\d+)rpx/.exec(chipBlock[1]) : null;
+  isTrue(!!gapMatch, '.chip 上写了 margin-bottom');
+  eq(gapMatch ? Number(gapMatch[1]) : -1, T.CHIP_GAP_RPX,
+    '**两处的卡片间隙一致**（js=' + T.CHIP_GAP_RPX + 'rpx）');
+  // 卡片是 relative 而不是 absolute：绝对定位一旦失效会让整格看起来是空的
+  isTrue(/\.chip\s*\{[^}]*position:\s*relative/.test(wxss),
+    '卡片用 position: relative（最坏情况只退回一格高，不会整格消失）');
+  isFalse(/\.chip\s*\{[^}]*position:\s*absolute/.test(wxss),
+    '卡片**不是**绝对定位（那是会灾难性降级的方案）');
+  // 日期列不能有竖向 padding，否则卡片高度与行高对不上
+  var dayBlock = /\.day-col\s*\{([^}]*)\}/.exec(wxss);
+  isTrue(!!dayBlock, 'wxss 里能找到 .day-col 规则块');
+  var paddingDecl = dayBlock ? /padding:\s*([^;]+);/.exec(dayBlock[1]) : null;
+  isTrue(!!paddingDecl, '.day-col 写了 padding');
+  isTrue(paddingDecl ? /^0\s/.test(paddingDecl[1].trim()) : false,
+    '**日期列的竖向 padding 是 0**（否则卡片与行高对不上）：' + (paddingDecl ? show(paddingDecl[1].trim()) : '无'));
+
+  // -------------------------------------------------------------------------
   // 回归：行数与"每节课一行"这条基本结构没被改坏
   // -------------------------------------------------------------------------
   block('回归 —— 行结构');

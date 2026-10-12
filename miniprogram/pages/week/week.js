@@ -36,6 +36,45 @@ const WEEKDAY_NAMES = ['周一', '周二', '周三', '周四', '周五', '周六
 /** 一周 7 天：用常量而不是到处写 7，免得哪天漏改一处造成索引错位 */
 const DAYS_PER_WEEK = WEEKDAY_NAMES.length;
 
+// ---------------------------------------------------------------------------
+// 行高与卡片高度（必须与 week.wxss 里的 .board-row 高度一致！）
+// ---------------------------------------------------------------------------
+/**
+ * 一行（一节课）的固定高度，单位 rpx。
+ *
+ * 【为什么必须固定】连堂的卡片要"占满它跨越的行"，高度就得是
+ * `跨的节数 × 行高 − 间隙`。行高一旦是自适应的（由内容撑开），
+ * JS 算出来的高度就和实际行高对不上 —— 卡片不是短一截，就是压住下一行。
+ *
+ * 【改这里必须同时改 week.wxss】`.board-row` 上写着同一个数值（wxss 里用注释标了
+ * 「与 week.js 的 ROW_HEIGHT_RPX 必须一致」）。小程序里 JS 与 WXSS 没有共享常量的
+ * 机制，所以两边各写一份、靠注释互相指认；测试里有一条断言把两者对起来，
+ * 防止哪天只改了一边。
+ *
+ * 【为什么取 96】节次栏要放"节次名 + 上下课时间"两行：
+ *   节次名 24rpx × 1.25 ≈ 30rpx，时间 20rpx × 1.2 = 24rpx，中间 4rpx 间隔 → 约 58rpx。
+ *   96 减掉上下 padding（10 + 10）还剩 76rpx，放得下且不挤。
+ * 单节卡片高度 = 96 − 8 = 88rpx，够放"标题一行 + 节次/时间一行"（22 + 18rpx 加间距）。
+ */
+const ROW_HEIGHT_RPX = 96;
+
+/** 卡片与下一行之间的间隙：卡片高度 = 跨的节数 × 行高 − 这个间隙 */
+const CHIP_GAP_RPX = 8;
+
+/**
+ * 一张卡片该占多高（rpx）。
+ *
+ * `跨 1 节 → 96 − 8 = 88`；`跨 3 节 → 288 − 8 = 280`。
+ * 减掉间隙是为了让两个相邻的卡片之间留出一条细缝，不然连堂卡会和下一张卡糊在一起。
+ *
+ * @param {number} spanCount 跨越的节数（≥1）
+ * @returns {number} rpx 高度
+ */
+function chipHeightOf(spanCount) {
+  const spans = Math.max(Math.floor(Number(spanCount) || 1), 1);
+  return spans * ROW_HEIGHT_RPX - CHIP_GAP_RPX;
+}
+
 /** 兜底行的 key：不在任何节次内、也没有时间的任务放这里（不计入空闲节数） */
 const FALLBACK_ROW_KEY = 'other';
 
@@ -273,6 +312,9 @@ Page({
     occupiedRowsOfDay: occupiedRowsOfDay,
     periodSpanOf: periodSpanOf,
     locateRow: locateRow,
+    chipHeightOf: chipHeightOf,
+    ROW_HEIGHT_RPX: ROW_HEIGHT_RPX,
+    CHIP_GAP_RPX: CHIP_GAP_RPX,
   },
 });
 
@@ -476,6 +518,11 @@ function viewTask(task) {
   let periodText = '';
   if (span) periodText = span[0] === span[1] ? `第${span[0]}节` : `第${span[0]}-${span[1]}节`;
 
+  // 卡片高度按"跨了几节"算（连堂的卡要占满它跨过的行，否则看起来只上了一节）。
+  // 没有 span 的（落进「其他时段」的兜底任务）就占一格。
+  const spanCount = span ? (span[1] - span[0] + 1) : 1;
+  const blockHeight = chipHeightOf(spanCount);
+
   const start = str(task.start_time);
   const end = str(task.end_time);
   let timeText = '';
@@ -500,6 +547,14 @@ function viewTask(task) {
     isDdl: type === 'ddl',
     isSubtask: type === 'subtask',
     highPriority: str(task.priority) === 'high',
+    spanCount,
+    blockHeight,
+    // top / 高度 / 层级都由 JS 给，这样"行高、间隙、卡片高度"只有一个来源。
+    // position:relative 写在 inline 上（而不是靠 class）：卡片本来就在文档流里，
+    // 只是多一个高度 + 层级，最坏情况（样式没生效）也只是退回一格高。
+    blockStyle: `position:relative;top:${CHIP_GAP_RPX / 2}rpx;`
+      + `height:${blockHeight}rpx;z-index:${spanCount > 1 ? 2 : 1};`,
+    isBlock: spanCount > 1,
   };
 }
 

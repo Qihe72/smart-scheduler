@@ -87,9 +87,12 @@
             wx:for-index="dayIndex"
             wx:key="date"
           >
-            <!-- 同一行落在同一天的多条任务：并排展示（WXSS 里 flex-wrap + 每个占 48%） -->
+            <!-- 同一行落在同一天的多条任务：竖着排（各占满一整格宽），不会互相覆盖 -->
+            <!-- 连堂的卡片带 blockStyle：高度 = 跨的节数 × 行高 − 间隙；
+                 卡片仍是"只画在起始行"这一张，靠高度盖住它跨过的后面几行 -->
             <view
-              class="chip {{task.isDdl ? 'chip-ddl' : ''}} {{task.done ? 'chip-done' : ''}} {{task.highPriority ? 'chip-high' : ''}}"
+              class="chip {{task.isDdl ? 'chip-ddl' : ''}} {{task.done ? 'chip-done' : ''}} {{task.highPriority ? 'chip-high' : ''}} {{task.isBlock ? 'chip-block' : ''}}"
+              style="{{task.blockStyle}}"
               wx:for="{{day.cells[rowIndex].tasks}}"
               wx:for-item="task"
               wx:key="id"

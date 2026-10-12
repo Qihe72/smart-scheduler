@@ -199,6 +199,31 @@
 
       <block wx:else>
         <view class="card-sub">从微信聊天记录里选一个 .ics 日历文件（先把文件发给自己或文件传输助手即可）。</view>
+
+        <!-- 导入方式：默认「替换」（用户要的就是这个），但要让人看见自己在选什么 -->
+        <view class="mode-title">导入方式</view>
+        <view class="mode-bar">
+          <view
+            class="mode-item {{importMode === item.value ? 'mode-on' : ''}} {{(item.value === 'replace' && !importReplaceReady) ? 'mode-disabled' : ''}}"
+            wx:for="{{importModes}}"
+            wx:for-item="item"
+            wx:key="value"
+            data-mode="{{item.value}}"
+            bindtap="onImportModeChange"
+          >{{item.label}}</view>
+        </view>
+        <view class="note" wx:if="{{importMode === 'replace'}}">
+          替换 = 先清空已有课表再导入新的。
+          <text class="note-strong">只会清掉「每周重复 + 有节次」的课程</text>，
+          也就是 .ics 导入出来的那种；你手工添加的日程、截止与子任务一条都不会删。
+        </view>
+        <view class="note" wx:else>
+          追加 = 把这次解析出来的课程直接加进去，已有课表原样保留。
+          如果同一门课导入两次，会出现两份，需要自己删。
+        </view>
+        <view class="note" wx:if="{{replaceSummary}}">{{replaceSummary}}</view>
+        <view class="note note-warn" wx:if="{{importReplaceHint}}">{{importReplaceHint}}</view>
+
         <view class="btn-row">
           <view
             class="primary-btn {{importing ? 'btn-disabled' : ''}}"
@@ -236,10 +261,14 @@
                 class="primary-btn {{submitting ? 'btn-disabled' : ''}}"
                 hover-class="primary-btn-hover"
                 bindtap="onConfirmImport"
-              >{{submitting ? '正在入库…' : '确认导入 ' + taskCount + ' 条'}}</view>
+              >{{submitting ? '正在处理…' : (importMode === 'replace' ? '替换导入 ' + taskCount + ' 门' : '追加导入 ' + taskCount + ' 条')}}</view>
               <view class="ghost-btn" hover-class="ghost-btn-hover" bindtap="onCancelImport">取消</view>
             </view>
-            <view class="note">导入是「新增」，不会覆盖已有任务；一次最多 200 条。</view>
+            <view class="note" wx:if="{{importMode === 'replace'}}">
+              点「替换导入」后会先弹出确认框，写清将删除几门课程、再导入几门；确认前你还能取消。
+              删除与导入由云函数一次完成 —— 不会出现"删完了但没导进去"。
+            </view>
+            <view class="note" wx:else>追加是「新增」，不会覆盖已有任务；一次最多 200 条。</view>
           </block>
         </block>
       </block>

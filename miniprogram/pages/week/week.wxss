@@ -130,7 +130,11 @@ page {
 .board-row {
   display: flex;
   align-items: stretch;
+  /* 【与 week.js 的 ROW_HEIGHT_RPX 必须一致】连堂卡片的高度 = 跨的节数 × 这个行高 − 间隙，
+     两处对不上就会出现"卡片短一截 / 压住下一行"。测试里有断言把两者对起来。 */
+  height: 96rpx;
   border-bottom: 1rpx solid #e9ecf3;
+  box-sizing: border-box;
 }
 
 /* 节次栏（左列，表头与数据行共用）。
@@ -143,7 +147,9 @@ page {
   flex-direction: column;
   justify-content: center;
   align-items: flex-start;
-  padding: 10rpx 8rpx 10rpx 4rpx;
+  /* 竖向 padding 只留 4rpx：一行 96rpx 里要放下"节次名 + 上下课时间"两行文字，
+     padding 太大会把时间那行裁掉（以后改行高，记得回来核对这一条）。 */
+  padding: 4rpx 8rpx 4rpx 4rpx;
   background: #ffffff;
   box-sizing: border-box;
 }
@@ -176,12 +182,18 @@ page {
   flex: none;
   width: 280rpx;
   display: flex;
-  flex-wrap: wrap;          /* 并排：一行放不下就换行，绝不互相覆盖 */
+  flex-wrap: wrap;          /* 同格多条任务竖着排（卡片各占 100% 宽） */
   align-content: flex-start;
-  padding: 8rpx 6rpx;
+  /* 【竖向 padding 必须是 0】卡片的 top/height 是按"行高 × 跨的节数"算的，
+     这里一旦有竖向 padding，卡片就会整体下移、和行对不上。
+     左右 padding 保留，用来和相邻一天的格子留出缝隙。 */
+  padding: 0 6rpx;
   background: #ffffff;
   border-left: 1rpx solid #eef1f6;
   box-sizing: border-box;
+  /* 卡片用 position: relative + top 偏移，参照物是它自己原来的位置；
+     这里留 relative 是为了同格内多张卡片的层级（z-index）有个明确的上下文 */
+  position: relative;
 }
 
 /* 今天那一列高亮 */
@@ -270,18 +282,37 @@ page {
 }
 
 /* --------------------------------------------------------------------------
-   三、任务条目（同一行同一天多条并排）
+   三、任务条目（同一行同一天多条任务）
+   --------------------------------------------------------------------------
+   【为什么卡片要用 position: relative + inline 的 top/height】
+   连堂的卡片要"占满它跨越的行"，而它只画在**起始行**那一格里（既有设计：
+   同一件事不重复画）。普通流式布局下，卡片会被那一格的高度限制住（96rpx），
+   撑不出 3 行高；所以给它一个由 JS 算出来的 height，并靠 z-index 盖住后面几行。
+
+   选 relative 而不是 absolute 是有意的：
+     * relative 的卡片**仍然在文档流里**，width/margin 照旧生效；
+       即便 inline 样式在某个基础库上不生效，它也只是退回"一格高"，
+       不会出现"卡片全叠在左上角"这种灾难性降级；
+     * 绝对定位那张方案一旦出问题，整个格子会看起来是空的。
+   代价是跨行卡片不占流的高度（同格后续卡片会与它重叠）—— 数据里
+   "跨节卡 + 同格还有别的课"本身是反常的，重叠比布局崩掉可接受。
    -------------------------------------------------------------------------- */
 .chip {
-  flex: 0 0 48%;
-  max-width: 48%;
-  margin: 0 1% 6rpx;
+  position: relative;
+  width: 100%;
+  margin-bottom: 8rpx;
   padding: 8rpx;
   background: #eef2fe;
   border-left: 6rpx solid #2f5bd7;
   border-radius: 8rpx;
   box-sizing: border-box;
   overflow: hidden;
+}
+
+/* 跨多节的卡片：抬高层级 + 一层浅阴影，视觉上"压在"它跨过的那几行上面。
+   height / top / z-index 由 week.js 的 blockStyle 给。 */
+.chip-block {
+  box-shadow: 0 2rpx 10rpx rgba(47, 91, 215, 0.18);
 }
 
 .chip-hover {
