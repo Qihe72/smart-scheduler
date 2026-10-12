@@ -301,11 +301,11 @@ eq(P.rowLabel([1], null), '第1节', '第 1 行叫"第1节"');
 eq(P.periodNumbers({ '14': ['08:00', '08:45'] }).length, 14, 'periodNumbers 也把第 14 节并进来');
 
 // ---------------------------------------------------------------------------
-// 追加：planner.js / tasks.js 单测 + AI 云函数契约 + AI 页入口逻辑
+// 追加：planner.js / tasks.js 单测 + AI 云函数契约 + AI 页入口 + 课表页空闲统计
 // ---------------------------------------------------------------------------
 // 只有**入口**（本文件）才 require 别的测试文件；每个测试文件自己只 require
 // 被测模块与 ./harness.js —— 这样任何一个文件坏了都不会连坐，逐个单独跑也等价。
-// 单独跑：node utils/tests/{planner,tasks}.test.js | ai_contract.js | ai_page.test.js
+// 单独跑：node utils/tests/{planner,tasks,week_free}.test.js | ai_contract.js | ai_page.test.js
 //
 // 【两条规矩，都是踩过坑换来的】
 //   1. 加载期不许抛异常：loadTest() 包一层，某个文件顶层出错或文件缺失时只记一条
@@ -359,6 +359,11 @@ chain = chain.then(function () {
   var aiPage = loadTest('ai_page.test.js');
   return waitFor(aiPage);
 }).then(function () {
+  // 课表页的空闲统计（纯函数探针，不装全局桩）。
+  // 它是「空闲 N 节」那个真机 bug 的常驻回归测试 —— 当年六份测试全绿却漏了它。
+  var weekFree = loadTest('week_free.test.js');
+  return waitFor(weekFree);
+}).then(function () {
   // 别人的文件（ICS 解析）如果存在就一起跑；不存在就明确说"未包含"，不算失败。
   // 这样"文件还没建好"和"文件坏了"是两件能分清的事。
   var ics = loadTest('ics.test.js');
@@ -371,5 +376,5 @@ chain = chain.then(function () {
 chain.then(function () {
   console.log('\n已加载的测试文件：' + loaded.join(', '));
   if (skipped.length) console.log('未包含（文件不存在）：' + skipped.join(', '));
-  H.report('periods + planner + tasks + AI 契约 + AI 页入口');
+  H.report('periods + planner + tasks + AI 契约 + AI 页入口 + 课表页空闲统计');
 });

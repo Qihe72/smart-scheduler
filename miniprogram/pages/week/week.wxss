@@ -111,13 +111,31 @@ page {
   box-sizing: border-box;
 }
 
+/* --------------------------------------------------------------------------
+   横向可滑动：列宽怎么定的
+   --------------------------------------------------------------------------
+   屏幕按 750rpx 算，固定占掉的宽度：
+     节次列 122rpx + 表格左右内边距 24rpx = 146rpx
+   剩余 750 − 146 = 604rpx 用来放"天"。
+     每天 280rpx → 604 / 280 ≈ 2.16 天，加上节次列本身，
+     也就是**一屏能看到「节次列 + 约 2 天」，滑动后一天约占屏幕 37%**
+     （7 天 × 280 = 1960rpx 的总宽，约为屏幕的 2.6 倍）。
+   为什么选 280 而不是更窄：卡片要放得下「程」字徽标 + 至少 4 个汉字。
+   卡片宽 ≈ (280 − 12 内边距 − 1 边框) × 48% ≈ 128rpx，减去自身左右内边距 16rpx = 112rpx 可用；
+   徽标 22rpx + 间距 4rpx = 26rpx，标题还剩 86rpx；标题 22rpx/字 → 86 / 22 ≈ 3.9 个字
+   （汉字实际渲染宽度略小于字号，实际能显示 4 个字出头）。
+   再窄就要吃省略号了；徽标也同步从 28rpx 缩到 22rpx 给标题腾地方。
+   -------------------------------------------------------------------------- */
+
 .board-row {
   display: flex;
   align-items: stretch;
   border-bottom: 1rpx solid #e9ecf3;
 }
 
-/* 节次栏（左列，表头与数据行共用） */
+/* 节次栏（左列，表头与数据行共用）。
+   width 必须是**定值**：横向滚动靠的就是"内容比屏幕宽"，
+   这里一旦改成 flex 弹性宽度，列就会被压回屏幕宽度，滚动也就没了。 */
 .period-col {
   flex: none;
   width: 122rpx;
@@ -128,6 +146,14 @@ page {
   padding: 10rpx 8rpx 10rpx 4rpx;
   background: #ffffff;
   box-sizing: border-box;
+}
+
+/* 横向滑动时把节次列钉在最左边（否则滑到后面不知道自己在第几节）。
+   sticky 的参照物是最近的滚动祖先，也就是外层那个 scroll-view。 */
+.sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 2;
 }
 
 .period-name {
@@ -145,10 +171,10 @@ page {
   line-height: 1.2;
 }
 
-/* 日期列（7 列等宽） */
+/* 日期列：**定宽** 280rpx（不是 flex: 1），这样 7 天加起来远宽于屏幕 → 能横向滑 */
 .day-col {
-  flex: 1 1 0;
-  min-width: 150rpx;
+  flex: none;
+  width: 280rpx;
   display: flex;
   flex-wrap: wrap;          /* 并排：一行放不下就换行，绝不互相覆盖 */
   align-content: flex-start;
@@ -163,11 +189,19 @@ page {
   background: #f5f8ff;
 }
 
+/* 表头行：竖向吸顶（sticky top）+ 横向最高层级。
+   它的第一个格子同时是 .sticky-col（横向吸左），两层 sticky 一起用：
+   左上角那个格子因此是"横竖都钉住"的。 */
 .header-row {
   position: sticky;
   top: 0;
   z-index: 3;
   border-bottom: 1rpx solid #dfe4ee;
+}
+
+/* 左上角（节次表头）要压在其它吸顶格子之上，否则横向滑动时会被日期格盖住 */
+.header-row .sticky-col {
+  z-index: 4;
 }
 
 .header-corner {
@@ -272,17 +306,21 @@ page {
   align-items: center;
 }
 
+/* 类型徽标（程 / 止 / 务）。
+   列宽 280rpx 之后卡片宽约 128rpx，原来 28rpx + 6rpx 间距的徽标要吃掉 34rpx（约四分之一，
+   窄屏上更明显）。这里缩到 22rpx + 4rpx 间距，只留 26rpx，
+   腾出来的宽度留给课程名 —— 徽标只是"这是日程/截止"的辅助色块，标题才是要读的内容。 */
 .chip-mark {
   flex: none;
-  width: 28rpx;
-  height: 28rpx;
-  margin-right: 6rpx;
-  font-size: 18rpx;
-  line-height: 28rpx;
+  width: 22rpx;
+  height: 22rpx;
+  margin-right: 4rpx;
+  font-size: 16rpx;
+  line-height: 22rpx;
   text-align: center;
   color: #ffffff;
   background: #2f5bd7;
-  border-radius: 6rpx;
+  border-radius: 5rpx;
 }
 
 .chip-ddl .chip-mark {

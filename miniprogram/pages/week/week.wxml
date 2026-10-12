@@ -43,13 +43,15 @@
 
   <!-- 五、课表主体 -->
   <scroll-view class="board-scroll" scroll-y wx:else>
+    <!-- 表头和数据行**必须留在同一个横向滚动容器里**，否则横向滑动时两者会错位 -->
     <scroll-view class="board-hscroll" scroll-x>
 
       <view class="board">
 
         <!-- 5.1 表头：日期（今天那列加 today 高亮）+ 空闲节数 -->
         <view class="board-row header-row">
-          <view class="period-col header-corner">
+          <!-- sticky-col：横向滑动时把节次列钉在最左边 -->
+          <view class="period-col sticky-col header-corner">
             <text class="corner-text">节次</text>
           </view>
           <view
@@ -73,7 +75,7 @@
           wx:for-index="rowIndex"
           wx:key="key"
         >
-          <view class="period-col">
+          <view class="period-col sticky-col">
             <text class="period-name">{{row.label}}</text>
             <text class="period-time" wx:if="{{row.timeText}}">{{row.timeText}}</text>
           </view>

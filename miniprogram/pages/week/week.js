@@ -33,6 +33,9 @@ const periods = require('../../utils/periods.js');
 /** 7 列的表头名（顺序固定：0 = 周一） */
 const WEEKDAY_NAMES = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 
+/** 一周 7 天：用常量而不是到处写 7，免得哪天漏改一处造成索引错位 */
+const DAYS_PER_WEEK = WEEKDAY_NAMES.length;
+
 /** 兜底行的 key：不在任何节次内、也没有时间的任务放这里（不计入空闲节数） */
 const FALLBACK_ROW_KEY = 'other';
 
@@ -169,7 +172,7 @@ Page({
 
     // 哪些任务属于这一天：一次性算好 7 天，避免每格重复过滤
     const perDay = [];
-    for (let i = 0; i < 7; i += 1) {
+    for (let i = 0; i < DAYS_PER_WEEK; i += 1) {
       const date = addDays(weekMonday, i);
       perDay.push(tasks.filter((task) => this.taskOnDate(task, date)));
     }
@@ -253,6 +256,24 @@ Page({
   onTapAdd() {
     wx.navigateTo({ url: '/pages/edit/edit' });
   },
+
+  /**
+   * 【仅测试用】把页面内部用到的纯函数挂出来，供 utils/tests/week_free.test.js 直接调用。
+   *
+   * 为什么挂在这里而不是另开一个模块：这样测试跑的就是**页面真正在用的那一份实现**，
+   * 不会出现"测的是一份、跑的是另一份"。小程序框架只会调用它认识的生命周期与事件
+   * 方法（onLoad/onShow/onXxx），这个下划线开头的键永远不会被触发。
+   *
+   * 【为什么必须常驻】「空闲节数」这个 bug 曾经在真机上活了一整个版本 ——
+   * 当时六份测试文件全绿，但没有一条断言"空闲 = 总行数 − 被占用的行数"。
+   * 只有把 buildGrid 暴露出来，才可能在纯 node 里对这条等式下断言。
+   */
+  __test: {
+    buildGrid: buildGrid,
+    occupiedRowsOfDay: occupiedRowsOfDay,
+    periodSpanOf: periodSpanOf,
+    locateRow: locateRow,
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -262,7 +283,7 @@ Page({
 /**
  * 把「每天的任务」排成「行 × 列」的网格。
  *
- * @param {Array<Array<object>>} perDay 7 个数组，下标 0 = 周一
+ * @param {Array<Array<object>>} perDay 恰好 DAYS_PER_WEEK（7）个数组，下标 0 = 周一
  * @param {object|null} override 校准过的作息表 {"5": ["11:45","12:25"], ...}
  * @param {string} weekMonday 本周周一（YYYY-MM-DD），用来兜底日期
  * @returns {{rows: Array, days: Array, freeCounts: Array<number>}}
@@ -333,7 +354,7 @@ function buildGrid(perDay, override, weekMonday) {
 
   // 4) 铺成 7 列；同一行里多条任务都塞进同一个 cell，由 WXSS 并排排列
   const days = [];
-  for (let d = 0; d < 7; d += 1) {
+  for (let d = 0; d < DAYS_PER_WEEK; d += 1) {
     const cells = rows.map((row, rowIndex) => ({
       key: row.key,
       tasks: buckets[rowIndex]
@@ -343,18 +364,65 @@ function buildGrid(perDay, override, weekMonday) {
     days.push({ date: addDays(weekMonday, d), cells });
   }
 
-  // 5) 空闲节数：只统计「真正的课」那一行 —— 午休/休息空档与「其他时段」都不算
+  // 5) 空闲节数 = 「真正的课」总行数 − 这一天**被占用的行数**
+  //
+  // 【为什么不能复用 buckets（血泪教训）】buckets 是"每个任务只放进**起始行**"的桶，
+  // 那是给"画"用的规则（见文件头：连堂只画在起始行，避免同一件事出现三次）。
+  // 但空闲统计如果也用它，一条「第3-4节」就只算占了 1 行 —— 第 4 节会被当成空着。
+  // 真机上就是这样：周一显示"空闲 10 节"，而实际被占 5 节、空闲应该是 8 节，
+  // 两列都恰好等于 「总行数 − 卡片数」，一眼就能看出数错了对象。
+  // 所以这里**另算一份"被占用的行"**：一条任务覆盖到的每一行都算被占。
+  //
+  // 两条既有排除规则保持不变：
+  //   * row.isBreak（午休 / 休息空档）不计入空闲
+  //   * FALLBACK_ROW_KEY（"其他时段"兜底行）不计入空闲
   const freeCounts = [];
-  for (let d = 0; d < 7; d += 1) {
+  for (let d = 0; d < DAYS_PER_WEEK; d += 1) {
+    const occupied = occupiedRowsOfDay(buckets, rows, rowIndexOfPeriod, d);
     let free = 0;
     rows.forEach((row, rowIndex) => {
-      if (row.isBreak || row.key === FALLBACK_ROW_KEY) return;
-      if (!buckets[rowIndex].some((item) => item.dayIndex === d)) free += 1;
+      if (row.isBreak || row.key === FALLBACK_ROW_KEY) return; // 空档行与兜底行都不算
+      if (!occupied[rowIndex]) free += 1;
     });
     freeCounts.push(free);
   }
 
   return { rows, days, freeCounts };
+}
+
+/**
+ * 算出某一天「被占用的行」——一条任务把它 span 覆盖到的**每一行**都标为占用。
+ *
+ * 与渲染用的 buckets 是两份数据，故意的：渲染要"连堂只画一次"，
+ * 统计要"每一节都算真的被占了"（见上面第 5 步的长注释）。
+ *
+ * @param {Array<Array<{dayIndex: number, task: object}>>} buckets 每个任务只出现在它的起始行
+ * @param {Array<object>} rows 行数组（用来索引）
+ * @param {object} rowIndexOfPeriod 节次号 → 行下标
+ * @param {number} dayIndex 0 = 周一
+ * @returns {Array<boolean>} 长度与 rows 相同；true = 这一行在这一天被占了
+ */
+function occupiedRowsOfDay(buckets, rows, rowIndexOfPeriod, dayIndex) {
+  const occupied = [];
+  for (let i = 0; i < rows.length; i += 1) occupied.push(false);
+
+  buckets.forEach((items) => {
+    items.forEach((item) => {
+      if (!item || item.dayIndex !== dayIndex) return;
+      const span = periodSpanOf(item.task);
+      if (!span) {
+        // 没有 span 的（落进「其他时段」的兜底任务）不占任何课节行，保持原样
+        return;
+      }
+      for (let n = span[0]; n <= span[1]; n += 1) {
+        const index = rowIndexOfPeriod[n];
+        // 越界的节次号（例如写了"第14节"但表里只有 13 行）安全忽略
+        if (index !== undefined && occupied[index] !== undefined) occupied[index] = true;
+      }
+    });
+  });
+
+  return occupied;
 }
 
 /**
