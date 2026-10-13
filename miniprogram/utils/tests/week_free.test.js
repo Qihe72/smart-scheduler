@@ -25,6 +25,55 @@
  *   而不是复制粘贴一份到测试里（那种"测的是一份、跑的是另一份"最容易假绿）。
  *
  * 【本文件只 require 被测页面 + ./harness.js】不 require 任何别的测试文件。
+ *
+ * ===========================================================================
+ * 【第二个必须存在的理由：卡片高度 = 时间跨度】
+ *   同上，另一条"断言替 bug 背书"的例子：本文件曾经断言「没有 periods 的任务
+ *   就是 1 行高」并配文"高度由 periodSpanOf 决定，与落点无关"。那句话没错，
+ *   但它把**卡片高度**与**时间跨度**解耦了 —— 于是真机上「参加双选会 14:00-18:00」
+ *   只画了一格高，用户问"这个双选会的篇幅是不是起码要覆盖到第八节课呢"。
+ *   现在的高度口径是 `rowSpanFromTimes`（半开区间求交），而落点、占用行数、
+ *   卡片高度**三者共用它**。对应的断言组：
+ *     * 「真机用例 —— 双选会 14:00-18:00 要撑满第5~8节」
+ *     * 「反面 —— 短任务不许被撑高」「反面 —— 10:00-14:30 连续跨过午休行」
+ *     * 「反面 —— 写了 periods 的任务高度/占用完全不变」
+ *     * 「反面 —— 截止（只有 end_time）高度 1 行且不占任何行」
+ *     * 「反面 —— 只有开始时间时按 estimate_min 定跨度」
+ *   这些断言是不是摆设，用下面这条自检证明（本次改动实测过）：
+ *     ① 把 week.js 的 viewTask 里 spanCount 的映射临时改回"恒为 1" → **恰好红 8 条**，
+ *        全是"卡片高度/spanCount"那几条；
+ *     ② 把 resolveSpan 末尾的 `occupiedRows: occupied` 临时改回
+ *        `occupiedRows: [occupied[0]]`（只占落点那一行）→ **恰好红 10 条**，
+ *        全是"空闲 N 节/占用行数"那几条；
+ *     ③ 把 resolveSpan 末尾的 `landingRow: blockRows[0]` + `blockRows: blockRows`
+ *        临时改回 `landingRow: occupied[0]` + `blockRows: occupied`
+ *        （即"锚点=跨度第一行、高度=整段行数"）→ **恰好红 13 条**，
+ *        全是「① 双选会落点/高度/不在午休行」那几条，**②③④⑤⑥ 一条不红**
+ *        （这正是"这一处逻辑只影响那一种情形"的证据）。
+ *   三组红的集合互不重叠，说明"高度"、"占用"、"锚点"各自都被测住了，没有互相掩护。
+ *
+ * ===========================================================================
+ * 【第三段必须存在的理由：锚点与高度也要只看真实课节行】
+ *   第二轮真机反馈：用户的校准作息里**午休行是 12:25-14:15**，而双选会 14:00 开始 ——
+ *   14:00 落在午休行**里面**，于是"跨度第一行"把锚点定到了午休行：卡片从 12:25
+ *   那一行开始画，而卡上时间文字写着 14:00-18:00。用户原话是
+ *   "视觉上等于暗示这个活动 12:25 就开始了"。
+ *   ⇒ 锚点/高度只在 isClass 行之间取（heightFrom/heightTo）；占用跨度保持含空档
+ *     （from/to），所以「空闲 N 节」不变。两组关键断言：
+ *     * 「真机用例（第二轮）—— 校准作息下午休行只压 15 分钟，锚点必须是第7节」
+ *     * 「回归护栏 —— 整段时间都在空档里的任务，仍落空档行」
+ *   第 1 轮与第 2 轮**不是反复无常**：第 1 轮解决"一格高"，第 2 轮解决"从头错位"，
+ *   两轮的判据都写在 pages/week/week.js 的 rowSpanFromTimes 注释里。
+ *
+ * ===========================================================================
+ * 【探针】preview/probe_span.js 是用户写的核对脚本（走 buildGrid 这个真实入口，
+ *   打印六条场景）。它只打印、不会红，所以「探针六条」那一组把它的结论钉成了断言。
+ * ===========================================================================
+ *
+ * 【当前基线】本文件 341 条断言；跑全量 run.js 是 2353 条
+ *   （本次改动前分别是 274 / 2286；再往前是 201 / 2213）。
+ *   数字变了不一定有问题，但**通过数突然下降**要当成"有断言没跑到"来查
+ *   （本文件就出过一次：`testOnShow();` 漏了 return，整批异步断言一条没跑还全绿）。
  */
 
 'use strict';
@@ -144,6 +193,17 @@ function titlesAt(built, dayIndex, key) {
   var index = rowIndexOf(built.rows, key);
   if (index === -1) return ['(没有这一行)'];
   return (built.days[dayIndex].cells[index].tasks || []).map(function (t) { return t.title; });
+}
+
+/**
+ * 某天某行里画出来的**卡片本身**（要读 spanCount / blockHeight / blockStyle 时用它）。
+ * 断言卡片高度用不着解析 inline style —— spanCount 是它的唯一来源，
+ * 而 blockHeight = chipHeightOf(spanCount) 又已经被前面那组逐一验过。
+ */
+function cardsAt(built, dayIndex, key) {
+  var index = rowIndexOf(built.rows, key);
+  if (index === -1) return [];
+  return built.days[dayIndex].cells[index].tasks || [];
 }
 
 // ===========================================================================
@@ -714,11 +774,13 @@ function run() {
   // ⑤ 不变式：既有两类排除规则与连堂口径都没被这次改动破坏
   block('截止口径改动后 —— 既有不变式仍然成立');
   eq(countableRows(builtBoth.rows), DEFAULT_ROWS - 1, '计入行数仍是 13 − 1（午休被排除）');
-  // builtBoth = [第 1 节的 event, 一条无 span 的 event（落兜底行）]
-  // 无 span 的任务不占任何课节行（既有口径），所以被占的是"第 1 节"那 1 行。
+  // builtBoth = [第 1 节的 event, 一条既没节次也没时间的 event（落兜底行）]
+  // 【口径更新】那条"什么都没有"的任务现在算**占住兜底行本身**（它确实画在那儿，
+  //   说它不占任何行会让「画了却没被算占用」再现）。但兜底行本来就不计入空闲，
+  //   所以下面的数字与旧口径完全一样 —— 这条断言是"两种口径在数字上一致"的见证。
   eq(builtBoth.freeCounts[0], countableRows(builtBoth.rows) - 1,
     '空闲 = 计入行数(12) − 被占行数(1) = 11（走任务的 event 占第 1 节；'
-    + '落兜底行的那条无 span，不占课节）');
+    + '落兜底行的那条占的是兜底行，而兜底行不计入空闲）');
   var builtSpanAgain = T.buildGrid(perDayOf({ 0: [course('sp', '三连堂', '7-9')] }), null, WEEK_MONDAY);
   eq(builtSpanAgain.freeCounts[0], DEFAULT_ROWS - 3,
     '连堂仍按跨的节数算（13 − 3 = 10）—— 没有被 ddl 的改动带偏');
@@ -810,19 +872,31 @@ function run() {
   eq(T.bestOverlapPeriod('12:00', '13:00', null), null, 'bestOverlapPeriod：都不相交 → null');
   eq(T.bestOverlapPeriod('09:00', '', null), 2,
     'end 缺失时按零长区间处理（09:00 在第 2 节 08:55-09:40 内 → 第 2 节）');
-  eq(T.bestOverlapPeriod('10:45', '10:00', null), 3,
-    'end 早于 start 的脏数据按零长区间处理（10:45 在第 3 节内 → 第 3 节）');
+  eq(T.bestOverlapPeriod('10:45', '10:00', { estimateMin: 30 }), 4,
+    'end 早于 start 的脏数据：按 start + 30 分钟推成 10:45-11:15 → 与第 4 节（10:55-11:40）'
+    + '重叠 15 分钟、与第 3 节（10:00-10:45）重叠 0 分钟 → **第 4 节**'
+    + '（旧版把倒挂当成"一个点"→ 会吸附到第 3 节；那条口径与"算跨度"那条路不一致，已统一）');
+  eq(T.bestOverlapPeriod('10:45', '10:00', null), 4,
+    '不传 estimateMin 时用 30 分钟兜底，结果同上');
   eq(T.bestOverlapPeriod('', '12:00', null), null, 'start 为空 → null（那条路径不归它管）');
 
-  // ⑨ 卡片高度：没有 periods 的任务仍是一格高（高度由 periodSpanOf 决定，与落点无关）
+  // ⑨ 卡片高度：**这一条 09:55-10:55 确实只跨 1 行**，所以它应该是一格高。
+  //
+  //    ⚠️ 【这条注释改过一次，请别再改回去】原文写的是"高度由 periodSpanOf 决定，
+  //    与落点无关"—— 那句话把"卡片高度"和"时间跨度"彻底解耦了，于是 14:00-18:00
+  //    那样的四节课时长也被画成一格高（真机反馈：用户问"篇幅是不是该覆盖到第八节"）。
+  //    现在的口径是：**没有 periods 的任务，高度 = 它按时间真正跨的行数**，
+  //    由 buildGrid 第 4 步统一算好交给 viewTask。
+  //    这一条之所以还成立，是因为 09:55-10:55 真的只与第 3 节相交（不是"没 periods 就 1 行"）。
+  //    配套的反面约束见下面「真机用例」与「反面 —— 短任务不许被撑高」两组。
   var builtTimed = T.buildGrid(perDayOf({
     0: [timedTask('t6', '中间那件事', '09:55', '10:55')]
   }), null, WEEK_MONDAY);
   eq(builtTimed.days[0].cells[rowIndexOf(builtTimed.rows, '3')].tasks[0].spanCount, 1,
-    '没有 periods 的任务 spanCount 仍是 1（**一格高**）');
+    '09:55-10:55 只跨 1 行 → spanCount = 1（**是"真的只跨一行"，不是"没 periods 就一格"**）');
   eq(builtTimed.freeCounts[0], DEFAULT_ROWS - 1,
-    '它占第 3 节那一行 → 空闲 12（落点变了，统计口径没变 —— '
-    + '排版与统计共用 resolveSpan，不会出现"画在某行却没被算占用"）');
+    '它占第 3 节那一行 → 空闲 12（落点与统计共用 resolveSpan，'
+    + '不会出现"画在某行却没被算占用"）');
 
   // ⑩ 空档行**可以接任务** —— 保留 Python 版原意（config.py:225-234
   //    "让这段时间真的能接住任务"）。判据：午休行是 periodRows 生成的一行、
@@ -875,6 +949,445 @@ function run() {
   }), null, WEEK_MONDAY);
   eq(builtMixed.freeCounts[0], DEFAULT_ROWS - 3,
     '按时段的占第 3 节 + 课程的占第 1-2 节 → 空闲 10（两件都被算进占用）');
+
+  // ===========================================================================
+  // 真机反馈（第 1 轮）：周四「参加双选会 14:00-18:00」只画了一格高
+  //   用户原话："这个双选会的篇幅是不是起码要覆盖到第八节课呢"
+  //
+  // 【为什么这一组必须存在】上面第 ⑨ 条断言当时写的是"没有 periods 的任务
+  //   一格高"，还配了一句"（高度由 periodSpanOf 决定，与落点无关）" ——
+  //   那句话就是把**卡片高度**与**时间跨度**锁死的元凶：只要没写 periods，
+  //   哪怕时间是 14:00-18:00，也永远只有一格高。断言本身没写错，
+  //   它只是把 bug 当成了规格（**断言也能替 bug 背书**，这是本组存在的理由）。
+  //
+  // 【口径】这里用**默认作息**（13 行全是课，没有空档行）—— 它是"高度 = 跨度行数"
+  //   最干净的一档：没有 isClass/isBreak 之分，heightFrom/heightTo 与 from/to 相同。
+  //   "空档行夹在中间"那一档见下一组（默认作息里没有空档行，测不到）。
+  //   行高常量 ROW / GAP 在上一组已经取好，这里直接复用。
+  // ===========================================================================
+  block('真机用例 —— 双选会 14:00-18:00 要撑满第5~8节');
+
+  /** 周四（下标 3）的双选会：没有 periods，只有起止时间 */
+  var fairTask = timedTask('fair', '参加双选会', '14:00', '18:00');
+  var builtFair = T.buildGrid(perDayOf({ 3: [fairTask] }), null, WEEK_MONDAY);
+
+  eq(builtFair.rows.length, DEFAULT_ROWS, '默认作息下仍是 13 行（没有多出行来）');
+  eq(rowIndexOf(builtFair.rows, 'other'), -1,
+    '它完整落在课节里 → 不该出现「其他时段」兜底行');
+  isTrue(T.bestOverlapPeriod('14:00', '18:00', null) === 5,
+    '**落点 = 第 5 节**（14:00-18:00 与第 5 节 14:00-14:45 重叠 45 分钟，是并列最大的那一节里最小的）');
+
+  // 【半开区间】18:00 与第 8 节（16:55-17:40）相交、与第 9 节（19:00-19:45）不相交 →
+  //   跨的是第 5、6、7、8 节共 4 行，**不含第 9 节**
+  var fairSpan = T.rowSpanFromTimes(fairTask, builtFair.rows, null);
+  isTrue(!!fairSpan, 'rowSpanFromTimes 算得出它的行跨度');
+  eq(fairSpan ? (fairSpan.to - fairSpan.from + 1) : -1, 4,
+    '**真实跨度 = 4 行**（第 5/6/7/8 节）');
+  eq(fairSpan ? builtFair.rows[fairSpan.from].key : '?', '5', '跨度从第 5 节行开始');
+  eq(fairSpan ? builtFair.rows[fairSpan.to].key : '?', '8', '跨度到第 8 节行结束');
+  isFalse(fairSpan ? builtFair.rows[fairSpan.to].key === '9' : true,
+    '反面对照：**不覆盖第 9 节**（18:00 早于第 9 节 19:00 开始，半开区间不算相交）');
+
+  // 卡片高度（用户真正看到的东西）
+  var fairCard = cardsAt(builtFair, 3, '5')[0];
+  isTrue(!!fairCard, '卡片画在第 5 节那一行');
+  eq(fairCard ? fairCard.title : '(没有卡片)', '参加双选会', '画出来的就是它');
+  eq(fairCard ? fairCard.spanCount : -1, 4, '**卡片 spanCount = 4 行**（修复前恒为 1）');
+  eq(fairCard ? fairCard.blockHeight : -1, 4 * ROW - GAP,
+    '**卡片高度 = 4 × 行高 − 间隙 = ' + (4 * ROW - GAP) + 'rpx**');
+  isTrue(fairCard ? fairCard.isBlock === true : false,
+    '标记为跨节卡片（会加阴影、抬高层级，盖住它跨过的行）');
+  eq(titlesAt(builtFair, 3, '6').length, 0, '连堂只画在起始行：第 6 节行没有第二张卡');
+  eq(titlesAt(builtFair, 3, '7').length, 0, '第 7 节行也没有');
+  eq(titlesAt(builtFair, 3, '8').length, 0, '第 8 节行也没有');
+
+  // 占用（「空闲 N 节」这个数字）
+  eq(builtFair.freeCounts[3], DEFAULT_ROWS - 4,
+    '**周四空闲 = 13 − 4 = 9 节**（修复前是 13 − 1 = 12，凭空多出 3 节空闲）');
+  isFalse(builtFair.freeCounts[3] === DEFAULT_ROWS - 1,
+    '反面对照：**不是 12** —— 那正是"只按落点那一节扣"的旧算法');
+  // 同一份口径的两个出口：占用行数 = 卡片跨的行数（默认作息没有空档行，两者必然相等）
+  var fairResolved = T.spanFor({ task: fairTask, rows: builtFair.rows, override: null });
+  eq((fairResolved.occupiedRows || []).length, fairCard ? fairCard.spanCount : -1,
+    '**"画几行"与"占几行"都来自 rowSpanFromTimes**（默认作息下两者相等）');
+  eq((fairResolved.occupiedRows || []).join(','),
+    [fairSpan.from, fairSpan.from + 1, fairSpan.from + 2, fairSpan.to].join(','),
+    '占用的就是连续那 4 行：' + (fairResolved.occupiedRows || []).join(','));
+  eq((fairResolved.blockRows || []).length, 4, 'blockRows（卡片要盖的行）= 4 行');
+  eq(fairResolved.landingRow, fairSpan.from, '落点 = 跨度的第一行（默认作息下两者同源）');
+
+  // ===========================================================================
+  // 真机反馈（第 2 轮）：**用户那份真实校准作息**下，双选会的锚点落到了「午休」行
+  //
+  //   校准作息里第 6 节（午休）是 12:25-14:15，而双选会 14:00 开始 ——
+  //   14:00 落在午休行**里面**（重叠 15 分钟）。于是"跨度第一行"把锚点定到了午休行：
+  //   卡片从 12:25 那一行开始画，而卡上的时间文字写着 14:00-18:00。
+  //   用户原话："视觉上等于暗示这个活动 12:25 就开始了"。
+  //
+  //   【修法】锚点与高度**只在真实课节行（isClass）之间取**；占用跨度保持含空档。
+  //     ⇒ 落点 = 第 7 节（14:15，第一条与它相交的真课）、高度 4 行（第 7~10 节）、
+  //       「空闲仍 8」不变（午休那 15 分钟照旧算占，只是卡片不再盖它）。
+  //
+  //   【为什么"高度"和"占用"可以不相等】占用 = "这段时间被占住了"；
+  //     高度 = "卡片要盖住几节课"。硬绑成一个数，就只能在"从午休行开始画"和
+  //     "少扣一节空闲"之间二选一 —— 而这两个都是错的。
+  // ===========================================================================
+  block('真机用例（第二轮）—— 校准作息下午休行只压 15 分钟，锚点必须是第7节');
+
+  /** 用户真机那份校准作息（preview/probe_span.js 里那份，13 节全给） */
+  var REAL_CAL = {
+    '1': ['08:30', '09:10'], '2': ['09:15', '09:55'], '3': ['10:15', '10:55'],
+    '4': ['11:00', '11:40'], '5': ['11:45', '12:25'], '7': ['14:15', '15:00'],
+    '8': ['15:05', '15:40'], '9': ['16:00', '16:40'], '10': ['16:45', '17:25'],
+    '11': ['19:00', '19:40'], '12': ['19:45', '20:20'], '13': ['20:30', '21:10']
+  };
+  var builtReal = T.buildGrid(perDayOf({ 3: [fairTask] }), REAL_CAL, WEEK_MONDAY);
+
+  var realBreakIdx = -1;
+  builtReal.rows.forEach(function (r, i) { if (r.isBreak) realBreakIdx = i; });
+  isTrue(realBreakIdx !== -1, '第 6 节被认定为「午休」空档行（第 5 / 7 节都校准过）');
+  eq(builtReal.rows[realBreakIdx] ? builtReal.rows[realBreakIdx].key : '?', '6',
+    '午休行就是第 6 节那一行');
+  eq(builtReal.rows[realBreakIdx] ? builtReal.rows[realBreakIdx].timeText : '?', '12:25-14:15',
+    '它的区间是 12:25-14:15 —— 所以 14:00 开始的双选会**确实压住了它 15 分钟**');
+  isTrue(builtReal.rows[realBreakIdx] ? builtReal.rows[realBreakIdx].isClass === false : false,
+    '它被标记成 isClass=false（不参与锚点与高度，但仍参与占用跨度）');
+  eq(countableRows(builtReal.rows), DEFAULT_ROWS - 1, '计入空闲的行数 = 12（午休被排除）');
+
+  var realSpan = T.rowSpanFromTimes(fairTask, builtReal.rows, REAL_CAL);
+  isTrue(!!realSpan, 'rowSpanFromTimes 算得出跨度');
+  // 占用跨度：含午休行 —— 5 行
+  eq(realSpan ? builtReal.rows[realSpan.from].key : '?', '6',
+    '占用跨度**确实从午休行开始**（14:00 压在 12:25-14:15 里）—— 占用口径没变');
+  eq(realSpan ? builtReal.rows[realSpan.to].key : '?', '10', '占用到第 10 节行结束');
+  eq(realSpan ? (realSpan.to - realSpan.from + 1) : -1, 5, '占用 5 行（第 6/7/8/9/10 节）');
+  // 高度跨度：只看真实课节 —— 4 行
+  eq(realSpan ? builtReal.rows[realSpan.heightFrom].key : '?', '7',
+    '**高度从第 7 节行开始**（第一条与它相交的**真课**，14:15）');
+  eq(realSpan ? builtReal.rows[realSpan.heightTo].key : '?', '10', '高度到第 10 节行结束');
+  eq(realSpan ? (realSpan.heightTo - realSpan.heightFrom + 1) : -1, 4,
+    '**高度 = 4 行**（第 7/8/9/10 节）');
+
+  var realCard = cardsAt(builtReal, 3, '7')[0];
+  isTrue(!!realCard, '**卡片画在第 7 节那一行**（不再是午休行）');
+  isFalse(!!cardsAt(builtReal, 3, '6').length,
+    '反面对照：**午休行里没有这张卡**（这正是用户报的错位）');
+  eq(realCard ? realCard.spanCount : -1, 4, '**spanCount = 4**（不是 5）');
+  isFalse(realCard ? realCard.spanCount === 5 : true,
+    '反面对照：**不等于 5 行** —— 那意味着卡片从午休行一直盖到第 10 节');
+  eq(realCard ? realCard.blockHeight : -1, 4 * ROW - GAP,
+    '卡片高度 = 4 × 行高 − 间隙 = ' + (4 * ROW - GAP) + 'rpx');
+  // 卡片盖住的行 = 第 7~10 节那 4 行，正好对上它自己的时间文字 14:00-18:00
+  var realResolved = T.spanFor({ task: fairTask, rows: builtReal.rows, override: REAL_CAL });
+  eq(realResolved.landingRow, realSpan ? realSpan.heightFrom : -1,
+    '**落点 = 高度跨度的第一行**（口径只有一条）');
+  eq((realResolved.blockRows || []).length, 4, 'blockRows = 4 行');
+  eq((realResolved.occupiedRows || []).length, 5,
+    'occupiedRows 仍是 5 行（含午休）—— 占用不跟着高度一起缩');
+  isTrue((realResolved.occupiedRows || []).indexOf(realBreakIdx) !== -1,
+    '午休行仍在占用里（那 15 分钟确实被占了）');
+  isTrue((realResolved.blockRows || []).indexOf(realBreakIdx) === -1,
+    '但**不在 blockRows 里**（卡片不再从午休行画起）—— 两个集合故意不同');
+  eq(builtReal.days[3].cells[realBreakIdx].tasks.length, 0,
+    '渲染结果印证：午休行那一格是空的');
+  eq(builtReal.freeCounts[3], DEFAULT_ROWS - 1 - 4,
+    '**周四空闲仍是 8**（12 − 4）—— 换了锚点、数字不变，'
+    + '因为第 6 节本来就不在"可计行数"的分母里');
+  eq(builtReal.freeCounts[3], 8, '数值上就是 8（与探针一致）');
+
+  // ===========================================================================
+  // 反面 6：**空档行仍然能接任务**（本次改动最大的误伤风险）
+  //   新规则是"有真课可落时，空档行不参与定锚点"—— 很容易顺手写成"空档行不接任务"，
+  //   那会把上一轮特意保留的行为弄丢（见 bestOverlapPeriod 的注释：Python 版
+  //   config.py:225-234 "让这段时间真的能接住任务"）。
+  //   判据：一条**整段时间都在空档里**的任务必须照旧落在空档行。
+  //   用户那份校准作息里午休是 12:25-14:15，所以 12:30-13:10 落在它里面。
+  // ===========================================================================
+  block('回归护栏 —— 整段时间都在空档里的任务，仍落空档行');
+  var inGap = timedTask('ingap', '午休里的事', '12:30', '13:10');
+  var builtGap = T.buildGrid(perDayOf({ 3: [inGap] }), REAL_CAL, WEEK_MONDAY);
+  var gapBreakIdx = -1;
+  builtGap.rows.forEach(function (r, i) { if (r.isBreak) gapBreakIdx = i; });
+  isTrue(gapBreakIdx !== -1, '校准作息下第 6 节是「午休」');
+  var gapSpan = T.rowSpanFromTimes(inGap, builtGap.rows, REAL_CAL);
+  isTrue(!!gapSpan, '它算得出跨度（与午休行有 40 分钟交集）');
+  eq(gapSpan ? gapSpan.from : -1, gapBreakIdx, '跨度就是午休那一行');
+  eq(gapSpan ? gapSpan.heightFrom : -2, gapBreakIdx,
+    '**高度起点也退回午休行**（没有真课可落时，空档行照旧是它的位置）');
+  eq(gapSpan ? (gapSpan.heightTo - gapSpan.heightFrom + 1) : -1, 1, '高度 1 行');
+  var gapCard = cardsAt(builtGap, 3, '6')[0];
+  isTrue(!!gapCard, '**卡片仍然画在午休行**（这条一破，12:30 的午休安排就消失了）');
+  isFalse(!!cardsAt(builtGap, 3, '7').length,
+    '反面对照：**不会**被推到第 7 节（那会凭空把它挪到 14:15）');
+  eq(gapCard ? gapCard.spanCount : -1, 1, '一格高');
+  var gapResolved = T.spanFor({ task: inGap, rows: builtGap.rows, override: REAL_CAL });
+  eq(gapResolved.landingRow, gapBreakIdx, '落点 = 午休行');
+  eq(builtGap.freeCounts[3], DEFAULT_ROWS - 1,
+    '**空闲仍是 12**（午休行不计入空闲，往里面放卡片不扣任何课节）');
+  isFalse(builtGap.freeCounts[3] === DEFAULT_ROWS - 2,
+    '反面对照：不是 11（那才说明它扣掉了一个真课节）');
+
+  // ===========================================================================
+  // 探针六条 —— 把 preview/probe_span.js 的六个场景**逐条钉成断言**
+  //
+  // 【为什么值得再写一遍】探针里那六条是用户随手跑的核对清单，覆盖了这次改动的
+  // 全部分支（真课锚点/空档锚点/截止/periods/两种作息）。探针的输出只是打印，
+  // 谁改了代码都不会红 —— 这里把它们变成断言，才是"改坏了会被拦下来"。
+  // 探针本身不用改：它走的是 buildGrid 这个页面真正在用的入口。
+  // ===========================================================================
+  block('探针六条 —— 逐条钉住（真课锚点 / 空档锚点 / 截止 / periods / 两种作息）');
+
+  // ① 双选会（真机那条，无 periods）：真课锚点被午休行"咬掉"15 分钟
+  eq(realSpan ? builtReal.rows[realSpan.heightFrom].key : '?', '7', '① 落点 = 第 7 节');
+  eq(realCard ? realCard.spanCount : -1, 4, '① spanCount = 4');
+  eq(realCard ? realCard.blockHeight : -1, 4 * ROW - GAP, '① blockHeight = 472rpx（4 行）');
+  isFalse(realCard ? realCard.spanCount === 5 : true, '① 反面：不是 5 行');
+  eq(builtReal.freeCounts[3], 8, '① 周四空闲 = 8');
+  eq(builtReal.days[3].cells[realBreakIdx].tasks.length, 0, '① 反面：卡片不在「午休」行里');
+
+  // ② 短任务 09:55-10:55（校准作息）：只压第 3 节
+  var shortReal = timedTask('shortReal', '短任务', '09:55', '10:55');
+  var builtShortReal = T.buildGrid(perDayOf({ 3: [shortReal] }), REAL_CAL, WEEK_MONDAY);
+  eq(cardsAt(builtShortReal, 3, '3')[0] ? cardsAt(builtShortReal, 3, '3')[0].spanCount : -1, 1,
+    '② 落第 3 节、1 行');
+  eq(builtShortReal.freeCounts[3], 11, '② 空闲 = 11（12 − 1）');
+
+  // ③ 跨午休 10:00-14:30（校准作息）：锚点第 3 节、连续到第 7 节
+  var crossReal = timedTask('crossReal', '跨午休', '10:00', '14:30');
+  var builtCrossReal = T.buildGrid(perDayOf({ 3: [crossReal] }), REAL_CAL, WEEK_MONDAY);
+  var crossRealSpan = T.rowSpanFromTimes(crossReal, builtCrossReal.rows, REAL_CAL);
+  eq(crossRealSpan ? builtCrossReal.rows[crossRealSpan.heightFrom].key : '?', '3',
+    '③ 落点仍是第 3 节');
+  eq(crossRealSpan ? builtCrossReal.rows[crossRealSpan.heightTo].key : '?', '7',
+    '③ 高度仍覆盖到第 7 节');
+  eq(cardsAt(builtCrossReal, 3, '3')[0] ? cardsAt(builtCrossReal, 3, '3')[0].spanCount : -1, 5,
+    '③ spanCount 仍是 5（中途的午休行仍在跨度里）');
+  eq(builtCrossReal.freeCounts[3], 8, '③ 空闲 = 8');
+
+  // ④ 截止（只有 end_time）：1 行高、且不占时间
+  var ddlReal = { _id: 'ddlReal', title: '交材料', type: 'ddl', date: WEEK_MONDAY,
+    priority: 'high', repeat: 'none', done: false, periods: '', start_time: '', end_time: '12:00' };
+  var builtDdlReal = T.buildGrid(perDayOf({ 3: [ddlReal] }), REAL_CAL, WEEK_MONDAY);
+  eq(T.rowSpanFromTimes(ddlReal, builtDdlReal.rows, REAL_CAL), null,
+    '④ rowSpanFromTimes → null（没有开始时间就不是一段时间）');
+  var ddlRealCard = cardsAt(builtDdlReal, 3, '5')[0];
+  isTrue(!!ddlRealCard, '④ 卡片画在第 5 节行（12:00 在 11:45-12:25 里）');
+  eq(ddlRealCard ? ddlRealCard.spanCount : -1, 1, '④ 高度 1 行');
+  eq(builtDdlReal.freeCounts[3], 12, '④ 空闲 = 12（截止一格都不占）');
+
+  // ⑤ 连堂 periods 7-9：高度与占用都不许变
+  var perReal = course('perReal', '连堂课', '7-9');
+  var builtPerReal = T.buildGrid(perDayOf({ 3: [perReal] }), REAL_CAL, WEEK_MONDAY);
+  eq(cardsAt(builtPerReal, 3, '7')[0] ? cardsAt(builtPerReal, 3, '7')[0].spanCount : -1, 3,
+    '⑤ spanCount = 3（periods 口径一行没动）');
+  isTrue(titlesAt(builtPerReal, 3, '7').indexOf('连堂课') !== -1, '⑤ 画在第 7 节行');
+  eq(builtPerReal.freeCounts[3], 9, '⑤ 空闲 = 12 − 3 = 9');
+
+  // ⑥ 同一条双选会放在默认作息下：4 行、空闲 9（默认 13 节全是课）
+  eq(rowIndexOf(builtFair.rows, 'other'), -1, '⑥ 默认作息下没有兜底行');
+  eq(fairCard ? fairCard.spanCount : -1, 4, '⑥ 仍是 4 行');
+  eq(builtFair.freeCounts[3], 9, '⑥ 空闲 = 13 − 4 = 9');
+
+  // ===========================================================================
+  // 反面 1：**别把短任务也撑高** —— 09:55-10:55 只与第 3 节相撞，仍是 1 行
+  //   （这条与上面那条一起构成"要么是真跨了，要么不许变高"的双向约束。
+  //     只加"双选会要变高"而不加这条，下次有人把跨度算法写成"取 start 到 end
+  //     经过的所有节次"就会把 45 分钟的课也画成两行，而且没人会红。）
+  // ===========================================================================
+  block('反面 —— 短任务不许被撑高（09:55-10:55 仍是 1 行）');
+  var shortTask = timedTask('short', '中间那件事', '09:55', '10:55');
+  var builtShort = T.buildGrid(perDayOf({ 0: [shortTask] }), null, WEEK_MONDAY);
+  var shortSpan = T.rowSpanFromTimes(shortTask, builtShort.rows, null);
+  eq(shortSpan ? (shortSpan.to - shortSpan.from + 1) : -1, 1,
+    '09:55-10:55 只与第 3 节（10:00-10:45）相交 → **1 行**'
+    + '（与第 4 节 10:55 是首尾相接，半开区间不算重叠）');
+  eq(shortSpan ? (shortSpan.heightTo - shortSpan.heightFrom + 1) : -1, 1,
+    '高度跨度也是 1 行（没有空档行可夹）');
+  eq(cardsAt(builtShort, 0, '3')[0] ? cardsAt(builtShort, 0, '3')[0].spanCount : -1, 1,
+    '卡片 spanCount = 1（一格高）');
+  eq(builtShort.freeCounts[0], DEFAULT_ROWS - 1, '它只占第 3 节那一行 → 空闲 12');
+  isFalse(builtShort.freeCounts[0] === DEFAULT_ROWS - 2,
+    '反面对照：**不是 11**（不是 2 行）');
+  eq(cardsAt(builtShort, 0, '3')[0] ? cardsAt(builtShort, 0, '3')[0].isBlock : true, false,
+    '单行卡片不标 isBlock（不会去抬层级、加阴影）');
+
+  // ===========================================================================
+  // 反面 2：跨午休的任务 —— 卡片**连续**跨过午休行，但午休行不算"课"
+  //   两件事必须同时成立，否则要么卡片断开，要么「空闲 N 节」被空档行污染。
+  //   判据同前面 ⑩：午休行是 periodRows 生成的一行、有真实区间、真的画在网格里，
+  //   它本来就不计入空闲（分母已经扣掉它），所以卡片占它不会让数字变错。
+  //
+  //   【本组与上一组的区别 —— 这就是"两个端点集"存在的意义】
+  //     * 上一组（双选会 14:00 开始）：任务的**起点落在午休行内部** ⇒ 锚点必须跳过去，
+  //       高度 4 < 占用 5，两个集合**不同**；
+  //     * 本组（10:00 开始）：任务的**起点就在第 3 节里** ⇒ 锚点本来就是真课行，
+  //       高度 5 = 占用 5，两个集合**相同**（午休行只是夹在中间）。
+  //   两组合起来才说明新规则不是"一律跳过午休"（那会把本组的锚点也推走）。
+  // ===========================================================================
+  block('反面 —— 10:00-14:30 连续跨过午休行，但午休行不计入空闲');
+  var CROSS_CAL = { '5': ['11:45', '12:25'], '7': ['14:15', '15:00'] };  // 第 6 节 = 午休
+  var crossTask = timedTask('cross', '跨午休的事', '10:00', '14:30');
+  var builtCross = T.buildGrid(perDayOf({ 0: [crossTask] }), CROSS_CAL, WEEK_MONDAY);
+
+  var crossBreakIdx = -1;
+  builtCross.rows.forEach(function (r, i) { if (r.isBreak) crossBreakIdx = i; });
+  isTrue(crossBreakIdx !== -1, '校准第 5/7 节后，第 6 节被认定为「午休」空档行');
+  eq(countableRows(builtCross.rows), DEFAULT_ROWS - 1, '计入空闲的行数 = 13 − 1（午休被排除）');
+
+  var crossSpan = T.rowSpanFromTimes(crossTask, builtCross.rows, CROSS_CAL);
+  isTrue(!!crossSpan, 'rowSpanFromTimes 算得出跨度');
+  eq(crossSpan ? builtCross.rows[crossSpan.from].key : '?', '3',
+    '从第 3 节行开始（10:00 是默认第 3 节的起点）');
+  eq(crossSpan ? builtCross.rows[crossSpan.to].key : '?', '7', '一直到第 7 节行（14:15-15:00）');
+  eq(crossSpan ? (crossSpan.to - crossSpan.from + 1) : -1, 5, '占用 5 行');
+  isTrue(crossSpan ? crossSpan.from < crossBreakIdx && crossBreakIdx < crossSpan.to : false,
+    '**午休行夹在跨度中间**（下标 ' + crossBreakIdx + ' 落在 ['
+    + (crossSpan ? crossSpan.from : '?') + ',' + (crossSpan ? crossSpan.to : '?')
+    + '] 里）→ 卡片连续，不被空档行切断');
+  // 起点就在真课行上 ⇒ 高度跨度与占用跨度**完全一样**（午休行只在中间）
+  eq(crossSpan ? crossSpan.heightFrom : -1, crossSpan ? crossSpan.from : -2,
+    '**高度起点 = 占用起点**（任务是 10:00 开始的，锚点不用跳过任何空档行）');
+  eq(crossSpan ? crossSpan.heightTo : -1, crossSpan ? crossSpan.to : -2,
+    '高度终点 = 占用终点');
+  eq(crossSpan ? (crossSpan.heightTo - crossSpan.heightFrom + 1) : -1, 5,
+    '**高度仍是 5 行**（与改动前一致，中途的午休行仍在跨度里）');
+
+  var crossCard = cardsAt(builtCross, 0, '3')[0];
+  isTrue(!!crossCard, '**卡片锚在第 3 节行**（跨度与高度的共同起点）');
+  eq(crossCard ? crossCard.spanCount : -1, 5, '卡片高度 5 行');
+  eq(crossCard ? crossCard.blockHeight : -1, 5 * ROW - GAP,
+    'blockHeight = 5 × 行高 − 间隙 = ' + (5 * ROW - GAP) + 'rpx');
+
+  var crossResolved = T.spanFor({ task: crossTask, rows: builtCross.rows, override: CROSS_CAL });
+  isTrue((crossResolved.occupiedRows || []).indexOf(crossBreakIdx) !== -1,
+    '午休行**被标记为"被占"**（那 110 分钟确实被占了）');
+  eq(crossResolved.landingRow, crossSpan ? crossSpan.from : -1,
+    '**落点 = 跨度的第一行**（不是"重叠最多的那一行"—— 重叠最多的其实是午休行）');
+  eq((crossResolved.occupiedRows || []).length, crossCard ? crossCard.spanCount : -1,
+    '本组里"画几行"与"占几行"相等（两个集合重合的见证）');
+  // 【注意两个集合在"午休行夹在中间"时的差别】blockRows 是**卡片真正盖住的那一段连续行**，
+  // 它**包含**夹在中间的午休行（卡片就是压着那一格往下盖的）；它排除午休行只在一种情形：
+  // 午休行在锚点**之前**（双选会那种从午休行内部开始的任务）。所以这里断言的是"含"。
+  isTrue((crossResolved.blockRows || []).indexOf(crossBreakIdx) !== -1,
+    'blockRows **包含**夹在中间的午休行（卡片确实压着那一格）');
+  var builtCrossBase = T.buildGrid(perDayOf({ 0: [] }), CROSS_CAL, WEEK_MONDAY);
+  eq(builtCross.freeCounts[0], builtCrossBase.freeCounts[0] - 4,
+    '**空闲从 12 减到 8**：占用的 5 行里只有 4 行是"课"（午休行本来就不在分母里，不重复扣）'
+    + ' —— 实际 ' + builtCross.freeCounts[0]);
+
+  // ===========================================================================
+  // 反面 3：写了 periods 的任务 —— 高度与占用**一个字节都不许变**
+  //   （这次改动碰的是"没有 periods"那条分支。periods 是全项目最老的口径，
+  //     编辑页的冲突提示、导入、AI 解析全都依赖它。）
+  // ===========================================================================
+  block('反面 —— 写了 periods 的任务高度/占用完全不变');
+  var byPeriods = course('per79', '三节连堂', '7-9');
+  var builtByPeriods = T.buildGrid(perDayOf({ 0: [byPeriods] }), null, WEEK_MONDAY);
+  eq(cardsAt(builtByPeriods, 0, '7')[0] ? cardsAt(builtByPeriods, 0, '7')[0].spanCount : -1, 3,
+    "periods='7-9' → spanCount 仍是 3（既有口径）");
+  eq(cardsAt(builtByPeriods, 0, '7')[0] ? cardsAt(builtByPeriods, 0, '7')[0].blockHeight : -1,
+    3 * ROW - GAP, '高度仍是 3 × 行高 − 间隙');
+  eq(titlesAt(builtByPeriods, 0, '8').length, 0, '连堂仍只画在起始行');
+  eq(builtByPeriods.freeCounts[0], DEFAULT_ROWS - 3, '空闲仍按 3 节扣：13 − 3 = 10');
+  var perResolved = T.spanFor({ task: byPeriods, rows: builtByPeriods.rows,
+    rowIndexOfPeriod: { 7: 6, 8: 7, 9: 8 } });
+  eq((perResolved.occupiedRows || []).length, 3, 'occupiedRows = 3 个行下标');
+  eq((perResolved.occupiedRows || []).join(','), '6,7,8', '就是第 7/8/9 节那三行（下标 6,7,8）');
+  isFalse(perResolved.degenerate, '不是退化区间');
+
+  // ===========================================================================
+  // 反面 4：只有 end_time 的截止（ddl）—— 高度仍是 1 行，**而且一行都不占**
+  //   （这是本次改动最容易误伤的一条：ddl 只有结束时刻，若让跨度算法把它当成
+  //     "从 00:00 到 12:00 的一段"，它会撑满整个上午并把空闲全扣光。）
+  // ===========================================================================
+  block('反面 —— 截止（只有 end_time）高度 1 行且不占任何行');
+  var ddlOnly = { _id: 'ddlOnlyEnd', title: '提交材料', type: 'ddl', date: WEEK_MONDAY,
+    priority: 'high', repeat: 'none', done: false, periods: '', start_time: '', end_time: '12:00' };
+  var builtDdlOnly = T.buildGrid(perDayOf({ 0: [ddlOnly] }), CAL5, WEEK_MONDAY);
+  eq(rowIndexOf(builtDdlOnly.rows, 'other'), -1, '校准作息下它定位到课节行（不进兜底行）');
+  var ddlCard = cardsAt(builtDdlOnly, 0, '5')[0];
+  isTrue(!!ddlCard, '卡片画在第 5 节行（可见性不能退）');
+  eq(ddlCard ? ddlCard.spanCount : -1, 1, '**截止卡片恒为 1 行高**');
+  eq(ddlCard ? ddlCard.isBlock : true, false, '它不是跨节卡片');
+  eq(T.rowSpanFromTimes(ddlOnly, builtDdlOnly.rows, CAL5), null,
+    'rowSpanFromTimes：没有开始时间 → **null**（不撑成一段）');
+  var ddlResolved = T.spanFor({ task: ddlOnly, rows: builtDdlOnly.rows, override: CAL5 });
+  eq((ddlResolved.occupiedRows || []).length, 0, '**occupiedRows 是空数组 → 一行都不占**');
+  isTrue(ddlResolved.degenerate, '标记为退化区间（零长，只标一个时刻）');
+  eq(builtDdlOnly.freeCounts[0], DEFAULT_ROWS, '**空闲仍是 13** —— 截止不扣任何节次');
+
+  // ===========================================================================
+  // 反面 5：只有 start_time（没写结束时间）—— 按 start + estimate_min 定跨度
+  //   兜底 30 分钟与 utils/planner.js 的 DEFAULT_BUSY_MINUTES 同一个数。
+  //
+  //   ⚠️ 这一组的期望值**是从默认作息表逐节算出来的**，不是"看着差不多"填的：
+  //     第 10 节 19:55-20:40、第 11 节 20:50-21:35、第 12 节 21:40-22:25。
+  //     第一版我把「20:00 + 90 分钟」写成"跨第 10、11 两节"，实际 21:30 落在
+  //     第 11 节（20:50-21:35）**里面**，离第 12 节（21:40）还差 10 分钟 → 只有 1 行。
+  //     写这种断言前先查 CLASS_PERIODS，否则测的只是自己脑子里的那张作息表。
+  // ===========================================================================
+  block('反面 —— 只有开始时间时按 estimate_min 定跨度（缺省 30 分钟）');
+  // ① 20:30 + 90 分钟 = 22:00 → 与第 10 节（19:55-20:40）相交、
+  //    与第 11 节（20:50-21:35）相交、与第 12 节（21:40-22:25）相交 → 3 行
+  var openEnded = timedTask('open', '开放结束的事', '20:30', '');
+  openEnded.estimate_min = 90;
+  var builtOpen = T.buildGrid(perDayOf({ 0: [openEnded] }), null, WEEK_MONDAY);
+  var openSpan = T.rowSpanFromTimes(openEnded, builtOpen.rows, null);
+  eq(openSpan ? builtOpen.rows[openSpan.from].key : '?', '10',
+    '起点 20:30 → 第 10 节行（19:55-20:40，20:30 落在它里面）');
+  eq(openSpan ? builtOpen.rows[openSpan.to].key : '?', '12',
+    '**终点 = 20:30 + 90 分钟 = 22:00 → 第 12 节行**（21:40-22:25）');
+  eq(openSpan ? (openSpan.to - openSpan.from + 1) : -1, 3, '所以卡片跨 3 行（第 10/11/12 节）');
+  eq(cardsAt(builtOpen, 0, '10')[0] ? cardsAt(builtOpen, 0, '10')[0].spanCount : -1, 3,
+    '卡片高度 3 行（不再是不管写多久都一格高）');
+  eq(builtOpen.freeCounts[0], DEFAULT_ROWS - 3, '空闲 = 13 − 3 = 10');
+
+  // ② 没写 estimate 的：兜底 30 分钟 → 08:00-08:30 只与第 1 节（08:00-08:45）相交 → 1 行
+  var openShort = timedTask('open2', '没写耗时的事', '08:00', '');
+  var builtOpenShort = T.buildGrid(perDayOf({ 0: [openShort] }), null, WEEK_MONDAY);
+  var shortOpenSpan = T.rowSpanFromTimes(openShort, builtOpenShort.rows, null);
+  eq(shortOpenSpan ? (shortOpenSpan.to - shortOpenSpan.from + 1) : -1, 1,
+    '缺省 30 分钟（与 planner.DEFAULT_BUSY_MINUTES 同值）→ 只跨 1 行');
+  eq(builtOpenShort.freeCounts[0], DEFAULT_ROWS - 1, '空闲 = 13 − 1 = 12');
+  eq(cardsAt(builtOpenShort, 0, '1')[0] ? cardsAt(builtOpenShort, 0, '1')[0].spanCount : -1, 1,
+    '卡片仍是一格高');
+  isFalse(shortOpenSpan ? shortOpenSpan.to > shortOpenSpan.from : true,
+    '反面对照：**没有因为"缺结束时间"就撑到当天结束**');
+
+  // ③ 有 end_time 时**绝不用** estimate：写 08:00-08:45 + estimate 120 仍只跨 1 行
+  //    （否则"预计耗时"会把用户明确写下的结束时间顶掉 —— 那是更难查的一类错）
+  var bothGiven = timedTask('both', '既写了结束又写了耗时', '08:00', '08:45');
+  bothGiven.estimate_min = 120;
+  var builtBothGiven = T.buildGrid(perDayOf({ 0: [bothGiven] }), null, WEEK_MONDAY);
+  var bothSpan = T.rowSpanFromTimes(bothGiven, builtBothGiven.rows, null);
+  eq(bothSpan ? (bothSpan.to - bothSpan.from + 1) : -1, 1,
+    '**end_time 优先于 estimate_min**（120 分钟的预计耗时不许顶掉 08:45 这个结束时间）');
+  eq(builtBothGiven.freeCounts[0], DEFAULT_ROWS - 1, '空闲 = 13 − 1 = 12');
+
+  // ④ 结束时间**倒挂**（09:00 → 08:30 的脏数据）：
+  //    统一走 endMinuteOf —— 倒挂时按 start + estimate 往前推（不是当成"一个点"）。
+  //    【为什么】修这条之前，倒挂区间在"算跨度"那条路上按 30 分钟/estimate 撑开，
+  //    在"算吸附落点"那条路上却按零长的一个点处理 —— 同一张卡片于是
+  //    **落点在一行、跨的却是另外几行**。现在两条路共用一个结束分钟数函数。
+  var reversed = timedTask('rev', '时间写反了', '09:00', '08:30');
+  reversed.estimate_min = 120;   // 09:00 + 120 分钟 = 11:00 → 第 2、3、4 节
+  var builtReversed = T.buildGrid(perDayOf({ 0: [reversed] }), null, WEEK_MONDAY);
+  var revSpan = T.rowSpanFromTimes(reversed, builtReversed.rows, null);
+  eq(revSpan ? (revSpan.to - revSpan.from + 1) : -1, 3,
+    '**倒挂 + estimate 120 → 按 09:00-11:00 算，跨 3 行**（第 2/3/4 节；'
+    + '不再"算跨度时用 estimate、算落点时当一个点"）');
+  eq(revSpan ? builtReversed.rows[revSpan.from].key : '?', '2', '起点 09:00 → 第 2 节行');
+  var revResolved = T.spanFor({ task: reversed, rows: builtReversed.rows, override: null });
+  eq(revResolved.landingRow, revSpan ? revSpan.from : -1,
+    '**落点 = 跨度的第一行**（与跨度同源，不会画歪）');
+  eq((revResolved.occupiedRows || []).length, 3, '占 3 行');
+  isTrue(revResolved.degenerate, '仍标记为 degenerate（结束时间不可信），但不再退化成 0 长度');
+  var revCard = cardsAt(builtReversed, 0, '2')[0];
+  isTrue(!!revCard, '卡片画在第 2 节行');
+  eq(revCard ? revCard.spanCount : -1, 3, '高度 3 行 —— 与占用行数完全一致');
+  eq(builtReversed.freeCounts[0], DEFAULT_ROWS - 3, '空闲 = 13 − 3 = 10');
+  isFalse(builtReversed.freeCounts[0] < DEFAULT_ROWS - 3,
+    '反面对照：**没有把倒挂的时间算成一大段**（那会凭空扣掉十几节）');
 
   // -------------------------------------------------------------------------
   // 根因回归：12:00 的截止在两种作息下落在不同的行
@@ -949,8 +1462,9 @@ function run() {
   eqArr(T.periodSpanOf(course('x', 'x', '7')), [7, 7], "periodSpanOf('7') → [7,7]");
   eq(T.periodSpanOf(course('x', 'x', 'abc')), null,
     '脏 periods → null（不占任何行）—— 注意是 null，不是空数组');
-  eq(T.locateRow(course('x', 'x', '3'), { 3: 2 }, null), 2, '有 periods 时按起始节次定位到行');
-  eq(T.locateRow(course('x', 'x', ''), { 3: 2 }, null), -1,
+  eq(T.spanFor({ task: course('x', 'x', '3'), rowIndexOfPeriod: { 3: 2 } }).landingRow, 2,
+    '有 periods 时按起始节次定位到行');
+  eq(T.spanFor({ task: course('x', 'x', ''), rowIndexOfPeriod: { 3: 2 } }).landingRow, -1,
     '既没节次也没时间 → -1（交给「其他时段」）');
 
   // 最后才跑异步那组，并把它的 Promise 交出去（run() 的调用方会等它）
