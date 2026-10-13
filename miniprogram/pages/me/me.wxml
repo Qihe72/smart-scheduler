@@ -3,7 +3,8 @@
 
   【原则】每一项要么真能用、要么明说"暂不支持"，不放点了没反应的按钮。
     1. 学期设置      → 能改（picker 选日期 + 保存按钮）
-    2. 节次作息      → **只读**，卡片里明确写了"本版只读"
+    2. 节次作息      → 能改：未校准的节次可以「设定时间」补录，已校准的可以「修改 / 清除」
+                       （程序推不出"一节没有课的时间"，所以必须让用户自己补 —— 见卡片里的解释）
     3. AI 设置       → 能改（下拉选服务商 + 填自己的 Key）
     3.5 到期提醒     → 能开（弹一次微信订阅授权 → ack +1 次）；平台限制写在卡片正文里
     4. 导入课表      → 能用的完整流程；若解析器不可用则显示"当前版本不可用"并禁用按钮
@@ -13,7 +14,9 @@
   【字段来源】用到字段都在 me.js 的 data 里初始化过：
     loading / errorText /
     semesterStart / datePicker / savingSemester / currentWeekNo / currentWeekText /
-    periodRows / periodSourceText / periodOverrideText /
+    periodRows / periodSourceText / periodOverrideText / periodGapHint /
+    periodEditVisible / periodEditIndex / periodEditLabel / periodEditStart /
+    periodEditEnd / periodEditError / periodSaving / periodSaveText / periodSaveFailed /
     remindLoading / remindReadFailed / remindReady / remindEnabled / remindQuota /
     remindMaxQuota / remindQuotaText / remindLeadMin / remindLeadIndex /
     remindLeadOptions / remindLeadTexts / remindLeadText / remindReadyReason /
@@ -23,7 +26,7 @@
     parsedCount / taskCount / warnings / previewItems / previewMore / importResultText /
     exporting / exportTaskCount / exportPreview / exportHint /
     version / cloudFunctionName / appName
-    periodRows[i] = { key, label, timeText, isBreak, calibrated }
+    periodRows[i] = { key, number, label, timeText, isBreak, calibrated, uncalibrated, actionText }
     previewItems[i] = { title, dateText, whenText, typeLabel }
 -->
 
@@ -70,32 +73,98 @@
       <view class="note">保存后云函数会把日期归一化成那一周的周一，课表页会立即按新周次显示。</view>
     </view>
 
-    <!-- ================= 二、节次作息（只读） ================= -->
+    <!-- ================= 二、节次作息（可补录） ================= -->
     <view class="card">
       <view class="card-title">节次作息</view>
       <view class="card-sub">{{periodSourceText}}</view>
 
       <view class="period-list">
         <view
-          class="period-item {{item.isBreak ? 'period-break' : ''}}"
+          class="period-item {{item.isBreak ? 'period-break' : ''}} {{item.uncalibrated ? 'period-uncal' : ''}}"
           wx:for="{{periodRows}}"
           wx:for-item="item"
           wx:key="key"
         >
           <text class="period-name">{{item.label}}</text>
           <text class="period-time">{{item.timeText}}</text>
+
+          <!-- 状态：已校准（来自导入识别或手动设定）/ 未校准（显示的是内置默认时间） -->
           <text class="period-tag-cal" wx:if="{{item.calibrated}}">已校准</text>
-          <text class="period-tag-default" wx:elif="{{!item.isBreak}}">默认</text>
+          <text class="period-tag-uncal" wx:elif="{{item.uncalibrated}}">未校准</text>
+
+          <!-- 未校准的行：主按钮是「设定时间」；已校准的行：可「修改」也可「清除」。
+               空档行（row[0] === 'break'，没有节次号）没有按钮 —— 它的时间是从左右两节
+               推出来的正确信息，period_times 里也没有它的键，无处可存。 -->
+          <view
+            class="period-act period-act-main"
+            wx:if="{{item.editable}}"
+            hover-class="period-act-hover"
+            data-index="{{index}}"
+            bindtap="onTapPeriodSet"
+          >{{item.actionText}}</view>
+          <view
+            class="period-act period-act-clear"
+            wx:if="{{item.editable && item.calibrated}}"
+            hover-class="period-act-hover"
+            data-index="{{index}}"
+            bindtap="onTapPeriodClear"
+          >清除</view>
         </view>
       </view>
 
-      <view class="note note-warn">
-        本版只读，不能在这里改上下课时间。
-        Python 版的作息是 config.py 里的 CLASS_PERIODS 常量（注释里写明"按自己学校的上下课时间改这里即可"）；
-        这里的「已校准」节次来自导入课表时的自动识别，不是手动设置项。
-        需要自定义作息，请在 Python 版修改，或等后续版本。
+      <!-- 未校准那几行的解释（说清"为什么显示的不是你课表里的时间"） -->
+      <view class="note note-warn" wx:if="{{periodOverrideText}}">{{periodOverrideText}}</view>
+
+      <!-- 改完会看到什么：给用户一个预期（课间 45 分钟以上会显示成「午休」行） -->
+      <view class="note">{{periodGapHint}}</view>
+
+      <!-- 作息保存这一路的结果（补录 / 清除 / 导入校准共用；失败也写这里，不弹 toast 打断） -->
+      <view
+        class="note {{periodSaveFailed ? 'note-warn' : 'note-ok'}}"
+        wx:if="{{periodSaveText}}"
+      >{{periodSaveText}}</view>
+    </view>
+
+    <!-- ============ 二·补录弹层：给某一节设定上下课时间 ============ -->
+    <view class="sheet-mask" wx:if="{{periodEditVisible}}" bindtap="onTapPeriodCancel">
+      <!-- catchtap 阻止冒泡：点面板本身不该关掉它 -->
+      <view class="sheet" catchtap="onNoop">
+        <view class="sheet-title">设定「{{periodEditLabel}}」的时间</view>
+        <view class="sheet-sub">填你课表上这一节的实际上课时间，保存后课表页会按它对齐。</view>
+
+        <view class="sheet-row">
+          <text class="sheet-label">开始</text>
+          <picker
+            mode="time"
+            value="{{periodEditStart}}"
+            bindchange="onPeriodStartChange"
+          >
+            <view class="sheet-picker">{{periodEditStart || '请选择'}}</view>
+          </picker>
+        </view>
+
+        <view class="sheet-row">
+          <text class="sheet-label">结束</text>
+          <picker
+            mode="time"
+            value="{{periodEditEnd}}"
+            bindchange="onPeriodEndChange"
+          >
+            <view class="sheet-picker">{{periodEditEnd || '请选择'}}</view>
+          </picker>
+        </view>
+
+        <view class="sheet-error" wx:if="{{periodEditError}}">{{periodEditError}}</view>
+
+        <view class="btn-row">
+          <view
+            class="primary-btn {{periodSaving ? 'btn-disabled' : ''}}"
+            hover-class="primary-btn-hover"
+            bindtap="onTapPeriodSave"
+          >{{periodSaving ? '保存中…' : '保存'}}</view>
+          <view class="ghost-btn" hover-class="ghost-btn-hover" bindtap="onTapPeriodCancel">取消</view>
+        </view>
       </view>
-      <view class="note" wx:if="{{periodOverrideText}}">{{periodOverrideText}}</view>
     </view>
 
     <!-- ================= 三、AI 设置 ================= -->

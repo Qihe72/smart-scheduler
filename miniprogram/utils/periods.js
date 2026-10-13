@@ -8,6 +8,10 @@
  *      两侧拼不出合法区间（start >= end）时，**只显示确实推断出来的那一侧**，不给默认值。
  *   3. gapPeriodRange()（午休规则）严格"算不准就不猜"：只有左右**紧邻**两节都校准过、
  *      且中间恰好缺这一节时才认定为空档；缺一边、或连着缺好几节都返回 ("", "")。
+ *      补充（真机反馈）：空档行**不止**这一种来源 —— periodRows() 还会在相邻两行之间
+ *      按**时间空隙**（≥ BREAK_MIN_GAP_MINUTES）插一行"合成空档行"（['break',开始,结束]）。
+ *      因为用户把缺的那一节补录上以后，节次号就齐了，可 12:25 到 13:30 之间那 65 分钟
+ *      仍然该显示成「午休」。"缺号"只是时间空隙的一种特例。
  *   4. periodNumberAt() 不是"取第一个命中"，而是按 prefer="start"/"end" 取**最贴近**的那一节
  *      （校准作息与默认作息可能重叠）。
  *   5. periodSpanFromTimes() 保留"只填了结束时间也能定位"的行为。
@@ -90,6 +94,23 @@ for (var _i = 0; _i < CLASS_PERIODS.length; _i++) {
 
 // 周视图的**默认**行：每节课一行（真实行要用 periodRows() 算）
 var PERIOD_ROWS = CLASS_PERIODS.map(function (item) { return [item[0]]; });
+
+/**
+ * 相邻两行之间的空隙 ≥ 这个分钟数，就在它们之间插一行**合成空档行**（午休 / 休息）。
+ *
+ * 【为什么要有这条规则】空档行原来只按"缺了哪个节次号"推（例如缺第 6 节 → 12:25-14:15 午休）。
+ * 真机上用户把第 6 节的真实时间补录成 13:30-14:10 之后，节次号就齐了 ——
+ * 第 5 节 12:25 下课、第 6 节 13:30 上课，中间空着 65 分钟，却再也不会有「午休」那一行。
+ * 所以补一条**按时间空隙**的规则：缺号只是时间空隙的一种特例。
+ *
+ * 【45 从哪来】一节课的长度量级（默认作息 45 分钟/节，校准作息多在 40~50 分钟）。
+ * 比一节课还短的缝隙只是课间（默认作息里最长的是 20 分钟），单独占一行会把课表撑得零碎。
+ * 想让空档更敏感/更迟钝，只改这一个数。
+ */
+var BREAK_MIN_GAP_MINUTES = 45;
+
+/** 合成空档行的第一项：故意不是数字，一眼就能和节次号区分开。 */
+var SYNTHETIC_ROW_TOKEN = 'break';
 
 // ---------------------------------------------------------------------------
 // 三、小工具
@@ -261,35 +282,115 @@ function isBreakPeriod(number, override) {
   return !!gapPeriodRange(number, override)[0];
 }
 
-/** 空档行的显示名：中午那段叫"午休"，其他时段叫"休息"；不是空档返回 ""。 */
-function breakLabel(number, override) {
-  var gap = gapPeriodRange(number, override);
-  var start = gap[0] ? toMinutes(gap[0]) : null;
+/**
+ * 空档行的显示名规则（**唯一一处**）：起点在 11:00~15:00 之间叫「午休」，其余叫「休息」。
+ * "缺节次号"的空档行与"时间空隙"合成出来的空档行走的是同一条规则，
+ * 所以两种午休在界面上长得一模一样（用户不需要知道它是怎么来的）。
+ */
+function breakLabelByStart(hhmm) {
+  var start = toMinutes(hhmm);
   if (start === null) return '';
   return (start >= 11 * 60 && start < 15 * 60) ? '午休' : '休息';
 }
 
+/** 空档行的显示名：中午那段叫"午休"，其他时段叫"休息"；不是空档返回 ""。 */
+function breakLabel(number, override) {
+  var gap = gapPeriodRange(number, override);
+  if (!gap[0]) return '';
+  return breakLabelByStart(gap[0]);
+}
+
+// ---------------------------------------------------------------------------
+// 四之二、合成空档行（按**时间空隙**插出来的午休 / 休息）
+//
+// 行有两种，都走上面那四个读取函数（rowLabel / rowTimeRange / rowKey / effectivePeriodRange），
+// 调用方**不要直接读 row[0] 当节次号**：
+//   * 节次行      [7]                        —— 有节次号
+//   * 合成空档行  ['break', '12:25', '13:30'] —— 第一项不是数字，没有节次号
+// ---------------------------------------------------------------------------
+/** 是不是合成空档行（第一项不是节次号）。 */
+function isSyntheticRow(row) {
+  if (!Array.isArray(row) || !row.length) return false;
+  return toInt(row[0]) === null;
+}
+
+/** 一行对应的节次号；合成空档行 / 脏行返回 null。 */
+function rowPeriodNumber(row) {
+  if (isSyntheticRow(row)) return null;
+  var number = toInt(row[0]);
+  return number !== null && number > 0 ? number : null;
+}
+
+/** 造一行合成空档行（第一项是 SYNTHETIC_ROW_TOKEN，后两项是起止时间）。 */
+function syntheticRow(startHHMM, endHHMM) {
+  return [SYNTHETIC_ROW_TOKEN, String(startHHMM), String(endHHMM)];
+}
+
+/**
+ * 这一行的时间是不是"这所学校的真实时间" —— 校准值，或由校准邻居夹出来的空档。
+ *
+ * **内置默认作息不算**（返回 false）：它是预置的样板作息（别的学校的），
+ * 拿它推"这里该有一小时午休"就是瞎猜。真机那份作息一旦校准过，默认值只会出现在
+ * 没校准的节次上 —— 而那些节次本来就该由用户补录，不该由我们替它编一条空档。
+ */
+function hasRealTimeRange(row, override) {
+  if (isSyntheticRow(row)) return true;   // 合成行本身就是校准值推出来的
+  var number = rowPeriodNumber(row);
+  if (number === null) return false;
+  if (Object.prototype.hasOwnProperty.call(calibratedPeriods(override), number)) return true;
+  return !!gapPeriodRange(number, override)[0];
+}
+
+/** 两行之间的空隙够久 → 返回一行合成空档行；否则 null。 */
+function gapRowBetween(previous, current, override) {
+  if (!hasRealTimeRange(previous, override) || !hasRealTimeRange(current, override)) return null;
+  var before = rowTimeRange(previous, override) || ['', ''];
+  var after = rowTimeRange(current, override) || ['', ''];
+  var gapStart = toMinutes(before[1]);
+  var gapEnd = toMinutes(after[0]);
+  if (gapStart === null || gapEnd === null) return null;
+  if (gapEnd - gapStart < BREAK_MIN_GAP_MINUTES) return null;
+  return syntheticRow(toHHMM(gapStart), toHHMM(gapEnd));
+}
+
+/** 在相邻两行之间按时间空隙插入合成空档行（periodRows 的内核）。 */
+function withGapRows(rows, override) {
+  var out = [];
+  for (var i = 0; i < rows.length; i++) {
+    if (i > 0) {
+      var gap = gapRowBetween(rows[i - 1], rows[i], override);
+      if (gap) out.push(gap);
+    }
+    out.push(rows[i]);
+  }
+  return out;
+}
+
 /** 一节"实际占哪段时间"：中间空档（午休）→ 校准值 → 默认作息。匹配时刻和画课表走同一口径。 */
 function effectivePeriodRange(number, override) {
+  // 也认"行"：合成空档行没有节次号，只能整行传进来
+  if (Array.isArray(number)) return rowTimeRange(number, override);
   var gap = gapPeriodRange(number, override);
   if (gap[0]) return gap;
   return periodTimeRange(number, override);
 }
 
-/** 课表一行的起止时间（行 = 一节课）。 */
+/** 课表一行的起止时间（行 = 一节课，或一行合成空档）。 */
 function rowTimeRange(row, override) {
   try {
     if (!row || row.length === 0) return ['', ''];
+    if (isSyntheticRow(row)) return [String(row[1] || ''), String(row[2] || '')];
     return effectivePeriodRange(row[0], override);
   } catch (err) {
     return ['', ''];
   }
 }
 
-/** 一行的显示名：例如 [7] → "第7节"；没校准到的空档行 → "午休"。 */
+/** 一行的显示名：例如 [7] → "第7节"；空档行（缺号的 / 合成的）→ "午休" / "休息"。 */
 function rowLabel(row, override) {
   try {
     if (!row || row.length === 0) return '';
+    if (isSyntheticRow(row)) return breakLabelByStart(row[1]);
     if (row.length === 1) return breakLabel(row[0], override) || ('第' + row[0] + '节');
     return '第' + row[0] + '-' + row[row.length - 1] + '节';
   } catch (err) {
@@ -297,15 +398,52 @@ function rowLabel(row, override) {
   }
 }
 
-/** 一行的短标识：[7] → "7"；[1,2] → "1-2"（用作设置里的键）。 */
+/**
+ * 一行的短标识：[7] → "7"；[1,2] → "1-2"（用作设置里的键）；
+ * 合成空档行 → "break-12:25-13:30"（与节次号不可能撞，也不会两行重名）。
+ */
 function rowKey(row) {
   try {
     if (!row || row.length === 0) return '';
+    if (isSyntheticRow(row)) {
+      return SYNTHETIC_ROW_TOKEN + '-' + String(row[1] || '') + '-' + String(row[2] || '');
+    }
     if (row.length === 1) return String(row[0]);
     return row[0] + '-' + row[row.length - 1];
   } catch (err) {
     return '';
   }
+}
+
+/** 这一行是不是"没课的空档"（合成空档行，或未校准但能夹出空档的节次行）。 */
+function isBreakRow(row, override) {
+  if (!row || !row.length) return false;
+  if (isSyntheticRow(row)) return true;
+  return isBreakPeriod(row[0], override);
+}
+
+/**
+ * 这一行是不是"**没有校准值**"的节次行 —— 界面上据此提示"这一节还是内置默认作息，去补录"。
+ * `pages/me` 的补录入口按这个判断，**函数名与语义已冻结**，别改名、别改判据。
+ *
+ *   * 校准表里有这一行的节次号        → false（第 6 节缺号时那行"午休"是 true）
+ *   * 合成空档行（['break',…]）        → **false**：它压根不是一个节次，是两行之间的时间空隙，
+ *                                       没有什么可"补录"的（补录入口不该给它加一行）
+ *   * 多节次的行：任何一个节次号校准过 → false（那一行就有真实时间了）
+ *   * 页面的「其他时段」兜底行是对象、不是本模块的行 → false（Array.isArray 直接挡住）
+ */
+function isUncalibratedRow(row, override) {
+  if (!Array.isArray(row) || !row.length) return false;
+  if (isSyntheticRow(row)) return false;
+  var calibrated = calibratedPeriods(override);
+  var sawNumber = false;
+  for (var i = 0; i < row.length; i += 1) {
+    var number = toInt(row[i]);
+    if (number === null) continue;
+    sawNumber = true;
+    if (Object.prototype.hasOwnProperty.call(calibrated, number)) return false;
+  }
+  return sawNumber;
 }
 
 /** 课表到底有哪几节：默认作息 ∪ 校准到的节次 ∪ 额外指定的节次，升序。 */
@@ -333,9 +471,13 @@ function periodNumbers(override, extra) {
   return numbers;
 }
 
-/** 课表的行：一天有哪几节就有几行，例如 [[1],[2],…,[13],[14]]。 */
+/**
+ * 课表的行：一天有哪几节就有几行，例如 [[1],[2],…,[13],[14]]；
+ * 相邻两行的**时间空隙**够久（≥ BREAK_MIN_GAP_MINUTES）时，在它们之间插一行合成空档行。
+ */
 function periodRows(override, extra) {
-  return periodNumbers(override, extra).map(function (number) { return [number]; });
+  var rows = periodNumbers(override, extra).map(function (number) { return [number]; });
+  return withGapRows(rows, override);
 }
 
 /** 返回包含某个节次的行，例如 [7]；没有则 null。 */
@@ -714,6 +856,7 @@ module.exports = {
   gapPeriodRange: gapPeriodRange,
   isBreakPeriod: isBreakPeriod,
   breakLabel: breakLabel,
+  breakLabelByStart: breakLabelByStart,
   effectivePeriodRange: effectivePeriodRange,
   rowTimeRange: rowTimeRange,
   rowLabel: rowLabel,
@@ -729,6 +872,14 @@ module.exports = {
   periodRowIndex: periodRowIndex,
   periodRowIndexByPeriod: periodRowIndexByPeriod,
   parsePeriodSpec: parsePeriodSpec,
+
+  // 合成空档行（按时间空隙插出来的午休 / 休息）
+  BREAK_MIN_GAP_MINUTES: BREAK_MIN_GAP_MINUTES,
+  SYNTHETIC_ROW_TOKEN: SYNTHETIC_ROW_TOKEN,
+  isSyntheticRow: isSyntheticRow,
+  rowPeriodNumber: rowPeriodNumber,
+  isBreakRow: isBreakRow,
+  isUncalibratedRow: isUncalibratedRow,
 
   // 学期 / 周次
   mondayOf: mondayOf,

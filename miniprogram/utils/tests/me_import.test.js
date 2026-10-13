@@ -440,7 +440,11 @@ function run() {
         block('作息落库 —— 追加路径：调 saveSettings 且合并结果正确');
 
         // 基准作息（settings 里已有的），合并必须以它为基准
-        currentPeriodTimes = { '1': ['08:00', '08:45'], '7': ['16:00', '16:45'] };
+        // ⚠️ 第 7 节**特意取了非默认值** 16:05-16:50（内置默认是 16:00-16:45）：
+        //    mergePeriodTimes 现在有一条防御 —— 基准里"与内置默认完全相同"的项不搬进结果
+        //    （那是服务端回填出来的假校准；详见 me.js 里那段注释）。
+        //    所以用默认值当基准就测不出"未涉及的原有节次原样保留"了 —— 那一条会被防御吃掉。
+        currentPeriodTimes = { '1': ['08:00', '08:45'], '7': ['16:05', '16:50'] };
         // 本次文件校准出来的（第 1 节被**覆盖**，第 5 节是**新增**）
         var incoming = { '1': ['08:30', '09:10'], '5': ['11:45', '12:25'] };
 
@@ -467,8 +471,9 @@ function run() {
               '**新导入的节次覆盖同名节次**：第 1 节 08:00 → 08:30');
             eq(merged['1'][1], '09:10', '第 1 节的结束时间也被覆盖成 09:10');
             eq(merged['5'][0], '11:45', '**未涉及的新节次被并入**：第 5 节新增进来了');
-            eq(merged['7'][0], '16:00',
-              '**未涉及的原有节次原样保留**：第 7 节仍是 16:00（没被空对象抹掉）');
+            eq(merged['7'][0], '16:05',
+              '**未涉及的原有节次原样保留**：第 7 节仍是 16:05（没被空对象抹掉）');
+            eq(merged['7'][1], '16:50', '结束时间同样保留');
             eq(Object.keys(merged).length, 3, '合并结果是 3 个节次（1/5/7）：'
               + show(Object.keys(merged)));
             isTrue(/并按导入课表校准了 2 节作息/.test(p6.data.periodSaveText),
@@ -678,6 +683,136 @@ function run() {
             + '（action=import_replace、scope=courses、payload 都经过真函数）'
           : '⚠️ api.importReplace 缺席，替换相关断言未生效');
         return null;
+      }).then(function () {
+        // =====================================================================
+        // 真机根因回归：**服务端回填的默认作息被当成"已校准"存了下来**
+        //
+        // 链条（逐处核过）：
+        //   1. 云函数 settings_get 在 period_times 为空时**回填内置默认表**
+        //      （13 节，含"第6节 14:55-15:40"）；
+        //   2. 本页 onLoad 把它当成"当前作息"读进 this.periodTimes；
+        //   3. 用户导入 .ics → mergePeriodTimes(基准 = 那 13 节默认值, 文件校准出的 12 节)；
+        //   4. 保存 → 云上真的存了 13 节 → 第6节 = 默认的 14:55-15:40 被标成「已校准」，
+        //      而且"第6节存在"让空档判定不再为它生成行 → **午休行永远不出现**。
+        //
+        // 这一组钉住的判据：**基准里与内置默认完全相同的项不许搬进结果**。
+        // 反面自检（本次实测）：把 me.js 里那段 isBuiltinDefault 判断去掉 →
+        //   「只有 12 节」「不含第6节」那几条立刻红，红的正是上面第 4 步。
+        // =====================================================================
+        block('真机根因回归 —— 服务端回填的默认作息不许被当成已校准存下来');
+
+        var T2 = registered.__test;
+        isTrue(!!T2 && typeof T2.mergePeriodTimes === 'function',
+          '__test 里暴露了 mergePeriodTimes');
+        isTrue(typeof T2.isBuiltinDefault === 'function', '__test 里暴露了 isBuiltinDefault');
+
+        // 默认表从 periods 拿（**不在这里抄一份** —— 抄一份以后必然不同步）
+        var P = require(path.join(ROOT, 'utils', 'periods.js'));
+        var DEFAULTS = {};
+        Object.keys(P.PERIOD_TIMES).forEach(function (k) {
+          DEFAULTS[k] = P.PERIOD_TIMES[k].slice();
+        });
+        eq(DEFAULTS['6'] ? DEFAULTS['6'].join('-') : '?', '14:55-15:40',
+          '内置默认第 6 节就是 14:55-15:40（真机截图上那个"看不懂的时间"）');
+
+        // ① isBuiltinDefault 本身
+        isTrue(T2.isBuiltinDefault(6, ['14:55', '15:40']), '第 6 节 = 默认值 → true');
+        isTrue(T2.isBuiltinDefault(6, DEFAULTS['6']), '从 PERIOD_TIMES 直接取也判 true');
+        isFalse(T2.isBuiltinDefault(6, ['13:30', '14:10']),
+          '**第 6 节 = 用户真实时间 13:30-14:10 → false**（有信息量，不许丢）');
+        isFalse(T2.isBuiltinDefault(6, ['14:55', '15:41']), '只差一分钟也不算（严格相等）');
+        isFalse(T2.isBuiltinDefault(99, ['14:55', '15:40']), '表里没有这一节 → false');
+        isFalse(T2.isBuiltinDefault(6, null), 'null → false（不炸）');
+        isFalse(T2.isBuiltinDefault(6, ['14:55']), '只有一个值 → false（形状不对）');
+
+        // ② 污染链条复现：基准 = 服务端回填的 13 节默认值，导入 = 文件里的 12 节
+        var fileCalibrated = {
+          '1': ['08:30', '09:10'], '2': ['09:15', '09:55'], '3': ['10:15', '10:55'],
+          '4': ['11:00', '11:40'], '5': ['11:45', '12:25'],
+          // ⚠️ 文件里**没有第 6 节**（用户课表里第 6 节就是没课的那一节）
+          '7': ['14:15', '15:00'], '8': ['15:05', '15:40'], '9': ['16:00', '16:40'],
+          '10': ['16:45', '17:25'], '11': ['19:00', '19:40'], '12': ['19:45', '20:20'],
+          '13': ['20:30', '21:10']
+        };
+        eq(Object.keys(fileCalibrated).length, 12, '文件里校准出 12 节（第 6 节缺）');
+
+        var polluted = T2.mergePeriodTimes(DEFAULTS, fileCalibrated);
+        isTrue(!!polluted, '合并有结果（不返回 null）');
+        eq(Object.keys(polluted).length, 12,
+          '**结果只有 12 节**（服务端回填的那 13 节默认值被丢干净了）');
+        isFalse(Object.prototype.hasOwnProperty.call(polluted, '6'),
+          '**结果里没有第 6 节** —— 它正是"假校准"的来源（一旦存在，午休行就永远不出现）');
+        isFalse(Object.keys(polluted).length === 13, '反面对照：**不能是 13 节**');
+        // 逐节核对：文件里的 12 节一个不少、且都是文件里的值
+        var mismatched = [];
+        Object.keys(fileCalibrated).forEach(function (k) {
+          if (JSON.stringify(polluted[k]) !== JSON.stringify(fileCalibrated[k])) mismatched.push(k);
+        });
+        eq(mismatched.length, 0, '文件里的 12 节全部按文件值写入（没有一节被默认值顶掉）：'
+          + show(mismatched.join(',')));
+        eq(polluted['5'].join('-'), '11:45-12:25', '第 5 节 = 文件值（不是默认的 14:00-14:45）');
+
+        // ③ 正常基准（真实校准过的数据）→ 防御不许误伤
+        var goodBase = {
+          '1': ['08:30', '09:10'], '5': ['11:45', '12:25'], '7': ['14:15', '15:00']
+        };
+        var keep = T2.mergePeriodTimes(goodBase, fileCalibrated);
+        eq(Object.keys(keep).length, 12,
+          '**正常基准下仍是 12 节**（那 3 节都被文件里的同名项覆盖了，没有被防御吃掉）');
+        isFalse(Object.prototype.hasOwnProperty.call(keep, '6'), '仍然没有第 6 节');
+        // 只导入一节时，未涉及的**非默认**基准必须原样保留
+        var partial = T2.mergePeriodTimes(
+          { '3': ['10:20', '11:00'], '7': ['14:15', '15:00'] },
+          { '3': ['10:15', '10:55'] }
+        );
+        eq(Object.keys(partial).length, 2, '只导入第 3 节 → 结果 2 节（第 7 节保留）');
+        eq(partial['7'].join('-'), '14:15-15:00',
+          '**未涉及的原有非默认节次原样保留**（防御没有扩大化）');
+
+        // ④ "用户真实作息恰好等于默认值" → 丢掉后显示效果不变
+        //    这一条是安全性的证明：丢掉的项在界面上本来就长一样。
+        var sameKept = T2.mergePeriodTimes({ '3': DEFAULTS['3'].slice() }, { '5': ['11:45', '12:25'] });
+        isFalse(Object.prototype.hasOwnProperty.call(sameKept, '3'),
+          '基准里"恰好等于默认"的第 3 节被丢掉（它是没有信息量的项）');
+        eq(Object.keys(sameKept).length, 1, '结果只剩这次导入的第 5 节');
+        // 但**显示出来的时间一模一样** —— 因为 periods 在这一项缺席时回落到同一个默认表
+        var before3 = P.periodTimeRange(3, { '3': DEFAULTS['3'].slice() });
+        var after3 = P.periodTimeRange(3, { '5': ['11:45', '12:25'] });
+        eq(after3.join('-'), before3.join('-'),
+          '**课表行时间不变**（丢掉前后都是 ' + before3.join('-') + '）—— 这条防御是安全的');
+
+        // ⑤ 端到端：模拟"新用户第一次导入" → 这次请求的键集合 = 文件里真正出现的节次
+        currentPeriodTimes = DEFAULTS;     // ← 服务端回填的假校准
+        serve({ tasks: [] });
+        var pNew = newPage();
+        pNew.onLoad();
+        return settle().then(function () {
+          eq(Object.keys(pNew.periodTimes || {}).length, 13,
+            '前提：页面读到的确实是那 13 节回填值（污染源已就位）');
+          pNew.pendingTasks = pendingOf(2);
+          pNew.pendingPeriodTimes = fileCalibrated;
+          pNew.setData({ importMode: 'append' });
+          savedSettings = null;
+          cloudCalls.length = 0;
+          pNew.onConfirmImport();
+          return settle().then(function () {
+            eq(callsOf('settings_save').length, 1, '保存了作息（一次）');
+            var sent = (savedSettings && savedSettings.period_times) || {};
+            var numSort = function (a, b) { return Number(a) - Number(b); };
+            var sentKeys = Object.keys(sent).sort(numSort);
+            var fileKeys = Object.keys(fileCalibrated).sort(numSort);
+            eq(sentKeys.join(','), fileKeys.join(','),
+              '**端到端：保存的 period_times 键集合 = 文件里真正出现的节次**（'
+              + fileKeys.length + ' 节）');
+            isFalse(sentKeys.indexOf('6') !== -1,
+              '**不含第 6 节** —— 午休行因此能重新生成（这正是他上一条抱怨的另一半）');
+            eq(pNew.data.periodSaveFailed, false, '这一步是成功态，不是失败态');
+            // 页面内存里的作息也换成了干净的那一份
+            isFalse(Object.prototype.hasOwnProperty.call(pNew.periodTimes || {}, '6'),
+              '页面内存里的作息同样没有第 6 节（后续再用它当基准也不会把假的带回来）');
+            return null;
+          });
+        });
       });
 }
 

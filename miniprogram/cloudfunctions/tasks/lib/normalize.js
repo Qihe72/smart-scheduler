@@ -792,7 +792,17 @@ function aiConfigView(row) {
 // 设置（settings 集合）
 // ---------------------------------------------------------------------------
 
-/** 默认作息：与 config.py 的 CLASS_PERIODS 一致（第 1 ~ 13 节） */
+/**
+ * 内置默认作息（与 Python 版 config.py 的 CLASS_PERIODS 一致，第 1 ~ 13 节）。
+ *
+ * ⚠️ **这个常量不再回填给客户端**（`withSettingsDefaults` 已改成缺失就返回 `null`）——
+ * 现在它只作为**文档 / 兼容常量**保留：
+ *   * 客户端的 `utils/periods.js` 自带同一份默认值，显示那一侧由它负责；
+ *   * 服务端不再"替客户端决定默认作息"，否则默认值会在下次导入时被当成
+ *     "真实校准结果"持久化（见 withSettingsDefaults 的注释，那是真机踩过的 bug）。
+ *   * 保留导出是为了将来可能的使用者（例如服务端要做"这周排得下吗"的分析时当兜底），
+ *     真要拿它当兜底，**必须只用在计算结果上，绝不能回传给客户端当成"用户的设置"**。
+ */
 const DEFAULT_PERIOD_TIMES = {
   1: ['08:00', '08:45'],
   2: ['08:55', '09:40'],
@@ -936,13 +946,41 @@ function taskDedupeKey(task) {
   return [title, toStr(task.date), toStr(task.start_time)].join('\u0000');
 }
 
-/** 读取设置并补默认值（settings 集合里没有记录时也能用） */
+/**
+ * 读取设置并整理成"给客户端看的"形状。
+ *
+ * ===========================================================================
+ * 【重要】**不回填 period_times 的默认值** —— 缺失/为空一律返回 `null`
+ * ===========================================================================
+ * 这里曾经在 `period_times` 为空时回填 `DEFAULT_PERIOD_TIMES`（13 节全量），
+ * 那是一个**会污染每个新用户数据**的 bug，链条是：
+ *
+ *   1. `settings_get` 把 13 节"默认作息"当成本用户的作息回给客户端；
+ *   2. 客户端（`pages/me/me.js`）把它存成"当前作息"；
+ *   3. 用户导入 `.ics` 时以它为**基准**做合并（`mergePeriodTimes`）；
+ *   4. 于是内置默认值被当成"导入课表时自动校准的结果"**持久化到云上**；
+ *   5. 后果一：界面上第 6 节（14:55-15:40，正是内置默认值）永远显示"已校准"，
+ *      而用户的课表里根本没有第 6 节 —— **标记不再诚实**；
+ *   6. 后果二：有了第 6 节就不再是空档，**午休那一行永远不会出现**。
+ *
+ * 正确分工：**服务端只回"用户真的存过什么"，默认作息由客户端决定**。
+ * 客户端的 `utils/periods.js` 在 override 为空时本来就会用内置默认来显示，
+ * 根本不需要服务端替它填。（真机截图就是这么暴露出来的。）
+ *
+ * ⚠️ 别"好心"改回去。`_selftest.js` 里有两条断言专门钉这个口径，
+ * 用例名里写了为什么 —— 想改回填默认值，先把那两条读了。
+ *
+ * @param {object} raw settings 集合里的记录（可能没有，也可能是 null）
+ * @returns {{semester_start: string, period_times: object|null}}
+ *          `period_times` 为 `null` = **用户没有校准过作息**（让客户端用内置默认显示）
+ */
 function withSettingsDefaults(raw) {
   const source = isPlainObject(raw) ? raw : {};
   const semesterStart = isValidDate(source.semester_start) ? toStr(source.semester_start) : '';
+  // 没有存过就是 null；存过就原样透出（只有真的校准过的节次才会出现在这里）
   const periodTimes = isPlainObject(source.period_times) && Object.keys(source.period_times).length
     ? source.period_times
-    : DEFAULT_PERIOD_TIMES;
+    : null;
   return { semester_start: semesterStart, period_times: periodTimes };
 }
 

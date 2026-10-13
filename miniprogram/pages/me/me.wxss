@@ -186,7 +186,7 @@ page {
 }
 
 /* --------------------------------------------------------------------------
-   作息表（只读）
+   作息表（可补录）
    -------------------------------------------------------------------------- */
 .period-list {
   margin-top: 16rpx;
@@ -208,6 +208,13 @@ page {
 
 .period-break {
   background: #fafbfd;
+}
+
+/* 未校准的行：左侧一条黄边，一眼看出"这几节不是你的课表"
+   （与「未校准」标签双重提示，不靠颜色单独承载信息） */
+.period-uncal {
+  background: #fffdf5;
+  box-shadow: inset 6rpx 0 0 0 #e0a83c;
 }
 
 .period-name {
@@ -239,13 +246,106 @@ page {
   border-radius: 6rpx;
 }
 
-.period-tag-default {
+.period-tag-uncal {
   flex: none;
   padding: 2rpx 12rpx;
   font-size: 20rpx;
-  color: #9aa1b2;
-  background: #f4f6fa;
+  color: #9a6b00;
+  background: #fdf3dc;
   border-radius: 6rpx;
+}
+
+.period-act {
+  flex: none;
+  margin-left: 10rpx;
+  padding: 6rpx 16rpx;
+  font-size: 22rpx;
+  border-radius: 8rpx;
+}
+
+.period-act-main {
+  color: #2f5bd7;
+  background: #eef2fe;
+}
+
+/* 「清除」是破坏性操作（改的是整张课表的对齐口径）→ 视觉上弱化，且与主按钮区分色 */
+.period-act-clear {
+  color: #a2523f;
+  background: #fbf0ed;
+}
+
+.period-act-hover {
+  opacity: 0.7;
+}
+
+/* --------------------------------------------------------------------------
+   补录弹层（选开始 / 结束时间）
+   -------------------------------------------------------------------------- */
+.sheet-mask {
+  position: fixed;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 48rpx;
+  background: rgba(20, 24, 34, 0.45);
+}
+
+.sheet {
+  width: 100%;
+  padding: 28rpx 28rpx 8rpx 28rpx;
+  background: #ffffff;
+  border-radius: 18rpx;
+}
+
+.sheet-title {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #1f2430;
+}
+
+.sheet-sub {
+  margin-top: 8rpx;
+  font-size: 23rpx;
+  color: #6b7288;
+  line-height: 1.5;
+}
+
+.sheet-row {
+  display: flex;
+  align-items: center;
+  margin-top: 22rpx;
+}
+
+.sheet-label {
+  flex: none;
+  width: 96rpx;
+  font-size: 26rpx;
+  color: #4a5163;
+}
+
+.sheet-picker {
+  flex: 1;
+  padding: 14rpx 18rpx;
+  font-size: 28rpx;
+  color: #1f2430;
+  background: #f5f7fb;
+  border-radius: 10rpx;
+}
+
+.sheet-error {
+  margin-top: 18rpx;
+  padding: 14rpx 16rpx;
+  font-size: 23rpx;
+  color: #a2523f;
+  line-height: 1.5;
+  background: #fbf0ed;
+  border: 1rpx solid #f0d5cd;
+  border-radius: 10rpx;
 }
 
 /* --------------------------------------------------------------------------

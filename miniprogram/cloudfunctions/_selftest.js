@@ -429,20 +429,44 @@ testCase('6.1 settings 只认两个键，且做校验', () => {
   eq(N.normalizeSettings({}, { partial: true }).errors.length, 1, '一个可存字段都没有 → 报错');
 });
 
-testCase('6.2 period_times 逐条清洗 + 默认作息', () => {
+testCase('6.2 period_times 逐条清洗 + **不回填默认作息**（旧期望是错的，见用例名后的说明）', () => {
   const r = N.normalizeSettings({
     period_times: { 1: ['08:00', '08:45'], 2: ['25:00', '09:40'], 3: ['乱写'], 99: ['10:00', '10:45'] },
   });
   eq(Object.keys(r.settings.period_times), ['1'], '非法时刻与越界节次被丢掉');
 
-  const defaults = N.withSettingsDefaults(null);
-  eq(defaults.semester_start, '', '没设置过 → 空');
-  eq(defaults.period_times[1], ['08:00', '08:45'], '默认作息第 1 节');
-  eq(defaults.period_times[13], ['22:30', '23:15'], '默认作息第 13 节');
+  // ==========================================================================
+  // 【为什么旧期望是错的 —— 别改回去】
+  // 这里原本期望 `withSettingsDefaults(null)` 返回 13 节内置默认作息。
+  // 那个"回填"会在真机上造成**数据污染**：
+  //   settings_get 把 13 节默认值当成"用户的作息"回给客户端 →
+  //   客户端把它当基准去做 .ics 合并（mergePeriodTimes）→
+  //   内置默认值被当成"导入课表时自动校准的结果"**存进云上** →
+  //   从此界面上第 6 节（14:55-15:40，正是内置默认值）永远显示"已校准"
+  //   （而用户的课表里根本没有第 6 节），并且因为第 6 节"存在"，
+  //   午休那一行永远不会出现。
+  // 正确分工：服务端只回"用户真的存过什么"，默认作息由客户端 utils/periods.js 决定。
+  // ==========================================================================
+  const nothingStored = N.withSettingsDefaults(null);
+  eq(nothingStored.semester_start, '', '没设置过 → 空');
+  eq(nothingStored.period_times, null,
+    '**没校准过就是 null**（不回填默认作息：回填会让默认值在下次导入时被当成真实校准持久化）');
 
+  const emptyRow = N.withSettingsDefaults({ _openid: 'me' });
+  eq(emptyRow.period_times, null, '记录存在但没存过 period_times → 同样是 null');
+
+  const emptyObject = N.withSettingsDefaults({ period_times: {} });
+  eq(emptyObject.period_times, null, '存了个空对象 → 也是 null（视同没校准）');
+
+  // 真存过就原样透出，只有真的校准过的节次才在里面
   const custom = N.withSettingsDefaults({ semester_start: '2026-09-07', period_times: { 1: ['09:00', '09:45'] } });
-  eq(custom.period_times[1], ['09:00', '09:45'], '用户自定义作息优先');
+  eq(custom.period_times, { 1: ['09:00', '09:45'] }, '用户自定义作息原样透出（只有这一节，不带第 6 节）');
+  eq(custom.period_times[6], undefined, '**第 6 节不会凭空出现**');
   eq(custom.semester_start, '2026-09-07', '开学日透传');
+
+  // DEFAULT_PERIOD_TIMES 仍然导出（作为文档/兼容常量），但不再被回填使用
+  ok(N.DEFAULT_PERIOD_TIMES && N.DEFAULT_PERIOD_TIMES[6], '常量保留导出');
+  eq(N.DEFAULT_PERIOD_TIMES[6], ['14:55', '15:40'], '它里面第 6 节就是 14:55-15:40（正是真机上被误标"已校准"的那个值）');
 });
 
 // ===========================================================================
@@ -492,6 +516,67 @@ testCase('6c.2 两个 AI 云函数的导出表也不能有 undefined 键', () =>
     ok(typeof mod.loadUserAiConfig === 'function', `${name} 导出了 loadUserAiConfig`);
     ok(typeof mod.findInjectedFields === 'function', `${name} 导出了 findInjectedFields`);
   });
+});
+
+// ===========================================================================
+// 6d. 回归：新用户导入课表**不会**凭空多出内置默认作息（真机 bug 的教训）
+// ===========================================================================
+testCaseAsync('6d.1 新用户 → 保存 12 节校准 → 读回来仍然只有那 12 节（不凭空多出第 6 节）', async () => {
+  // 真机故障复盘：用户「我的 → 作息表」显示"共 13 节"，其中第 6 节 14:55-15:40
+  // 标着「已校准」，但他的课表里根本没有第 6 节 —— 那个值正是内置默认作息。
+  // 链条：settings_get 回填默认 13 节 → 客户端当基准做 .ics 合并 → 存回云上 →
+  // 默认值变成"校准结果"，且第 6 节"存在"导致午休行永不出现。
+  // 这条断言把"新用户不该被污染"钉死。
+  const db = createFakeDb({ tasks: [] });
+
+  // 步骤 1：新用户先看一眼作息表（此时他什么都没存过）
+  const first = await tasksFn.handleAction(db, 'me', { action: 'settings_get' });
+  eq(first.period_times, null, '新用户：period_times 是 null（服务端不替客户端决定默认作息）');
+  eq(db.store.settings.length, 0, '看一眼不应该写库');
+
+  // 步骤 2：导入课表，校准结果只有 12 节（真实数据就是这样：不含第 6 节）
+  const calibrated = {
+    1: ['08:00', '08:45'], 2: ['08:55', '09:40'], 3: ['10:00', '10:45'], 4: ['10:55', '11:40'],
+    5: ['14:00', '14:45'], 7: ['16:00', '16:45'], 8: ['16:55', '17:40'], 9: ['19:00', '19:45'],
+    10: ['19:55', '20:40'], 11: ['20:50', '21:35'], 12: ['21:40', '22:25'], 13: ['22:30', '23:15'],
+  };
+  eq(Object.keys(calibrated).length, 12, '（前提）客户端给的确实是 12 节');
+  ok(!calibrated[6], '（前提）这 12 节里没有第 6 节');
+
+  const saved = await tasksFn.handleAction(db, 'me', {
+    action: 'settings_save', settings: { period_times: calibrated },
+  });
+  eq(saved.ok, true, '保存成功');
+
+  // 步骤 3：读回来 —— 必须**一模一样**，不能多出第 6 节
+  const back = await tasksFn.handleAction(db, 'me', { action: 'settings_get' });
+  eq(Object.keys(back.period_times).length, 12, '**读回来还是 12 节**（没有多出第 6 节）');
+  eq(back.period_times[6], undefined, '第 6 节依然不存在 —— 它不该被凭空补上');
+  eq(back.period_times, calibrated, '整套作息与客户端给的一模一样');
+
+  // 步骤 4：云上真的只存了 12 节（持久化层面也没有被污染）
+  eq(Object.keys(db.store.settings[0].period_times).length, 12, '库里存的也是 12 节');
+  eq(db.store.settings[0].period_times[6], undefined, '库里没有第 6 节');
+
+  // 步骤 5：再读一次（模拟用户反复进出页面）也不会"长出"默认值
+  const again = await tasksFn.handleAction(db, 'me', { action: 'settings_get' });
+  eq(Object.keys(again.period_times).length, 12, '反复读取不会让作息变多');
+});
+
+testCase('6d.2 组合口径：normalizeSettings 只存客户端给的键 + withSettingsDefaults 不回填', () => {
+  // 单函数层面的口径（6d.1 测的是完整写读闭环，这里补"为什么"）
+  const normalized = N.normalizeSettings(
+    { period_times: { 1: ['08:00', '08:45'], 7: ['16:00', '16:45'] } },
+    { partial: true }
+  );
+  eq(Object.keys(normalized.settings.period_times).sort(), ['1', '7'], '只保留客户端真的给了的节次');
+  eq(normalized.settings.period_times[6], undefined, '客户端没给第 6 节 → 归一化后也没有');
+
+  // 空 override → null（而不是 13 节默认）：
+  // 这样客户端「已校准」标记只可能出现在真的校准过的节次上
+  eq(N.withSettingsDefaults({ period_times: normalized.settings.period_times }).period_times,
+    { 1: ['08:00', '08:45'], 7: ['16:00', '16:45'] }, '存过的原样透出');
+  eq(N.withSettingsDefaults({ period_times: null }).period_times, null, '没存过 → null');
 });
 
 // ===========================================================================
@@ -592,7 +677,10 @@ testCaseAsync('7.5 stats / settings_get / settings_save', async () => {
 
   const got = await tasksFn.handleAction(db, 'me', { action: 'settings_get' });
   eq(got.semester_start, '', '没设置过 → 空字符串');
-  ok(got.period_times && got.period_times[1], '没设置过也能拿到默认作息');
+  // 【这条以前期望"能拿到默认作息"，那是错的】服务端回填默认值会让客户端把它
+  // 当成"用户的作息"，下次导入课表时合并进去、持久化成"已校准"（真机 bug）。
+  // 默认作息由客户端 utils/periods.js 显示时兜底，服务端只如实回"没校准过"。
+  eq(got.period_times, null, '没校准过就是 null（不回填内置默认作息）');
   eq(db.store.settings.length, 0, '只是读取，不该写入任何记录');
 
   const saved = await tasksFn.handleAction(db, 'me', {

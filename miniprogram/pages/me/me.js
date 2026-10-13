@@ -6,7 +6,10 @@
  * ===========================================================================
  *   评审最反感的不是功能少，而是"点了没反应"。所以：
  *     1. 学期设置      → 真能改（picker 选日期 → settings_save）
- *     2. 节次作息      → **只读展示**，并在页面上写明「本版只读」。
+ *     2. 节次作息      → 显示 + **可补录**：未校准的节次（当前显示内置默认时间）
+ *                          可以「设定时间」自己补上，已校准的可以「修改 / 清除」。
+ *                          真机上用户问"第6节应该是 13:30-14:10，为什么显示 14:55-15:40"——
+ *                          因为他课表里第 6 节没有课，自动校准推不出时间，退回了默认作息。
  *        Python 版 config.py 里作息是**源码常量** CLASS_PERIODS（注释写着"按自己学校的
  *        上下课时间改这里即可"），data/settings.json 里的 period_times 是**导入课表时
  *        自动校准**的结果、不是给用户在界面上编辑的。所以小程序这一版**不做**可编辑的
@@ -440,11 +443,48 @@ function importReplaceReady() {
 }
 
 /**
+ * 这一节的作息是不是**恰好等于程序内置的默认作息**（别的学校那份样板）。
+ *
+ * @param {number|string} number 节次号
+ * @param {*} value 作息值 ["08:00","08:45"]（或脏数据）
+ * @returns {boolean} true = 与内置默认完全相同（没有信息量）
+ */
+function isBuiltinDefault(number, value) {
+  if (!Array.isArray(value) || value.length !== 2) return false;
+  if (!periods || !periods.PERIOD_TIMES) return false;
+  const builtin = periods.PERIOD_TIMES[Number(number)];
+  if (!Array.isArray(builtin) || builtin.length !== 2) return false;
+  return String(value[0]) === String(builtin[0]) && String(value[1]) === String(builtin[1]);
+}
+
+/**
  * 合并作息表：**新导入的节次覆盖同名节次，未涉及的节次保留原值**。
  *
  * 合并基准必须是"当前生效的作息"（页面里的 this.periodTimes，来自 settings），
  * **不是空对象** —— 否则一次只校准了几节课的导入会把其它节次的作息抹掉。
  * 这条语义与 Web 版一致（那边也是往 settings 里增量 upsert）。
+ *
+ * ===========================================================================
+ * 【防御：基准里"与内置默认完全相同"的项**不搬进结果**】
+ * ===========================================================================
+ *   真机上挖出来的一个会**污染每一个新用户**的链条（逐处核过）：
+ *     1. 云函数 settings_get 在 period_times 为空时**回填内置默认表**（13 节，
+ *        含"第6节 14:55-15:40"）；
+ *     2. 本页 onLoad 把它当成"当前作息"读进 this.periodTimes；
+ *     3. 用户导入 .ics → 走到这里，基准 = 那 13 节**默认值**；
+ *     4. 合并时把它们原样搬进结果 → 云上真的存了 13 节，
+ *        于是**第6节 = 默认的 14:55-15:40 被标成「已校准」**；
+ *        更糟的是"第6节存在" → 判据不再为它生成空档行 → **午休行永远不出现**。
+ *   ⇒ 判据：某项的值等于内置默认值，就视为"没有信息量"，丢掉。两条理由：
+ *     * 它要么是**服务端回填出来的假校准**（上面这条 bug）；
+ *     * 要么是**用户真实作息恰好等于默认**（例如他学校第 3 节真的就是 10:00-10:45）——
+ *       丢掉**行为上无差别**：显示的时间一模一样，校不校准都长那样。
+ *   副作用是好的：这条防御能**自动修复已经被污染的数据** ——
+ *     用户下次导入时，那个假的第6节会被丢掉，午休行随之回来。
+ *
+ *   【为什么必须用 periods 的常量来比】默认作息是 utils/periods.js 从 config.py
+ *     抄过来的（PERIOD_TIMES）。本文件再抄一份，两边迟早不同步 ——
+ *     那时这条防御会静默失效（既不报错、也不红），比没有更糟。
  *
  * @param {object|null} base 当前作息 {"1": ["08:00","08:45"], ...}
  * @param {object|null} incoming 本次从文件校准出来的作息
@@ -457,10 +497,152 @@ function mergePeriodTimes(base, incoming) {
   if (!keys.length) return null; // 没有任何新校准 → 不保存（调用方也不提示）
 
   const merged = {};
-  // 先铺原有的，再用新的覆盖同名项
-  Object.keys(baseObj).forEach((key) => { merged[key] = baseObj[key]; });
+  const incomingKeys = {};
+  keys.forEach((key) => { incomingKeys[key] = true; });
+
+  // 先铺原有的：**与内置默认完全相同的项不搬**（除非这次导入恰好要覆盖它 ——
+  // 那种情况下下面的 keys.forEach 会把它带进来，覆盖优先于这条防御）
+  Object.keys(baseObj).forEach((key) => {
+    if (incomingKeys[key]) return;                       // 交给下一段覆盖
+    if (isBuiltinDefault(key, baseObj[key])) return;     // 服务端回填的假校准 / 等于默认的真实值
+    merged[key] = baseObj[key];
+  });
+  // 再用新的覆盖同名项（文件里真的出现了的节次，永远以它为准）
   keys.forEach((key) => { merged[key] = nextObj[key]; });
   return merged;
+}
+
+/**
+ * 这一节是不是**未校准**（当前显示的是内置默认时间，不是用户课表里的时间）。
+ *
+ * ===========================================================================
+ * 【为什么这件事必须有一个口径】真机上用户看到「第6节 14:55-15:40」并问
+ *   "第6节应该是 13:30-14:10，不知道为什么显示的是 14:55-15:40" ——
+ *   因为他的课表里**第 6 节没有课**（文件里就没有排在 13:30 的那一节），
+ *   自动校准推不出它的时间，于是退回了程序内置的默认作息。
+ *   这一行必须被**明确标成"不是你课表里的时间"**，否则用户会以为程序算错了。
+ * ===========================================================================
+ *
+ * 【入参是标准行，不是本页的视图模型】
+ *   periods.isUncalibratedRow(row, override) 内部用 `Array.isArray(row)` 挡了一道，
+ *   传视图模型（对象）进去它一律返回 false —— 那样每一行都会被当成"已校准"，
+ *   补录入口就全没了。所以这里收**标准行**（periodRows 返回的那个数组）。
+ *
+ * 【判据已冻结】utils/periods.js 里那个函数的注释写明：界面的补录入口按它判断，
+ *   **函数名与语义已冻结**。它对合成空档行（['break','12:25','13:30']）返回 false
+ *   —— 它不是节次，没什么可补录的；对缺号的节次行（第 6 节那种「午休」）返回 true。
+ *
+ * 【typeof 守卫 + 兜底】接口不在（旧版 utils）时退回本地口径：
+ *   **有节次号、且 override 里没有它 = 未校准**。这与上面那个函数的核心判据一致，
+ *   只是少了"合成行"这一条 —— 而合成行由 rowIsBreak / editable 另外挡住。
+ *
+ * @param {Array} row 标准行（periods.periodRows() 的一项）
+ * @param {object|null} override 校准过的作息 {"6": ["13:30","14:10"], ...}
+ * @returns {boolean}
+ */
+function isUncalibrated(row, override) {
+  if (periods && typeof periods.isUncalibratedRow === 'function') {
+    try {
+      return !!periods.isUncalibratedRow(row, override);
+    } catch (err) {
+      console.warn('[me] periods.isUncalibratedRow 异常，退回本地判据：', err);
+    }
+  }
+  const number = rowNumberOf(row);
+  if (number === null) return false;   // 合成空档行 / 脏行：不是节次，谈不上未校准
+  return !(override && typeof override === 'object'
+    && Object.prototype.hasOwnProperty.call(override, String(number)));
+}
+
+/**
+ * 一行（**标准行**）的节次号：节次行 `[7]` → 7；合成空档行 `['break',…]` → null。
+ *
+ * 【为什么必须用它而不是读 row[0]】行有两种（见 periods.js 的注释）：
+ * 合成行的 row[0] 是字符串 `'break'` —— 直接 `String(row[0])` 会得到键名 "break"、
+ * `toInt` 会得到 null，于是所有"按节次号"的判断全都不成立。
+ * 统计"到底有几节"、以及判断"这一行能不能补录"，都必须先过这一道。
+ */
+function rowNumberOf(row) {
+  // 【先挡住 null / 非数组】utils/periods.js 的 rowPeriodNumber 内部只用
+  // `Array.isArray(row) ? ...` 判了"不是数组就 false"这一半，**null 会一路走到 row[0]**
+  // 并抛 TypeError（`Cannot read properties of null`）。本页的行来自计算，
+  // 理论上不会脏，但"理论上不会"在这个仓库里已经出过太多次事了 —— 所以自己先挡一道。
+  if (!Array.isArray(row) || !row.length) return null;
+  if (periods && typeof periods.rowPeriodNumber === 'function') {
+    return periods.rowPeriodNumber(row);
+  }
+  // 兜底：拿不到那个函数时自己判（只认正整数节次号）
+  const number = Number(row[0]);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+/**
+ * 这一行是不是**空档行**（两种都算：缺号夹出来的「午休」节次行、合成空档行）。
+ *
+ * 【为什么不能自己用 breakLabel(row[0]) 判】合成空档行的 row[0] 是 `'break'`，
+ * `breakLabel('break')` 返回空串 → **这一行不会被标成空档**，底色与样式全失效。
+ * 所以统一用 periods.isBreakRow(row, override)（同事点名提醒过这条）。
+ */
+function rowIsBreak(row, override) {
+  if (periods && typeof periods.isBreakRow === 'function') {
+    try {
+      return !!periods.isBreakRow(row, override);
+    } catch (err) {
+      console.warn('[me] periods.isBreakRow 异常，退回 breakLabel 判据：', err);
+    }
+  }
+  const number = rowNumberOf(row);
+  return number === null ? true : !!periods.breakLabel(number, override);
+}
+
+/**
+ * 补录一节作息要提交的**增量**：`{ '6': ['13:30','14:10'] }`。
+ *
+ * 为什么返回"只含这一节"的对象、再交给 mergePeriodTimes 去合并：
+ * 保存路径上**只能有一个合并实现**（就是导入那条路用的那个），
+ * 否则"补录"和"导入"迟早会在"其它节次保不保留"上给出不同答案。
+ *
+ * @returns {{ok: boolean, patch: object|null, error: string}}
+ */
+function periodRowPatch(number, start, end) {
+  const key = String(number);
+  const from = str(start);
+  const to = str(end);
+  // 【必须两个都给】一节有起无止（或反过来）算不出它占哪段时间，
+  // 课表页会退化成"用结束时刻吸附"，用户看到的仍是一个他自己都没确认过的时间。
+  if (!from || !to) {
+    return { ok: false, patch: null, error: '开始和结束时间都要填（一节必须有起止）' };
+  }
+  if (periods && typeof periods.toMinutes === 'function'
+    && periods.toMinutes(from) !== null && periods.toMinutes(to) !== null
+    && periods.toMinutes(to) <= periods.toMinutes(from)) {
+    return { ok: false, patch: null, error: `结束时间要晚于开始时间（现在是 ${from}-${to}）` };
+  }
+  const patch = {};
+  patch[key] = [from, to];
+  return { ok: true, patch: patch, error: '' };
+}
+
+/**
+ * 从作息表里**删掉**一个节次（其余原样保留）—— 给「清除」用。
+ *
+ * 返回的是完整的新作息（不是增量）：清除的语义是"这一节回到未校准"，
+ * 只有把 key 真的去掉才算数。
+ *
+ * @param {object|null} base 当前作息
+ * @param {number|string} number 要清掉的节次号
+ * @returns {{times: object, removed: boolean}} times 可能为空对象（全清光）
+ */
+function dropPeriodKey(base, number) {
+  const key = String(number);
+  const source = (base && typeof base === 'object') ? base : {};
+  const next = {};
+  Object.keys(source).forEach((item) => {
+    if (item !== key) next[item] = source[item];
+  });
+  // 【removed 的判据是"原来真的有这个键"】不是"删完少了一个" ——
+  // 要清的那一节本来就没校准过时，删了等于没删，界面不该说"已清除"。
+  return { times: next, removed: Object.prototype.hasOwnProperty.call(source, key) };
 }
 
 Page({
@@ -476,10 +658,26 @@ Page({
     currentWeekNo: 0,           // 今天是第几周；0 = 算不出来（没设置 / 开学前）
     currentWeekText: '',        // 「今天在第 3 周（单周）」/「还没设置开学日期」
 
-    // --- 二、节次作息（只读） ---
-    periodRows: [],             // [{ key, label, timeText, isBreak, calibrated }]
+    // --- 二、节次作息（可补录） ---
+    //     每一行：{ key, number, label, timeText, isBreak, calibrated, uncalibrated, actionText }
+    //     * calibrated   = 已校准（来自导入识别或用户补录）
+    //     * uncalibrated = 显示的是内置默认时间 → 界面要给「设定时间」入口
+    periodRows: [],
     periodSourceText: '',       // 「当前使用默认作息（第 1~13 节）」等
     periodOverrideText: '',     // 「其中 3 节是导入课表时校准过的」
+    periodGapHint: '课表里两节之间空得比较久时（例如中午 12:25 到 13:30），'
+      + '会自动显示成一行「午休」；短于 45 分钟的只是课间，不占行。',
+    // --- 补录弹层（选开始/结束时间） ---
+    periodEditVisible: false,
+    periodEditIndex: -1,        // 正在编辑的 periodRows 下标；-1 = 没有
+    periodEditLabel: '',
+    periodEditStart: '08:00',
+    periodEditEnd: '08:45',
+    periodEditError: '',        // 本地校验或保存失败的人话
+    periodSaving: false,
+    // 保存成功/失败的一句话结果（显示在作息卡片里，与导入那条路分开）
+    periodSaveText: '',
+    periodSaveFailed: false,
 
     // --- 三、AI 设置 ---
     aiAvailable: true,          // api.js 的 aiConfig* 是否就绪
@@ -561,8 +759,9 @@ Page({
     pendingTasks: [],           // 待入库的任务（点确认才用）
     calibratedPeriodCount: 0,   // 本次从文件里校准出多少节上下课时间
     calibratedText: '',         // 「并从文件里校准出 N 节上下课时间，导入成功后会一并保存」
-    periodSaveText: '',         // 作息保存这一路的独立结果（成功/失败都写这里）
-    periodSaveFailed: false,    // 上面那句是不是失败（WXML 里不能调方法，只能带个标记）
+    // 【作息保存这一路的结果只有一份】补录（上面的卡片）与导入后的自动校准（下面这一步）
+    // 都写这两个字段 —— 它们是"作息有没有存上"的同一件事，分成两份只会让界面自相矛盾。
+    // periodSaveText / periodSaveFailed 在「二、节次作息」的 data 里已经声明过了。
     importResultText: '',       // 「已入库 N 条，跳过 M 条」
 
     // --- 五、导出备份 ---
@@ -688,42 +887,298 @@ Page({
   },
 
   /**
-   * 作息表（只读展示）。
+   * 作息表。
    * 用 periods.periodRows + rowLabel + rowTimeRange，与课表页**同一套口径**，
    * 所以这里看到的「午休」和课表左侧那一行一定是同一个东西。
+   *
+   * 【列表里有两种行 —— 这是本页最容易搞错的地方】
+   *   * **节次行** `[7]`：有节次号，可以补录；
+   *   * **合成空档行** `['break','12:25','13:30']`：periods.js 在"相邻两行之间空隙
+   *     ≥ 45 分钟"时插进来的，**没有节次号**（rowPeriodNumber → null）。
+   *     它出现在这份作息表里是**有意的** —— 用户看得到"这里插了一行"是好事
+   *     （这正是同事在课表里做的那件事）。但它不给补录按钮：它不是节次，
+   *     period_times 里也没有它的键（键必须是节次号），保存无处可存。
+   *   ⚠️ 所以**任何"按 row[0] 当节次号"的写法都是错的**（合成行的 row[0] 是字符串
+   *     `'break'`：breakLabel 返回空串 → 空档样式失效；String(row[0]) 会得到键名
+   *     "break" → 统计与判据全歪）。统一走 rowNumberOf / rowIsBreak 两个包装。
+   *
+   * 【每一行的视图模型】
+   *   * `uncalibrated`：显示的是**内置默认时间**，不是用户课表里的时间
+   *     （真机那条「第6节 14:55-15:40」就是这个情形：他课表里第 6 节没有课，
+   *      自动校准推不出来，于是回落默认作息）。界面据此给「设定时间」入口。
+   *   * `isBreak`：走 periods.isBreakRow，**两种空档行都认**。
+   *   * `editable`：有节次号才可编辑。
+   *   * `actionText`：按钮文案（未校准 = 设定时间，已校准 = 修改，空档行 = 空）。
    */
   renderPeriods() {
     const override = this.periodTimes;
     const rows = periods.periodRows(override);
     const list = rows.map((row) => {
-      const number = row[0];
-      const range = periods.rowTimeRange(row, override) || ['', ''];
-      const breakName = periods.breakLabel(number, override);
+      const number = rowNumberOf(row);            // ⚠️ 不是 row[0]（见上）
+      const rowRange = periods.rowTimeRange(row, override) || ['', ''];
+      const isGapRow = number === null;           // 合成空档行 / 脏行
+      const uncalibrated = isUncalibrated(row, override);
+      const calibrated = !isGapRow && !!override
+        && Object.prototype.hasOwnProperty.call(override, String(number));
+      // 【未校准的行要显示**这一节自己的默认时间**，而不是行上那个推出来的时间】
+      // 真机上用户看到的是「午休 12:25-14:15」—— 那是左右两节夹出来的推断值，
+      // 看着挺合理，于是他根本不会想到"第 6 节其实是 14:55-15:40 的默认值"。
+      // 而他真正要报的是「第 6 节应该是 13:30-14:10，为什么显示 14:55-15:40」。
+      // 所以这里改成显示 periodTimeRange(number) = 内置默认时间，
+      // 「未校准」+「设定时间」就是给这一格的解释与出口。
+      // （合成空档行不走这一支：它的区间是 periodRows 直接给的 12:25-13:30。）
+      const range = uncalibrated
+        ? (periods.periodTimeRange(number, override) || rowRange)
+        : rowRange;
       return {
         key: periods.rowKey ? periods.rowKey(row) : String(number),
-        label: periods.rowLabel(row, override) || `第${number}节`,
+        number: number,
+        label: periods.rowLabel(row, override) || (isGapRow ? '空档' : `第${number}节`),
         timeText: range[0] && range[1] ? `${range[0]}-${range[1]}` : (range[0] || range[1] || '—'),
-        isBreak: !!breakName,
-        calibrated: !!override && Object.prototype.hasOwnProperty.call(override, String(number)),
+        // 【不能用 breakLabel(number)】合成空档行的 number 是 null → 那一行不会被
+        // 标成空档、底色与样式全失效。rowIsBreak 把两种空档行都认下来。
+        isBreak: rowIsBreak(row, override),
+        isGapRow: isGapRow,
+        editable: !isGapRow,
+        calibrated: calibrated,
+        uncalibrated: uncalibrated,
+        actionText: isGapRow ? '' : (uncalibrated ? '设定时间' : '修改'),
       };
     });
 
-    const calibratedCount = list.filter((item) => item.calibrated).length;
+    // -------------------------------------------------------------------------
+    // 统计口径：**只数节次行**（合成空档行不是一节，不能算进"共 N 节"里）
+    //
+    // 以前这里写的是 `calibratedCount === list.length` —— 那个等式在合成空档行
+    // 出现之后永远不成立（列表里多了不属于任何节次的行），
+    // 而且 `list.length` 也不再等于节数（缺号时 13、补录满 15）。
+    // 所以分母改成 periodCount（走 rowNumberOf 过滤），文案里的 N 自然就对了。
+    // -------------------------------------------------------------------------
+    const periodRows = list.filter((item) => !item.isGapRow);
+    const periodCount = periodRows.length;
+    const calibratedCount = periodRows.filter((item) => item.calibrated).length;
+    const uncalibratedCount = periodRows.filter((item) => item.uncalibrated).length;
     let sourceText = '';
     if (!override || !Object.keys(override).length) {
-      sourceText = `当前使用内置默认作息（第 1~${list.length} 节）`;
-    } else if (calibratedCount === list.length) {
-      sourceText = `当前作息全部来自导入课表时的自动校准（共 ${list.length} 节）`;
+      sourceText = `当前使用内置默认作息（第 1~${periodCount} 节）`;
+    } else if (calibratedCount === periodCount) {
+      sourceText = `当前作息全部来自导入课表时的自动校准（共 ${periodCount} 节）`;
     } else {
-      sourceText = `当前作息 = 默认作息 + 导入课表时校准的 ${calibratedCount} 节`;
+      sourceText = `当前作息 = 默认作息 + 已校准的 ${calibratedCount} 节`
+        + `（共 ${periodCount} 节）`;
+    }
+
+    const parts = [];
+    if (calibratedCount) {
+      parts.push(`带「已校准」标记的 ${calibratedCount} 节来自导入识别或你手动设定的时间。`);
+    }
+    if (uncalibratedCount) {
+      // 【这句话必须说清"错在哪"】用户的原话是"第6节应该是 13:30-14:10，
+      // 不知道为什么显示的是 14:55-15:40"。答案就是：这一节他课表里没有课，
+      // 程序推不出时间，显示的是内置默认值 —— 不是算错，是**没有依据**。
+      parts.push(`带「未校准」标记的 ${uncalibratedCount} 节显示的是内置默认时间，`
+        + '不是你课表里的时间 —— 点「设定时间」可以补上。');
+    }
+    if (periodCount < list.length) {
+      // 合成空档行是**有意的**：两节之间空得久（≥45 分钟）就在这里插一行，
+      // 与课表页左侧那一行是同一个东西。说一句，免得用户以为列表出错了。
+      parts.push('列表里的「休息 / 午休」空档行是按两节之间的时间空隙自动插的，'
+        + '不是课程，也不用填。');
     }
 
     this.setData({
       periodRows: list,
       periodSourceText: sourceText,
-      periodOverrideText: calibratedCount
-        ? `带「已校准」标记的 ${calibratedCount} 节来自导入课表时的识别结果。`
-        : '',
+      periodOverrideText: parts.join(''),
+    });
+  },
+
+  // -------------------------------------------------------------------------
+  // 补录作息（未校准的节次可以自己设定时间）
+  // -------------------------------------------------------------------------
+
+  /** 把某一行的下标翻译成可编辑的上下文；下标不合法返回 null（脏事件不许崩） */
+  readPeriodRow(index) {
+    const list = this.data.periodRows || [];
+    const idx = Number(index);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= list.length) return null;
+    const row = list[idx];
+    if (!row) return null;
+    if (row.editable === false) return null;   // 空档行没有节次号，不能编辑
+    const override = this.periodTimes || {};
+    const saved = override[String(row.number)];
+    // 弹层初值一律用**当前显示的时间**（未校准行 = 内置默认时间，已校准行 = 校准值）：
+    // 用户看到 14:55-15:40 却要在弹层里看到一个不一样的值，那是最容易填错的组合。
+    return {
+      index: idx,
+      row: row,
+      number: row.number,
+      label: row.label,
+      start: Array.isArray(saved) && saved[0] ? String(saved[0]) : firstTime(row.timeText),
+      end: Array.isArray(saved) && saved[1] ? String(saved[1]) : secondTime(row.timeText),
+    };
+  },
+
+  /** 点「设定时间 / 修改」→ 打开弹层（纯本地，不发请求） */
+  onTapPeriodSet(event) {
+    const index = event && event.currentTarget && event.currentTarget.dataset
+      ? event.currentTarget.dataset.index
+      : -1;
+    const ctx = this.readPeriodRow(index);
+    if (!ctx) {
+      wx.showToast({ title: '这一行读不出来，请下拉刷新', icon: 'none' });
+      return;
+    }
+    this.setData({
+      periodEditVisible: true,
+      periodEditIndex: ctx.index,
+      periodEditLabel: ctx.label,
+      periodEditStart: ctx.start,
+      periodEditEnd: ctx.end,
+      periodEditError: '',
+    });
+  },
+
+  /** 已校准的行也走同一个入口（文案叫「修改」，行为一致） */
+  onTapPeriodEdit(event) {
+    this.onTapPeriodSet(event);
+  },
+
+  onPeriodStartChange(event) {
+    this.setData({ periodEditStart: str(event && event.detail && event.detail.value) });
+  },
+
+  onPeriodEndChange(event) {
+    this.setData({ periodEditEnd: str(event && event.detail && event.detail.value) });
+  },
+
+  onTapPeriodCancel() {
+    if (this.data.periodSaving) return;   // 保存中不给关（避免"关了却存进去了"的错觉）
+    this.setData({ periodEditVisible: false, periodEditError: '' });
+  },
+
+  /** 空处理器：弹层面板上的 catchtap 用它挡住冒泡（点面板内部不关窗） */
+  onNoop() {},
+
+  /**
+   * 保存这一节的时间（**未校准的补录**与**已校准的修改**是同一条路）。
+   *
+   * 合并语义与导入**完全一致**：只把这一节塞进 mergePeriodTimes 的增量里，
+   * 其余节次原值保留（单个节次的补录就是"只改一个 key"）。
+   */
+  onTapPeriodSave() {
+    if (this.data.periodSaving) return;
+    const ctx = this.readPeriodRow(this.data.periodEditIndex);
+    if (!ctx) {
+      this.setData({ periodEditError: '这一行已经不在列表里了，请关掉重试' });
+      return;
+    }
+    const checked = periodRowPatch(ctx.number, this.data.periodEditStart, this.data.periodEditEnd);
+    if (!checked.ok) {
+      // 【本地就能判的错就地拦下】不为了一个"没填完整"去发一次请求
+      this.setData({ periodEditError: checked.error });
+      return;
+    }
+    this.savePeriodPatch(checked.patch, `已保存：${ctx.label} ${this.data.periodEditStart}`
+      + `-${this.data.periodEditEnd}`);
+  },
+
+  /**
+   * 「清除」：把这一节从 period_times 里去删掉，回到未校准。
+   *
+   * 【为什么要有】用户填错了得能退回去 —— 没有这个入口，一次手滑就把课表口径改歪了。
+   * 【为什么要确认】这是改**配置**，不是改一条任务：影响面是整张课表（所有落到这一节的
+   *   课程/日程都会跟着变）。所以按"破坏性操作"处理，先问一句。
+   */
+  onTapPeriodClear(event) {
+    const index = event && event.currentTarget && event.currentTarget.dataset
+      ? event.currentTarget.dataset.index
+      : -1;
+    const ctx = this.readPeriodRow(index);
+    if (!ctx) {
+      wx.showToast({ title: '这一行读不出来，请下拉刷新', icon: 'none' });
+      return;
+    }
+    if (!settingsReady()) {
+      wx.showToast({ title: '设置接口不可用，请更新版本', icon: 'none' });
+      return;
+    }
+    const next = dropPeriodKey(this.periodTimes, ctx.number);
+
+    wx.showModal({
+      title: `清除「${ctx.label}」的时间？`,
+      content: `清除后这一节回到未校准状态，课表里会按内置默认时间显示（当前是 `
+        + `${ctx.row.timeText}）。`,
+      confirmText: '清除',
+      cancelText: '取消',
+      success: (res) => {
+        if (!res || !res.confirm) return;   // 点了取消 → 什么都不做
+        this.savePeriodPatch(null, `已清除：${ctx.label} 的时间（回到未校准）`, next.times);
+      },
+      fail: () => {
+        // 弹窗弹不出来时按"用户没确认"处理：不删任何东西
+        this.setData({ periodSaveFailed: true, periodSaveText: '没能弹出确认框，本次没有清除' });
+      },
+    });
+  },
+
+  /**
+   * 保存作息（补录 / 修改 / 清除的**唯一出口**）。
+   *
+   * @param {object|null} patch 增量（只含被改的那一节）；清除时传 null
+   * @param {string} okText 成功后的那一句话
+   * @param {object} [fullTimes] 已经算好的完整作息（清除用：key 要去掉，不能靠合并）
+   */
+  savePeriodPatch(patch, okText, fullTimes) {
+    if (!settingsReady()) {
+      this.failPeriodSave('设置接口不可用，请更新版本', true);
+      return;
+    }
+    const next = fullTimes || mergePeriodTimes(this.periodTimes, patch);
+    // 兜底：patch 为空（理论上不会，调用方都先校验过）→ 不发请求
+    if (!next) {
+      this.failPeriodSave('没有要保存的内容', true);
+      return;
+    }
+
+    this.setData({ periodSaving: true, periodEditError: '' });
+    api.saveSettings({ period_times: next }).then((result) => {
+      if (result && result.ok === false) throw new Error(describeError(result));
+      // 服务端会把 period_times 归一化后回传，以**服务端返回的**为准（与导入那条路同口径）
+      const saved = extractSettings(result);
+      const finalTimes = saved.period_times || next;
+      // 【先备份再覆盖】服务端可能回一个空对象/缺字段（归一化没做完），
+      // 这时宁可继续用我们算好的 next，也不要把用户已有的作息清成空。
+      const applied = (finalTimes && Object.keys(finalTimes).length) ? finalTimes : next;
+      this.periodTimes = applied;
+      // 同步给 app.globalData（课表页读的就是它），并立刻重画本页作息表
+      // —— renderPeriods 会按新作息重新打「已校准 / 未校准」标记
+      syncGlobalSettings({ ok: true, data: { period_times: applied } });
+      this.setData({
+        periodSaving: false,
+        periodEditVisible: false,
+        periodEditError: '',
+        periodSaveText: okText,
+        periodSaveFailed: false,
+      });
+      this.renderPeriods();
+    }).catch((err) => {
+      this.failPeriodSave(`没能保存：${describeError(err)}`, false);
+    });
+  },
+
+  /**
+   * 保存失败：**只说人话、绝不动已有的作息**。
+   * @param {string} message 给人看的一句话
+   * @param {boolean} [inModal] true = 显示在弹层里（本地前置校验失败），false = 弹层下方那行
+   */
+  failPeriodSave(message, inModal) {
+    // this.periodTimes 一个字节都不改；periodRows 也只有成功路径才重画
+    this.setData({
+      periodSaving: false,
+      periodSaveText: message,
+      periodSaveFailed: true,
+      periodEditError: inModal ? message : '',
     });
   },
 
@@ -1894,6 +2349,15 @@ Page({
     isCourseTask: isCourseTask,
     splitCoursesAndManual: splitCoursesAndManual,
     mergePeriodTimes: mergePeriodTimes,
+    isBuiltinDefault: isBuiltinDefault,
+    // 节次作息 · 未校准标记与补录
+    isUncalibrated: isUncalibrated,
+    rowNumberOf: rowNumberOf,
+    rowIsBreak: rowIsBreak,
+    periodRowPatch: periodRowPatch,
+    dropPeriodKey: dropPeriodKey,
+    firstTime: firstTime,
+    secondTime: secondTime,
     // AI 设置 · Key 形状与服务商匹配
     detectKeyProvider: detectKeyProvider,
     keyProviderHint: keyProviderHint,
@@ -1921,6 +2385,28 @@ function pad2(number) {
 function todayStr() {
   const now = new Date();
   return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+}
+
+/** "13:30-14:10" → "13:30"（解析不出来给空串，调用方自己兜底） */
+function firstTime(timeText) {
+  const matched = /^(\d{1,2}:\d{2})\s*[-–~]\s*(\d{1,2}:\d{2})$/.exec(str(timeText));
+  return matched ? matched[1] : '';
+}
+
+/** "13:30-14:10" → "14:10" */
+function secondTime(timeText) {
+  const matched = /^(\d{1,2}:\d{2})\s*[-–~]\s*(\d{1,2}:\d{2})$/.exec(str(timeText));
+  return matched ? matched[2] : '';
+}
+
+/**
+ * 设置接口是否可用（getSettings / saveSettings 都在）。
+ * 【为什么要有它】api.js 由同事维护，形状可能变（这个仓库已经因此踩过一次：
+ * aiConfigGet 的 options 被漏掉）。缺函数时直接调用会抛 TypeError ——
+ * 那是**最糟的失败方式**（用户只该看到一句人话）。所以动手前先问一句。
+ */
+function settingsReady() {
+  return typeof api.getSettings === 'function' && typeof api.saveSettings === 'function';
 }
 
 /** "2026-09-07" → "9月7日"；解析不了返回原文 */
@@ -2202,6 +2688,15 @@ module.exports = {
     isCourseTask: isCourseTask,
     splitCoursesAndManual: splitCoursesAndManual,
     mergePeriodTimes: mergePeriodTimes,
+    isBuiltinDefault: isBuiltinDefault,
+    // 节次作息 · 未校准标记与补录（utils/tests/me_periods.test.js 用）
+    isUncalibrated: isUncalibrated,
+    rowNumberOf: rowNumberOf,
+    rowIsBreak: rowIsBreak,
+    periodRowPatch: periodRowPatch,
+    dropPeriodKey: dropPeriodKey,
+    firstTime: firstTime,
+    secondTime: secondTime,
     // AI 设置 · Key 形状与服务商匹配（utils/tests/me_ai.test.js 用）
     detectKeyProvider: detectKeyProvider,
     keyProviderHint: keyProviderHint,

@@ -432,7 +432,28 @@ function buildGrid(perDay, override, weekMonday) {
   const rows = [];
   const rowIndexOfPeriod = {}; // 节次号 → 行下标（用于把 periods 映射到行）
   periodRows.forEach((row, index) => {
-    const number = row[0];
+    // 【合成空档行】相邻两行之间按**时间空隙**插出来的一行（['break','12:25','13:30']）。
+    // 它没有节次号：不进 rowIndexOfPeriod（没有任何任务能"按节次"定位到它），
+    // 也不占「空闲 N 节」的分母（isBreak 与它都在第 6 步被排除）。
+    // 但它**有真实时间区间**，所以按时间落点的任务照样能落进它（与缺号午休行同一口径）。
+    if (periods.isSyntheticRow(row)) {
+      const range = periods.rowTimeRange(row, override) || ['', ''];
+      rows.push({
+        key: periods.rowKey(row),
+        number: null,
+        label: periods.rowLabel(row, override) || '休息',
+        timeText: range[0] && range[1] ? `${range[0]}-${range[1]}` : (range[0] || range[1] || ''),
+        // 行的真实区间：rowSpanFromTimes 要用它（合成行的节次号是 null，
+        // 按 number 去查会查成空区间），这里算一次就存下来，免得各处重算还各算各的
+        range,
+        isBreak: true,
+        isClass: false,
+        isFallback: false,
+        isSynthetic: true,
+      });
+      return;
+    }
+    const number = periods.rowPeriodNumber(row);
     const label = periods.rowLabel(row, override) || `第${number}节`;
     const range = periods.rowTimeRange(row, override) || ['', ''];
     const isBreak = !!periods.breakLabel(number, override); // 只有左右紧邻两节都校准过才算
@@ -441,6 +462,7 @@ function buildGrid(perDay, override, weekMonday) {
       number,
       label,
       timeText: range[0] && range[1] ? `${range[0]}-${range[1]}` : (range[0] || range[1] || ''),
+      range,
       isBreak,
       // 【真实课节 vs 空档行】isBreak 是"这一行在模板上长什么样"（灰底、写「午休」），
       // isClass 是"这一行算不算一节课"。现在两者互补，但**不要合并成一个字段**：
@@ -450,6 +472,8 @@ function buildGrid(perDay, override, weekMonday) {
       // 显式给 false：模板里用 row.isFallback 区分「其他时段」兜底行，
       // 字段先在 data 里初始化好，免得渲染出 undefined（本页一直遵守这条）
       isFallback: false,
+      // 合成空档行是 true（它没有节次号）。占位没有 0/1 之分，只用于"认得出它是合成的"
+      isSynthetic: false,
     });
     rowIndexOfPeriod[number] = index;
   });
@@ -565,15 +589,16 @@ function buildGrid(perDay, override, weekMonday) {
   // 两列都恰好等于 「总行数 − 卡片数」，一眼就能看出数错了对象。
   // 所以这里**另算一份"被占用的行"**：一条任务覆盖到的每一行都算被占。
   //
-  // 两条既有排除规则保持不变：
-  //   * row.isBreak（午休 / 休息空档）不计入空闲
+  // 两条既有排除规则保持不变（合成空档行按第一条排除）：
+  //   * row.isBreak（午休 / 休息空档：缺号的与合成的都算）不计入空闲
   //   * FALLBACK_ROW_KEY（"其他时段"兜底行）不计入空闲
   const freeCounts = [];
   for (let d = 0; d < DAYS_PER_WEEK; d += 1) {
     const occupied = occupiedRowsOfDay(buckets, rows, rowIndexOfPeriod, d, override);
     let free = 0;
     rows.forEach((row, rowIndex) => {
-      if (row.isBreak || row.key === FALLBACK_ROW_KEY) return; // 空档行与兜底行都不算
+      // 空档行（含合成行）与兜底行都不算 —— 它们不是"课"，没有"空闲的一节课"这回事
+      if (row.isBreak || row.isSynthetic || row.key === FALLBACK_ROW_KEY) return;
       if (!occupied[rowIndex]) free += 1;
     });
     freeCounts.push(free);
@@ -723,7 +748,15 @@ function resolveSpan(task, rows, rowIndexOfPeriod, override) {
   // 截止的语义就是"标出到期时刻"，本来就该吸附到那个时刻所在的那一节，且**不占时间**。
   if (!startTime) {
     const byEnd = periods.periodSpanFromTimes('', endTime, override);
-    if (!byEnd) return { landingRow: -1, occupiedRows: [], degenerate: false };
+    if (!byEnd) {
+      // 【合成空档行的兜底】节次口径找不到，不代表没有行接得住它：
+      // 用户补录了第 6 节（13:30-14:10）之后，12:25-13:30 是一行**合成的「午休」**，
+      // 它没有节次号，periodSpanFromTimes 永远找不到 —— 一个 13:00 的截止会平白掉进
+      // 「其他时段」，而那一行就明明白白画在旁边。所以再按**行的区间**找一次。
+      const byRow = rowContainingTime(list, endTime, override);
+      if (byRow === -1) return { landingRow: -1, occupiedRows: [], degenerate: false };
+      return { landingRow: byRow, occupiedRows: [], degenerate: true };
+    }
     const index = rowIndexOfPeriod ? rowIndexOfPeriod[byEnd[0]] : undefined;
     return { landingRow: index === undefined ? -1 : index, occupiedRows: [], degenerate: true };
   }
@@ -955,7 +988,10 @@ function rowSpanFromTimes(task, rows, override) {
   let classTo = -1;
   list.forEach((row, index) => {
     if (!row || row.isFallback) return;          // 「其他时段」兜底行不参与时间换算
-    const range = periods.effectivePeriodRange(row.number, override) || ['', ''];
+    // 行的真实区间：buildGrid 造行时已经算好并存在 row.range（**合成空档行的节次号是
+    // null**，拿 row.number 去查会得到空区间，于是"整段时间都在合成午休里"的任务会
+    // 凭空掉进「其他时段」）。没有 range 的手造行退回既有的按节次号口径。
+    const range = row.range || periods.effectivePeriodRange(row.number, override) || ['', ''];
     const begin = periods.toMinutes(range[0]);
     const finish = periods.toMinutes(range[1]);
     if (begin === null || finish === null) return;
@@ -976,6 +1012,33 @@ function rowSpanFromTimes(task, rows, override) {
     return { from: from, to: to, heightFrom: from, heightTo: to };
   }
   return { from: from, to: to, heightFrom: classFrom, heightTo: classTo };
+}
+
+/**
+ * 某个时刻落在**哪一行**里（行级口径，返回 rows 里的下标；没有行接得住返回 -1）。
+ *
+ * 与 periods.periodNumberAt 的区别：那个只认节次号，而**合成空档行没有节次号**
+ * （用户补录第 6 节后，12:25-13:30 就是一行合成的「午休」），它永远找不到。
+ * 所以这里按行的真实区间找，并且只在"节次口径已经找不到"时作为兜底使用 ——
+ * 它不参与既有的落点优先级，真课行优先、空档行其次。
+ */
+function rowContainingTime(rows, hhmm, override) {
+  const list = Array.isArray(rows) ? rows : [];
+  const minute = periods.toMinutes(str(hhmm));
+  if (minute === null) return -1;
+  let breakHit = -1;
+  for (let i = 0; i < list.length; i += 1) {
+    const row = list[i];
+    if (!row || row.isFallback) continue;
+    const range = row.range || periods.effectivePeriodRange(row.number, override) || ['', ''];
+    const begin = periods.toMinutes(range[0]);
+    const finish = periods.toMinutes(range[1]);
+    if (begin === null || finish === null) continue;
+    if (minute < begin || minute > finish) continue;
+    if (row.isClass !== false) return i;      // 真课行优先
+    if (breakHit === -1) breakHit = i;        // 空档行（含合成行）留作兜底
+  }
+  return breakHit;
 }
 
 /**

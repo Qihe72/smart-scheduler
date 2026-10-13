@@ -70,10 +70,12 @@
  *   打印六条场景）。它只打印、不会红，所以「探针六条」那一组把它的结论钉成了断言。
  * ===========================================================================
  *
- * 【当前基线】本文件 341 条断言；跑全量 run.js 是 2353 条
- *   （本次改动前分别是 274 / 2286；再往前是 201 / 2213）。
+ * 【当前基线】本文件 341 条断言；跑全量 run.js 是 2656 条
+ *   （本文件上一次改动时分别是 274 / 2286；再往前是 201 / 2213）。
  *   数字变了不一定有问题，但**通过数突然下降**要当成"有断言没跑到"来查
  *   （本文件就出过一次：`testOnShow();` 漏了 return，整批异步断言一条没跑还全绿）。
+ *   全量的另外两份大头是「我的」页：me_import 142 条、me_periods 217 条
+ *   （各自的自检方法与基线写在它们自己的文件头里）。
  */
 
 'use strict';
@@ -1043,9 +1045,12 @@ function run() {
   };
   var builtReal = T.buildGrid(perDayOf({ 3: [fairTask] }), REAL_CAL, WEEK_MONDAY);
 
-  var realBreakIdx = -1;
-  builtReal.rows.forEach(function (r, i) { if (r.isBreak) realBreakIdx = i; });
-  isTrue(realBreakIdx !== -1, '第 6 节被认定为「午休」空档行（第 5 / 7 节都校准过）');
+  var realBreakIdx = rowIndexOf(builtReal.rows, '6');
+  // 【为什么点名叫第 6 节】这份作息现在有**两个**空档行：第 6 节的「午休」（缺号夹出来的）
+  // 和第 10~11 节之间 17:25-19:00 的「休息」（按时间空隙合成出来的，见下一个 block）。
+  // 所以不能再用"最后一个 isBreak 行"来找午休行 —— 那会指到晚饭那行去。
+  isTrue(realBreakIdx !== -1 && builtReal.rows[realBreakIdx].isBreak,
+    '第 6 节被认定为「午休」空档行（第 5 / 7 节都校准过）');
   eq(builtReal.rows[realBreakIdx] ? builtReal.rows[realBreakIdx].key : '?', '6',
     '午休行就是第 6 节那一行');
   eq(builtReal.rows[realBreakIdx] ? builtReal.rows[realBreakIdx].timeText : '?', '12:25-14:15',
@@ -1059,8 +1064,12 @@ function run() {
   // 占用跨度：含午休行 —— 5 行
   eq(realSpan ? builtReal.rows[realSpan.from].key : '?', '6',
     '占用跨度**确实从午休行开始**（14:00 压在 12:25-14:15 里）—— 占用口径没变');
-  eq(realSpan ? builtReal.rows[realSpan.to].key : '?', '10', '占用到第 10 节行结束');
-  eq(realSpan ? (realSpan.to - realSpan.from + 1) : -1, 5, '占用 5 行（第 6/7/8/9/10 节）');
+  // 占用跨度按"区间相交"算 —— 第 10~11 节之间那条 17:25-19:00 的「休息」行
+  // 与 14:00-18:00 相交 35 分钟，所以占用到它为止（口径没变：占用**含空档行**；
+  // 卡片高度不受影响，它只看 isClass 行，见下面两条）。
+  eq(realSpan ? builtReal.rows[realSpan.to].key : '?', 'break-17:25-19:00',
+    '占用到 17:25-19:00 的「休息」行为止（它也是这条任务覆盖到的行）');
+  eq(realSpan ? (realSpan.to - realSpan.from + 1) : -1, 6, '占用 6 行（午休 + 第 7~10 节 + 晚饭空档）');
   // 高度跨度：只看真实课节 —— 4 行
   eq(realSpan ? builtReal.rows[realSpan.heightFrom].key : '?', '7',
     '**高度从第 7 节行开始**（第一条与它相交的**真课**，14:15）');
@@ -1082,8 +1091,8 @@ function run() {
   eq(realResolved.landingRow, realSpan ? realSpan.heightFrom : -1,
     '**落点 = 高度跨度的第一行**（口径只有一条）');
   eq((realResolved.blockRows || []).length, 4, 'blockRows = 4 行');
-  eq((realResolved.occupiedRows || []).length, 5,
-    'occupiedRows 仍是 5 行（含午休）—— 占用不跟着高度一起缩');
+  eq((realResolved.occupiedRows || []).length, 6,
+    'occupiedRows = 6 行（午休 + 第 7~10 节 + 晚饭空档）—— 占用不跟着高度一起缩');
   isTrue((realResolved.occupiedRows || []).indexOf(realBreakIdx) !== -1,
     '午休行仍在占用里（那 15 分钟确实被占了）');
   isTrue((realResolved.blockRows || []).indexOf(realBreakIdx) === -1,
@@ -1106,9 +1115,9 @@ function run() {
   block('回归护栏 —— 整段时间都在空档里的任务，仍落空档行');
   var inGap = timedTask('ingap', '午休里的事', '12:30', '13:10');
   var builtGap = T.buildGrid(perDayOf({ 3: [inGap] }), REAL_CAL, WEEK_MONDAY);
-  var gapBreakIdx = -1;
-  builtGap.rows.forEach(function (r, i) { if (r.isBreak) gapBreakIdx = i; });
-  isTrue(gapBreakIdx !== -1, '校准作息下第 6 节是「午休」');
+  // 同样是点名叫第 6 节那行（这份作息有两个空档行，见上）
+  var gapBreakIdx = rowIndexOf(builtGap.rows, '6');
+  isTrue(gapBreakIdx !== -1 && builtGap.rows[gapBreakIdx].isBreak, '校准作息下第 6 节是「午休」');
   var gapSpan = T.rowSpanFromTimes(inGap, builtGap.rows, REAL_CAL);
   isTrue(!!gapSpan, '它算得出跨度（与午休行有 40 分钟交集）');
   eq(gapSpan ? gapSpan.from : -1, gapBreakIdx, '跨度就是午休那一行');
@@ -1466,6 +1475,87 @@ function run() {
     '有 periods 时按起始节次定位到行');
   eq(T.spanFor({ task: course('x', 'x', ''), rowIndexOfPeriod: { 3: 2 } }).landingRow, -1,
     '既没节次也没时间 → -1（交给「其他时段」）');
+
+  // ===========================================================================
+  // 空档行（真机反馈第三轮）—— 补录了缺的那一节之后，午休行不能消失
+  //   用户那份作息第 6 节是空的（文件里没有 13:30 那节课）→ 第 6 行一直是「午休」。
+  //   他补录成 13:30-14:10 之后节次号齐了，可 12:25 到 13:30 之间那 65 分钟仍然该
+  //   显示成「午休」—— 于是 periodRows() 改成按**时间空隙**插一行合成空档行。
+  //   这一组钉住四件事：缺号那条路不许回退 / 补录后多出正确的一行 /
+  //   合成行不进 rowIndexOfPeriod 与空闲分母 / 时间落点的任务（含截止）仍能被它接住。
+  // ===========================================================================
+  block('空档行（真机第三轮）—— 补录缺的节次后，午休行不能消失');
+
+  var FILLED_CAL = {
+    '1': ['08:30', '09:10'], '2': ['09:15', '09:55'], '3': ['10:15', '10:55'],
+    '4': ['11:00', '11:40'], '5': ['11:45', '12:25'], '6': ['13:30', '14:10'],
+    '7': ['14:15', '15:00'], '8': ['15:05', '15:40'], '9': ['16:00', '16:40'],
+    '10': ['16:45', '17:25'], '11': ['19:00', '19:40'], '12': ['19:45', '20:20'],
+    '13': ['20:30', '21:10']
+  };
+  var gMiss = T.buildGrid(perDayOf({}), REAL_CAL, WEEK_MONDAY);
+  var gFill = T.buildGrid(perDayOf({}), FILLED_CAL, WEEK_MONDAY);
+  var LUNCH_KEY = 'break-12:25-13:30';
+  var DINNER_KEY = 'break-17:25-19:00';
+
+  // ① 缺号时：一行都不许变
+  var missSix = rowIndexOf(gMiss.rows, '6');
+  eq(gMiss.rows[missSix] ? gMiss.rows[missSix].label : '?', '午休', '缺号时第 6 节那行仍是「午休」');
+  eq(gMiss.rows[missSix] ? gMiss.rows[missSix].timeText : '?', '12:25-14:15', '区间仍是 12:25-14:15（不许回退）');
+  eq(countableRows(gMiss.rows), DEFAULT_ROWS - 1, '计入空闲的行数 = 12（缺号午休行不算课）');
+  eq(gMiss.freeCounts[0], DEFAULT_ROWS - 1, '没有任务 → 空闲 12');
+
+  // ② 补录第 6 节之后：第 5 节与第 6 节之间多一行「午休 12:25-13:30」
+  var lunchIdx = rowIndexOf(gFill.rows, LUNCH_KEY);
+  isTrue(lunchIdx !== -1, '多出一行合成空档行 ' + LUNCH_KEY);
+  eq(gFill.rows[lunchIdx] ? gFill.rows[lunchIdx].label : '?', '午休', '它叫「午休」（起点 12:25 在 11:00~15:00）');
+  eq(gFill.rows[lunchIdx] ? gFill.rows[lunchIdx].timeText : '?', '12:25-13:30', '区间 12:25-13:30');
+  eq(gFill.rows[lunchIdx] ? gFill.rows[lunchIdx].isBreak : null, true, '走空档行的样式（灰底）');
+  eq(gFill.rows[lunchIdx] ? gFill.rows[lunchIdx].isSynthetic : null, true, '并标明是合成行（不是节次行）');
+  eq(gFill.rows[lunchIdx] ? gFill.rows[lunchIdx].number : -1, null, '它没有节次号');
+  eq(gFill.rows.length, gMiss.rows.length + 1, '总行数比缺号时**多 1**（就多这一行）');
+  var fillSix = rowIndexOf(gFill.rows, '6');
+  eq(gFill.rows[fillSix] ? gFill.rows[fillSix].timeText : '?', '13:30-14:10', '第 6 节显示补录的 13:30-14:10');
+  eq(fillSix, lunchIdx + 1, '午休行紧挨在第 6 节前面');
+  // 分母：补录后第 6 节是**真实课节**（13 行），合成行不进分母
+  eq(countableRows(gFill.rows), DEFAULT_ROWS, '计入空闲的行数 = 13（合成行不算课）');
+  eq(gFill.freeCounts[0], DEFAULT_ROWS, '没有任务 → 空闲 13');
+
+  // ③ 合成行不参与 rowIndexOfPeriod：写了 periods 的任务照旧按节次落
+  var sixTask = course('six', '第6节的事', '6');
+  var gSix = T.buildGrid(perDayOf({ 0: [sixTask] }), FILLED_CAL, WEEK_MONDAY);
+  eq(cardsAt(gSix, 0, '6').length, 1, 'periods:"6" 的任务落在第 6 节行');
+  eq(cardsAt(gSix, 0, LUNCH_KEY).length, 0, '**不会**落到合成午休行（合成行没有节次号）');
+  eq(gSix.freeCounts[0], DEFAULT_ROWS - 1, '占 1 节 → 空闲 12（13 − 1）');
+
+  // ④ 整段时间都落在合成午休里的任务，仍被它接住（与缺号午休行同一口径）
+  var lunchTask = timedTask('lunch2', '午休里的事', '12:30', '13:10');
+  var gLunch = T.buildGrid(perDayOf({ 0: [lunchTask] }), FILLED_CAL, WEEK_MONDAY);
+  eq(cardsAt(gLunch, 0, LUNCH_KEY).length, 1, '12:30-13:10 落在合成午休行');
+  eq(gLunch.freeCounts[0], DEFAULT_ROWS, '空档行不计入空闲 → 仍是 13');
+
+  // ⑤ 13:00 的截止也被它接住：合成行没有节次号，节次口径永远找不到它
+  var ddl1300 = { _id: 'ddl13', title: '提交材料', type: 'ddl', date: WEEK_MONDAY,
+    priority: 'high', repeat: 'none', done: false, periods: '', start_time: '', end_time: '13:00' };
+  var gDdl = T.buildGrid(perDayOf({ 0: [ddl1300] }), FILLED_CAL, WEEK_MONDAY);
+  eq(rowIndexOf(gDdl.rows, 'other'), -1, '它不落「其他时段」兜底行');
+  eq(cardsAt(gDdl, 0, LUNCH_KEY).length, 1, '落在合成午休行里');
+  eq(gDdl.freeCounts[0], DEFAULT_ROWS, '截止不占节次 → 空闲仍是 13');
+
+  // ⑥ 晚饭那种空隙也插一行，标签是「休息」
+  //   （取行时必须先判下标：这一行不存在的时候要让断言干净地红一条，
+  //    而不是在这里抛 TypeError —— 那会把本文件后面的断言全部跳过，变成"假绿"）
+  var dinnerIdx = rowIndexOf(gFill.rows, DINNER_KEY);
+  isTrue(dinnerIdx !== -1, '17:25→19:00 之间也插了一行');
+  eq(gFill.rows[dinnerIdx] ? gFill.rows[dinnerIdx].label : '?', '休息', '它叫「休息」（不在中午那段）');
+
+  // ⑦ 边界与默认作息
+  var b44 = T.buildGrid(perDayOf({}), { '5': ['11:45', '12:25'], '6': ['13:09', '13:50'] }, WEEK_MONDAY);
+  var b45 = T.buildGrid(perDayOf({}), { '5': ['11:45', '12:25'], '6': ['13:10', '13:50'] }, WEEK_MONDAY);
+  eq(b44.rows.length, DEFAULT_ROWS, '空隙 44 分钟 → 不插（13 行）');
+  isTrue(rowIndexOf(b45.rows, 'break-12:25-13:10') !== -1, '空隙恰好 45 分钟 → 插一行');
+  eq(T.buildGrid(perDayOf({}), null, WEEK_MONDAY).rows.length, DEFAULT_ROWS,
+    '默认作息不插合成行（它不是这所学校的作息；默认第 4~5 节之间空着 140 分钟也不插）');
 
   // 最后才跑异步那组，并把它的 Promise 交出去（run() 的调用方会等它）
   return testOnShow();
