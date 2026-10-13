@@ -188,37 +188,106 @@ const SYMBOL_MAX = 5;
 const UNKNOWN_FIELD_MAX = SHORT_THING_MAX;
 
 /**
- * `date` / `time` 类型的输出形状（只做**形状自检**，不限制取值）。
- *   * 带时刻：`2026年9月28日12:00`（官方示例 `2019年10月1日15:01` 的形状）
- *   * 纯日期：`2026年9月28日`
- * 两种写法都由本地自检认，但**哪一种微信真的收，只能由真机判定** —— 见下面的
- * DATE_STYLE_* 与 pickDateStyleOnError()。
+ * `date` / `time` 类型的**形状候选表**（有序，逐个试，记住赢家）。
+ *
+ * ===========================================================================
+ * 【为什么是"候选表"而不是一个固定格式 —— 三轮真机教出来的】
+ * ===========================================================================
+ * `date` 类到底要什么形状，官方文档**没有**可引用的类型表（只有示例），只能由真机判定。
+ * 已经发生的往返：
+ *   第 1 轮真机：发 `2026年10月13日00:09`（时刻补零）→ 47003，`invalid value of property: data.date4`
+ *   第 2 轮真机：发 `2026年10月13日0:21`（时刻不补零）→ 仍然 47003
+ * ⇒ **两种"时刻写法"都被拒了**；而 10 月 / 13 日都是两位数，所以"月日补不补零"这类候选
+ *   在当时的日期上**根本区分不出来**。
+ *
+ * 再靠"改一版 → 部署 → 点一次测试"逐个试，代价太高（每次一个真机往返）。
+ * 所以改成：**候选表 + 逐个试 + 第一个成功就记住** —— 一次真机测试走完所有候选，
+ * 把"该用哪种"这个结论一次性问出来。
+ *
+ * ===========================================================================
+ * 【诚实标注】除标注 `verified: 'rejected'` 的两项外，**其余形状都还没在真机上验证过**
+ * ===========================================================================
+ * 每项都写了依据（官方示例 / 常见格式 / 已被真机拒绝），但"有依据"≠"验证过"。
+ * 顺序是刻意的：**失败概率最低、依据最强的排前面** —— 正常情况下第一次就成功，
+ * 既少一次微信调用，也少一次给用户发消息的延迟。
  */
-const DATE_TEXT_RE = /^\d{4}年\d{1,2}月\d{1,2}日(\d{1,2}:\d{1,2})?$/;
-const DATE_ONLY_RE = /^\d{4}年\d{1,2}月\d{1,2}日$/;
+const DATE_STYLE_CANDIDATES = [
+  {
+    name: 'date',
+    label: '纯日期（中文年月日）',
+    reason: '最保守：只给日期、不带时刻。真机已连续拒绝两种"带时刻"写法，纯日期是唯一没试过的方向',
+    verified: 'untried',
+    format: (parts) => parts.ymdCn,
+  },
+  {
+    name: 'datetime_space',
+    label: '年月日 + 空格 + 时刻（不补零）',
+    reason: '官方示例是 `2019年10月1日15:01`，但真机拒绝了不带空格的写法；这一项与它只差一个空格，用来区分"是空格的问题还是时刻的问题"',
+    verified: 'untried',
+    format: (parts) => `${parts.ymdCn} ${parts.hmPlain}`,
+  },
+  {
+    name: 'datetime_pad',
+    label: '年月日 + 时刻（补零）',
+    reason: '补零的时刻写法（`00:21` 而非 `0:21`）。**真机已拒绝**（第 1 轮就是它）—— 留着是因为它与 `datetime_space` 只差一个空格，失败很快，且能让候选表自证"这两种都不行"',
+    verified: 'rejected',
+    format: (parts) => parts.ymdCnPadded,
+  },
+  {
+    name: 'iso',
+    label: 'ISO 日期 `2026-10-13`',
+    reason: '最常见的机器可读日期格式，很多模板后台按这个存；月日补零',
+    verified: 'untried',
+    format: (parts) => parts.iso,
+  },
+  {
+    name: 'slash',
+    label: '斜杠日期 `2026/10/13`',
+    reason: '中文语境里很常见的简写，月日补零',
+    verified: 'untried',
+    format: (parts) => parts.slash,
+  },
+  {
+    name: 'dot',
+    label: '点分日期 `2026.10.13`',
+    reason: '另一种常见简写，月日补零',
+    verified: 'untried',
+    format: (parts) => parts.dot,
+  },
+];
+
+/** 候选表的顺序（名字数组），供"从第几项开始试"用 */
+const DATE_STYLE_NAMES = DATE_STYLE_CANDIDATES.map((item) => item.name);
+
+/** settings 行里记住"这个用户的 date 类字段该用哪种形状"（值是候选名） */
+const SETTINGS_DATE_STYLE = 'remind_date_style';
+
+/** 默认形状 = 候选表第 1 项（纯日期） */
+const DATE_STYLE_DEFAULT = DATE_STYLE_NAMES[0];
+
+/** 兼容旧名（曾经只有"带时刻 / 纯日期"两档） */
+const DATE_STYLE_DATE = 'date';
+const DATE_STYLE_DATETIME = 'datetime_pad';
 
 /**
- * 日期字段的两种组装形状。
+ * 本地自检用的形状表：`候选名 → 该形状的合法正则`。
  *
- * ===========================================================================
- * 【为什么要有"样式"这个概念 —— 真机两轮才问出来】
- * ===========================================================================
- * 第一轮真机：`thing2` 被拒（超长）→ 修好权重口径。
- * 第二轮真机：`thing2` 过了，**`date4` 被拒**：
- *
- *     openapi.subscribeMessage.send fail: argument invalid data format,
- *     invalid value of property: data.date4
- *
- * 微信**没给期望形状**（只有 "invalid data format"）。也就是说：
- * `date` 类到底收不收"年月日 + 时刻"，**代码层面猜不出来，只有真机能判定**。
- * 所以这里不猜：**先用带时刻的（官方示例那个形状），被拒就降级成纯日期并记住**。
- * 这不是"我们猜对了格式"，而是"让平台自己告诉我们，并且只问一次"。
+ * 【为什么必须它】候选里的 ISO / 斜杠 / 点分**不是**中文年月日形状，
+ * 用一个通用正则会把它们判成"不合法" → 自检误报 → 反而不敢发。
+ * 所以自检要按**这个候选自己的形状**判，而不是拿一种格式去套所有候选。
  */
-const DATE_STYLE_DATETIME = 'datetime';
-const DATE_STYLE_DATE = 'date';
-const DATE_STYLES = [DATE_STYLE_DATETIME, DATE_STYLE_DATE];
-/** settings 行里记住"这个用户的 date 类字段该用哪种形状" */
-const SETTINGS_DATE_STYLE = 'remind_date_style';
+const DATE_STYLE_SHAPES = {
+  date: /^\d{4}年\d{1,2}月\d{1,2}日$/,
+  datetime_space: /^\d{4}年\d{1,2}月\d{1,2}日 \d{1,2}:\d{2}$/,
+  datetime_pad: /^\d{4}年\d{1,2}月\d{1,2}日\d{2}:\d{2}$/,
+  iso: /^\d{4}-\d{2}-\d{2}$/,
+  slash: /^\d{4}\/\d{2}\/\d{2}$/,
+  dot: /^\d{4}\.\d{2}\.\d{2}$/,
+};
+
+/** 兼容旧名：中文年月日形状（date / datetime 系列都算） */
+const DATE_TEXT_RE = /^\d{4}年\d{1,2}月\d{1,2}日(\d{1,2}:\d{2})?$/;
+const DATE_ONLY_RE = DATE_STYLE_SHAPES.date;
 
 /**
  * 每种字段类型的约束。
@@ -370,36 +439,89 @@ function formatDueText(ms) {
     + ` ${pad2(shifted.getUTCHours())}:${pad2(shifted.getUTCMinutes())}`;
 }
 
+/** 时间戳 → 一份"日期各部分"的取值表（全部按北京时间），供候选表的 format 用 */
+function datePartsOf(ms) {
+  const shifted = new Date(ms + BEIJING_OFFSET_MS);
+  const year = shifted.getUTCFullYear();
+  const month = shifted.getUTCMonth() + 1;
+  const day = shifted.getUTCDate();
+  const hour = shifted.getUTCHours();
+  const minute = shifted.getUTCMinutes();
+  const p = (n) => pad2(n);
+  return {
+    ymdCn: `${year}年${month}月${day}日`,
+    ymdCnPadded: `${year}年${month}月${day}日${p(hour)}:${p(minute)}`,
+    hmPlain: `${hour}:${p(minute)}`,
+    hmPadded: `${p(hour)}:${p(minute)}`,
+    iso: `${year}-${p(month)}-${p(day)}`,
+    slash: `${year}/${p(month)}/${p(day)}`,
+    dot: `${year}.${p(month)}.${p(day)}`,
+  };
+}
+
 /**
- * 时间戳 → **`date` / `time` 类模板字段要的形状**：`2026年9月28日12:00`（北京时间）。
+ * 时间戳 → **某个候选形状**的值（北京时间）。
  *
- * 【为什么不用 formatDueText 那种 `2026-09-28 12:00`】那是我们内部的形状，不是模板要求的：
- * 微信 `date` 类型的官方示例是 `2019年10月1日15:01` —— **年月日用中文、且不补零**。
- * 把内部格式直接塞进 date 字段是 47003 的常见来源。
- *
- * 【注意】这个"带时刻"的形状已被真机证实**会被 `date` 类拒掉**（见 DATE_STYLE_DATETIME
- * 的注释）。它现在只作为**首次尝试**用：微信不收就自动降级成 formatDateOnlyText。
+ * 候选表见文件上方 DATE_STYLE_CANDIDATES。名字不认识时**退回第 1 项**而不是抛错：
+ * 一个写错的 settings 值不该让提醒整体瘫痪（顶多是形状不最优）。
  */
+function formatDateByStyle(ms, style) {
+  return dateCandidateOf(style).format(datePartsOf(ms));
+}
+
+/** 按候选名取定义（不认识 → 第 1 项） */
+function dateCandidateOf(name) {
+  const key = toStr(name);
+  for (let i = 0; i < DATE_STYLE_CANDIDATES.length; i += 1) {
+    if (DATE_STYLE_CANDIDATES[i].name === key) return DATE_STYLE_CANDIDATES[i];
+  }
+  return DATE_STYLE_CANDIDATES[0];
+}
+
+/** 候选名 → 序号（不认识给 -1） */
+function dateStyleIndex(name) {
+  return DATE_STYLE_NAMES.indexOf(toStr(name));
+}
+
+/** 某个候选名是否在候选表里 */
+function isKnownDateStyle(name) {
+  return dateStyleIndex(name) !== -1;
+}
+
+/** 该候选形状的本地自检正则（未知候选给 null，由调用方按"无法判定"处理） */
+function dateShapeReOf(style) {
+  return DATE_STYLE_SHAPES[toStr(style)] || null;
+}
+
+/** 候选表里下一个候选名（已是最后一项则给空串 = 试完了） */
+function nextDateStyle(name) {
+  const index = dateStyleIndex(name);
+  const start = index === -1 ? 0 : index + 1;
+  return start < DATE_STYLE_NAMES.length ? DATE_STYLE_NAMES[start] : '';
+}
+
+/**
+ * 挑本次要用的形状：**用户 settings 里记住的**优先，其次是调用方建议，最后是候选表第 1 项。
+ */
+function pickDateStyle(storedStyle, fallback) {
+  if (isKnownDateStyle(storedStyle)) return toStr(storedStyle);
+  if (isKnownDateStyle(fallback)) return toStr(fallback);
+  return DATE_STYLE_DEFAULT;
+}
+
+/** 兼容旧名：带时刻的那一项（真机已拒绝，仅用于回归断言） */
 function formatDateFieldText(ms) {
-  const shifted = new Date(ms + BEIJING_OFFSET_MS);
-  return `${shifted.getUTCFullYear()}年${shifted.getUTCMonth() + 1}月${shifted.getUTCDate()}日`
-    + `${shifted.getUTCHours()}:${pad2(shifted.getUTCMinutes())}`;
+  return formatDateByStyle(ms, DATE_STYLE_DATETIME);
 }
 
-/** 时间戳 → **纯日期**形状：`2026年9月28日`（真机证实 date 类接受的就是这个；无歧义） */
+/** 兼容旧名：纯日期那一项 */
 function formatDateOnlyText(ms) {
-  const shifted = new Date(ms + BEIJING_OFFSET_MS);
-  return `${shifted.getUTCFullYear()}年${shifted.getUTCMonth() + 1}月${shifted.getUTCDate()}日`;
+  return formatDateByStyle(ms, DATE_STYLE_DATE);
 }
 
-/** 按"样式"给日期字段取值 */
+/** 按"样式"给日期字段取值（buildMessageData 用） */
 function dueTextByStyle(ms, style) {
-  return style === DATE_STYLE_DATE ? formatDateOnlyText(ms) : formatDateFieldText(ms);
-}
-
-/** 只有"带时刻"的那种样式才可能触发降级重试（纯日期无从再降） */
-function canDowngradeStyle(style) {
-  return style === DATE_STYLE_DATETIME;
+  return formatDateByStyle(ms, style);
 }
 
 /** 任务类型 → 中文类别标签（与 utils/periods.js 的 TYPE_LABELS 一致） */
@@ -564,19 +686,32 @@ function truncateToUnits(text, max) {
 }
 
 /**
- * 字段的**本地合规自检**：权重不超上限，且 date/time 类形状正确。
+ * 字段的**本地合规自检**：权重不超上限，且 date/time 类形状与**所用候选**一致。
  * 放在这里是为了让"我以为合规"和"真的合规"用同一段代码判断。
  *
+ * @param {string} key 字段名
+ * @param {string} value 最终值
+ * @param {number} max 权重上限
+ * @param {string} type 字段类型
+ * @param {string} [dateStyle] date/time 类当前用的候选名（决定按哪个正则判形状）
  * @returns {{ok:boolean, reason:string}}
  */
-function checkFieldCompliance(key, value, max, type) {
+function checkFieldCompliance(key, value, max, type, dateStyle) {
   const units = fieldUnits(value);
   // date / time 的 max 是 Infinity（格式由 formatter 保证），只查形状
   if (Number.isFinite(max) && units > max) {
     return { ok: false, reason: `${key} 权重 ${units} 超过上限 ${max}` };
   }
-  if ((type === 'date' || type === 'time') && !DATE_TEXT_RE.test(toStr(value))) {
-    return { ok: false, reason: `${key}（${type} 类）值 "${toStr(value)}" 不符合年月日形状` };
+  if (type === 'date' || type === 'time') {
+    const text = toStr(value);
+    // 按**这个候选自己的形状**判，而不是拿一种格式去套所有候选
+    const shapeRe = dateShapeReOf(dateStyle);
+    if (shapeRe && !shapeRe.test(text)) {
+      return { ok: false, reason: `${key}（${type} 类/${toStr(dateStyle)}）值 "${text}" 不符合候选形状` };
+    }
+    if (!shapeRe && !DATE_TEXT_RE.test(text)) {
+      return { ok: false, reason: `${key}（${type} 类）值 "${text}" 不符合任何已知形状` };
+    }
   }
   return { ok: true, reason: '' };
 }
@@ -920,7 +1055,7 @@ function humanizeLeftCompact(minutesLeft) {
 function buildMessageData(task, dueAt, fieldMap, options) {
   const opts = options || {};
   const now = isFiniteNumber(opts.now) ? opts.now : Date.now();
-  const dateStyle = pickDateStyle(opts.dateStyle, DATE_STYLE_DATETIME);
+  const dateStyle = pickDateStyle(opts.dateStyle, DATE_STYLE_DEFAULT);
   const resolved = fieldMap === undefined || fieldMap === null
     ? { fieldMap: Object.assign({}, DEFAULT_FIELD_MAP), warnings: [] }
     : resolveFieldMap(fieldMap);
@@ -985,16 +1120,18 @@ function buildMessageData(task, dueAt, fieldMap, options) {
       slot, key: field, type, value, max: rule.max, units: fitted.units, dateStyle,
     });
     // ④ **本地合规自检**：跟"我以为合规"用同一段代码判断，别等微信回 47003 才发现
-    const check = checkFieldCompliance(field, value, rule.max, type);
+    const check = checkFieldCompliance(field, value, rule.max, type, dateStyle);
     if (!check.ok) {
       // 走到这里说明我们自己的截断/整形有 bug（理论上不该发生）—— 必须大声报出来
       warnings.push(`字段 "${field}" 本地自检未通过（${check.reason}），微信很可能回 47003`);
     } else if (type === 'date' || type === 'time') {
-      // 【诚实】形状能本地验，但"微信到底收不收这一种"只有真机能判定 —— 所以这里
-      // 只声明"我们本地验过了 + 现在用的是哪种"，不声明"一定没问题"。
-      warnings.push(`字段 "${field}"（${type} 类）本地形状校验通过，当前用`
-        + `${dateStyle === DATE_STYLE_DATE ? '纯日期' : '年月日+时刻'}写法`
-        + '（date 类收哪种形状只能由真机判定；带时刻被拒时会自动降级为纯日期并记住）');
+      // 【诚实】形状能本地验，但"微信到底收哪种"只有真机能判定 —— 所以这里只声明
+      // "本地按候选 X 验过了"，不声明"一定没问题"。候选表见 DATE_STYLE_CANDIDATES。
+      const candidate = dateCandidateOf(dateStyle);
+      warnings.push(`字段 "${field}"（${type} 类）本地形状校验通过，当前用候选`
+        + `"${dateStyle}"（${candidate.label}）；date 类收哪种形状只能由真机判定，`
+        + `本项${candidate.verified === 'rejected' ? '已被真机拒绝' : '尚未在真机验证'}`
+        + '，被拒时会自动换下一个候选并记住赢家');
     }
   });
 
@@ -1025,7 +1162,7 @@ function extractOffendingField(errMsg) {
 
 /**
  * 字段映射里第一个 **date 类**字段名（没有则空串）。
- * 降级重试只针对它 —— 其它类型的字段被点名时是真问题，不该靠重试掩盖。
+ * 换候选只针对它 —— 其它类型的字段被点名时是真问题，不该靠重试掩盖。
  */
 function firstDateFieldOf(fieldMap) {
   const map = fieldMap && typeof fieldMap === 'object' ? fieldMap : {};
@@ -1037,43 +1174,54 @@ function firstDateFieldOf(fieldMap) {
 }
 
 /**
- * **该不该把日期字段降级成纯日期并重试一次？**
+ * **该不该换下一个候选形状再试？**
  *
- * 只有三个条件同时成立才降级：
- *   1. 微信**点名**了一个 `date` 类字段（点名 `thing2` 之类一律不重试 —— 那是真问题，
- *      重试只会把它掩盖成"两次都失败"，反而更难查）；
- *   2. 我们这次发的确实是**带时刻**的形状（纯日期无从再降，重试必然还是失败）；
- *   3. 映射里确实有这个 date 字段（拿不到字段名就没法重建 data）。
+ * 三个条件同时成立才换：
+ *   1. 微信**点名**了一个 `date` 类字段（点名 `thing2` 之类一律不换 —— 那是真问题，
+ *      换形状只会把它掩盖成"候选全试完都失败"，反而更难查）；
+ *   2. 候选表里**还有下一个**（试完就停，不做无意义的重复往返，也不会死循环）；
+ *   3. 映射里确实有这个 date 字段。
  *
- * 【why 不是"直接改成纯日期就完了"】微信这次只说 `invalid data format`，
- * **没给期望形状**。如果哪天它对某个模板又收带时刻的写法，我们一上来就发纯日期
- * 等于把时间信息白白丢掉。所以策略是"先用信息量更大的、被拒就降级并记住"。
+ * 【why 不是"直接改成某一个格式就完了"】微信只说 `invalid data format`，
+ * **没给期望形状**。真机往返又很贵，所以策略是：**一次测试里把候选按序试完**，
+ * 第一个成功的就是答案，并记下来给后续扫描直接用。
  *
- * @returns {{downgrade:boolean, field:string, style:string}}
+ * @returns {{advance:boolean, field:string, next:string, reason:string}}
  */
-function decideDateDowngrade(input) {
+function decideNextDateStyle(input) {
   const opts = input || {};
-  const style = toStr(opts.style) || DATE_STYLE_DATETIME;
-  const decision = { downgrade: false, field: '', style: DATE_STYLE_DATE };
-  if (!opts.ok && Number(opts.errCode) === ERROR_FIELD_INVALID) {
-    const offending = extractOffendingField(opts.errMsg);
-    const dateField = firstDateFieldOf(opts.fieldMap);
-    if (offending && dateField && offending === dateField && canDowngradeStyle(style)) {
-      decision.downgrade = true;
-      decision.field = dateField;
-    }
+  const style = pickDateStyle(toStr(opts.style), DATE_STYLE_DEFAULT);
+  const decision = { advance: false, field: '', next: '', reason: '' };
+  if (opts.ok || Number(opts.errCode) !== ERROR_FIELD_INVALID) {
+    decision.reason = '不是 47003 参数错误 → 不换形状';
+    return decision;
   }
+  const offending = extractOffendingField(opts.errMsg);
+  if (!offending) {
+    decision.reason = '微信没点名具体字段 → 不换形状（无从判断）';
+    return decision;
+  }
+  const map = opts.fieldMap && typeof opts.fieldMap === 'object' ? opts.fieldMap : {};
+  // 【关键】点名的是不是 date 类字段？看**被点名那个字段自己的类型**，
+  // 而不是"映射里第一个 date 字段" —— 否则一张表里有多个 date 字段时会认错。
+  if (fieldTypeOf(offending) !== 'date') {
+    decision.reason = `被点名的是 ${offending}（${fieldTypeOf(offending)} 类，不是 date）→ 不换形状`;
+    return decision;
+  }
+  if (!Object.prototype.hasOwnProperty.call(map, offending)) {
+    decision.reason = `被点名的 ${offending} 不在当前字段映射里 → 不换形状`;
+    return decision;
+  }
+  const next = nextDateStyle(style);
+  if (!next) {
+    decision.reason = `候选表已试完（最后一个候选是 ${style}）→ 不再换`;
+    return decision;
+  }
+  decision.advance = true;
+  decision.field = offending;
+  decision.next = next;
+  decision.reason = `${offending} 被拒 → 换下一个候选 ${next}`;
   return decision;
-}
-
-/**
- * 按当前需求挑日期样式：**用户在 settings 里记住的**优先，其次是调用方给的建议，
- * 最后才是默认（先试带时刻）。
- */
-function pickDateStyle(storedStyle, fallback) {
-  if (DATE_STYLES.indexOf(storedStyle) !== -1) return storedStyle;
-  if (DATE_STYLES.indexOf(fallback) !== -1) return fallback;
-  return DATE_STYLE_DATETIME;
 }
 
 /**
@@ -1573,15 +1721,16 @@ async function planScan(input) {
             downgraded += 1;
             console.log(`[remind] 用户 ${maskOpenid(openid)} 的 ${taskIdOf(item.task)} 经降级重试发送成功`);
           }
-          // 成功的条也可能退过额度（第一次带时刻被拒 → 退了 → 第二次成功才扣）
-          if (outcome.quota_refunded) quotaRefunded += 1;
+          // 成功的条也可能退过额度（候选试错时前面几次失败 → 各自退回，最后一次才扣）
+          // 【注意是**次数**】用 1/0 的话"试了 3 个候选、退了 2 次"会被记成 1，对账对不上。
+          if (outcome.quota_refunded_count) quotaRefunded += outcome.quota_refunded_count;
         } else if (outcome.status === 'skipped') {
           countSkip(outcome.reason);
         } else {
           failed += 1;
           if (outcome.error) errors.push(outcome.error);
           // 配置/参数类失败会把额度退回去 —— 汇总出来，便于确认"模板配错不烧额度"
-          if (outcome.quota_refunded) quotaRefunded += 1;
+          if (outcome.quota_refunded_count) quotaRefunded += outcome.quota_refunded_count;
         }
         // 成功/失败都留明细：这张表就是"为什么这条没收到提醒"的答案
         if (outcome.detail) details.push(outcome.detail);
@@ -1627,8 +1776,8 @@ async function planForUser(input) {
   // ③ 额度：settings 行里的 remind_quota（用户授权一次 = 1 条，发送成功后 -1）
   const quota = Math.max(0, Math.floor(Number(row && row.remind_quota) || 0));
 
-  // ③b 这个用户记住的 date 形状（被真机拒过一次后写下来的；没有就用 undefined 走默认）
-  const dateStyleStored = DATE_STYLES.indexOf(toStr(row && row[SETTINGS_DATE_STYLE])) !== -1
+  // ③b 这个用户记住的 date 形状（试出来的赢家；没有就空串 → 从候选表第 1 项开始）
+  const dateStyleStored = isKnownDateStyle(row && row[SETTINGS_DATE_STYLE])
     ? toStr(row[SETTINGS_DATE_STYLE]) : '';
 
   // ④ 计划（纯函数）
@@ -1680,27 +1829,28 @@ async function sendAttempt(db, info, now) {
 }
 
 /**
- * 把一次尝试的字段与值压成"第 N 次（样式）：…"这样一段人话，便于把两次都带出来。
+ * 把一次尝试压成"第 N 次（候选名/标签）：字段与值［err_code=…］"这样一段人话。
+ * 候选名一定要打出来 —— 全失败时要靠它看出"到底试过哪几种形状"。
  */
 function describeAttempt(attempt) {
-  const styleTag = attempt.style === DATE_STYLE_DATE ? '纯日期' : '带时刻';
-  return `第 ${attempt.index} 次（${styleTag}）：${attempt.fieldTrace || '(无字段留痕)'}`
+  const candidate = dateCandidateOf(attempt.style);
+  return `第 ${attempt.index} 次（${attempt.style} / ${candidate.label}）：${attempt.fieldTrace || '(无字段留痕)'}`
     + `${attempt.errCode === null || attempt.errCode === undefined ? '' : `［err_code=${attempt.errCode}］`}`;
 }
 
 /**
- * 下发一条并落记录（最多两次尝试：date 形状被拒 → 降级成纯日期重试一次）。
+ * 下发一条并落记录（**按候选表逐个试 date 形状，第一个成功就停并记住赢家**）。
  *
- * 【为什么会有"两次尝试"这件事 —— 真机两轮才问出来】
- *   第一轮真机：`thing2` 超长被拒（权重口径已修）。
- *   第二轮真机：`thing2` 过了，`date4` 被拒：
- *       `invalid value of property: data.date4`（微信**没给期望形状**）。
- * 也就是说 date 类收哪种形状，代码层面猜不出来。所以这里的策略是
- * **先用官方示例那种"年月日+时刻"，被点名拒绝就降级成纯日期并记住结果**
- * （`remind_date_style` 写进用户 settings），下次直接按纯日期组装，不再浪费一次失败尝试。
+ * 【为什么是"逐个试候选"而不是"降级一次" —— 真机三轮教出来的】
+ *   第 1 轮真机：`thing2` 超长被拒（权重口径已修）。
+ *   第 2 轮真机：`2026年10月13日00:09`（时刻补零）→ `invalid value of property: data.date4`。
+ *   第 3 轮真机：`2026年10月13日0:21`（时刻不补零）→ 仍然被拒。
+ * 微信**没给期望形状**，而每次往返都要"改一版 → 部署 → 点一次测试"。
+ * 所以改成一次走完候选表（见 DATE_STYLE_CANDIDATES）：第一个成功的就是答案，
+ * 写进 `remind_date_style`，后续扫描直接用它。
  *
- * 【为什么只在"点名 date 字段"时重试】错误点名 `thing2` 之类就说明是真问题，
- * 重试只会把它伪装成"两次都失败"，反而更难查。所以 `decideDateDowngrade` 卡得很死。
+ * 【为什么点名 `thing2` 时一个候选都不换】那是真问题，换形状只会把它掩盖成
+ * "候选全试完都失败"，反而更难查。`decideNextDateStyle` 卡得很死。
  *
  * @returns {Promise<{status:'sent'|'failed'|'skipped', reason?:string, error?:string, detail?:object}>}
  */
@@ -1708,14 +1858,15 @@ async function deliverOne(db, info, now) {
   const { openid, templateId, page, task, dueKey, dueAt, fieldMap, dateStyle, dateStyleStored } = info;
   const taskId = taskIdOf(task);
   const attempts = [];
-  // 本次扫描该用哪种形状：用户 settings 里记住的优先
+  // 本次该从哪个候选开始：用户 settings 里记住的赢家优先
   let style = pickDateStyle(dateStyleStored, dateStyle);
   let built = buildMessageData(task, dueAt, fieldMap, { now, dateStyle: style });
   let last = null;
   let outcome = null;
 
-  // 最多两轮：正常一轮；只有"被点名 date 字段"才会进第二轮
-  for (let round = 0; round < 2; round += 1) {
+  // 【上限 = 候选表长度】最多把候选表走完一遍（6 项），绝不可能无限循环
+  const maxRounds = DATE_STYLE_CANDIDATES.length;
+  for (let round = 0; round < maxRounds; round += 1) {
     // eslint-disable-next-line no-await-in-loop
     outcome = await sendAttempt(db, {
       openid, templateId, page, data: built.data, fields: built.fields, task, dueKey, dueAt, fieldMap,
@@ -1733,13 +1884,13 @@ async function deliverOne(db, info, now) {
     });
 
     if (outcome.status === 'sent') {
-      // 第一次尝试就成功 → 什么都不用记
+      // 第一次尝试就成功 → 不用记（默认候选本来就会再用）；换过才要记
       if (round > 0) {
-        // 【记住结果】第二次才好使的形状写进 settings，后续不再浪费一次失败尝试
+        // 【记住赢家】写进 settings，后续直接用它，不再重复试前面的候选
         try {
           await writeSettingsFields(db, openid, { [SETTINGS_DATE_STYLE]: style }, now);
-          console.log(`[remind] 按真机反馈自动降级为纯日期（${SETTINGS_DATE_STYLE}=${style}），`
-            + '已记入该用户设置，后续直接按纯日期组装');
+          console.log(`[remind] 试出 date 形状赢家：${SETTINGS_DATE_STYLE}=${style}`
+            + `（第 ${round + 1} 个候选；${dateCandidateOf(style).label}），已记入该用户设置`);
         } catch (error) {
           console.error('[remind] 记录日期形状失败（不影响本次提醒）：',
             scrubSecrets((error && error.message) || error));
@@ -1755,18 +1906,19 @@ async function deliverOne(db, info, now) {
         ok: true,
         error: '',
         date_style: style,
-        attempts: attempts.length, // 1 = 一次成功；2 = 降级后成功（便于复盘）
-        // 降级链路上第一次失败的额度已经退回了 —— 记在案上，否则"额度为什么只少 1"会看不懂
-        quota_refunded: attempts.some((item) => item.refunded),
+        attempts: attempts.length, // 1 = 一次成功；>1 = 试了几个候选才成功（便于复盘）
+        // 试错链路上失败那几次的额度都退回了 —— 这里是**次数**不是布尔：
+        // 用布尔的话"候选试了 3 个、退了 2 次"会被记成 1，对账就对不上。
+        quota_refunded_count: attempts.filter((item) => item.refunded).length,
       });
       return {
         status: 'sent',
-        // 即便最终成功，"这中间退过一次额度"也要如实汇总出去（否则对账对不上）
-        quota_refunded: attempts.some((item) => item.refunded),
+        // 即便最终成功，"中间退过几次额度"也要如实汇总出去（否则对账对不上）
+        quota_refunded_count: attempts.filter((item) => item.refunded).length,
         detail: {
           openid,
           task_id: taskId,
-          action: round > 0 ? 'sent_after_downgrade' : 'sent',
+          action: round > 0 ? 'sent_after_style_probe' : 'sent',
           due_key: dueKey,
           date_style: style,
           attempts: attempts.length,
@@ -1779,29 +1931,30 @@ async function deliverOne(db, info, now) {
     }
     last = outcome;
 
-    // 该不该降级重试？（点名 date 字段 + 我们发的是带时刻 + 映射里确实有这个字段）
-    const decision = decideDateDowngrade({
+    // 该不该换下一个候选？（点名 date 字段 + 候选表还有下一项 + 该字段在映射里）
+    const decision = decideNextDateStyle({
       ok: false,
       errCode: outcome.classified ? outcome.classified.code : null,
       errMsg: outcome.result ? outcome.result.errMsg : '',
       fieldMap,
       style,
     });
-    if (!decision.downgrade) break;
-    if (round === 1) break; // 已经降过一次，不再循环
-    console.log(`[remind] ${decision.field} 被拒（err_code=${ERROR_FIELD_INVALID}），`
-      + '按真机反馈降级为纯日期并重试一次');
-    style = DATE_STYLE_DATE;
+    if (!decision.advance) break;
+    console.log(`[remind] ${decision.reason}（第 ${round + 1} 次尝试失败）`);
+    style = decision.next;
     built = buildMessageData(task, dueAt, fieldMap, { now, dateStyle: style });
   }
 
-  // --- 最终失败：把**两次**尝试的字段与值都带出来（不能只留最后一次）---
-  // 【为什么要两次都留】只留最后一次的话，第一次被拒的"带时刻"值就消失了，
-  // 于是"到底是哪种形状不行"这个关键结论就查不到了 —— 而它正是这次降级机制的依据。
-  const classified = (last && last.classified) ? last.classified : classifySendError(null);  const fieldTrace = describeMessageFields(built.fields);
+  // --- 最终失败：把**每一次**尝试的字段与值都带出来（不能只留最后一次）---
+  // 【为什么每次都要留】只留最后一次的话，前面被拒的形状就消失了，
+  // 于是"到底试过哪几种、哪种不行"这个关键结论就查不到了 —— 而这正是候选表存在的意义。
+  const classified = (last && last.classified) ? last.classified : classifySendError(null);
+  const fieldTrace = describeMessageFields(built.fields);
   const attemptText = attempts.map(describeAttempt).join(' ； ');
-  const failureText = `${classified.hint} 本次发出的字段与值：${fieldTrace}`
-    + (attempts.length > 1 ? ` ；两次尝试都失败 —— ${attemptText}` : '');
+  const attemptSummary = attempts.length > 1
+    ? `；${attempts.length} 个候选都失败 —— ${attemptText}`
+    : '';
+  const failureText = `${classified.hint} 本次发出的字段与值：${fieldTrace}${attemptSummary}`;
   const failureRecord = {
     _openid: openid,
     task_id: taskId,
@@ -1812,8 +1965,9 @@ async function deliverOne(db, info, now) {
     ok: false,
     error: failureText,
     err_code: classified.code,
-    // 最后一次尝试的额度有没有还回去（重试链路上每次失败都会各自退一次）
-    quota_refunded: !!(last && last.refunded),
+    // 试错链路上**每一次**失败失败都会各自退一次额度 —— 记次数（不是布尔）
+    // 【为什么】候选表最多试 6 次，布尔会把"退了 6 次"记成"退过"，对账就对不上。
+    quota_refunded_count: attempts.filter((item) => item.refunded).length,
     date_style: style,
     // 逐次尝试的结构化留痕：样式 + 字段与值 + 错误码 + 该次有没有退额度
     attempts: attempts.map((item) => ({
@@ -1861,18 +2015,18 @@ async function deliverOne(db, info, now) {
   return {
     status: 'failed',
     error: `${describeTask(task)}：${classified.hint}`
-      + (attempts.length > 1 ? `；两次尝试的字段与值 —— ${attemptText}`
+      + (attempts.length > 1 ? `；${attempts.length} 个候选都失败，逐次字段与值 —— ${attemptText}`
         : (fieldTrace ? `；本次发出的字段与值：${fieldTrace}` : ''))
       + (last && last.refunded ? '；已把这次占用的额度退回' : ''),
-    // quota_refunded 让调用方（scan）能汇总"这轮退了几次"，便于确认"模板配错不会烧额度"
-    quota_refunded: !!(last && last.refunded),
+    // quota_refunded_count 让调用方（scan）能汇总"这轮一共退了几次"，便于确认"模板配错不烧额度"
+    quota_refunded_count: attempts.filter((item) => item.refunded).length,
     detail: {
       openid,
       task_id: taskId,
       action: classified.disableUser ? 'user_disabled' : 'failed',
       err_code: classified.code,
       due_key: dueKey,
-      quota_refunded: !!(last && last.refunded),
+      quota_refunded_count: attempts.filter((item) => item.refunded).length,
       attempts: attempts.length,
     },
   };
@@ -2005,8 +2159,8 @@ async function actionStatus(db, openid, deps) {
   // 【必须用"这个用户记住的日期形状"】否则降级之后 status 还会显示带时刻的预览，
   // 而实际发的是纯日期 —— 预览与实际不一致比没有预览更糟。
   const statusStyle = pickDateStyle(
-    DATE_STYLES.indexOf(toStr(row && row[SETTINGS_DATE_STYLE])) !== -1 ? toStr(row[SETTINGS_DATE_STYLE]) : '',
-    DATE_STYLE_DATETIME
+    isKnownDateStyle(row && row[SETTINGS_DATE_STYLE]) ? toStr(row[SETTINGS_DATE_STYLE]) : '',
+    DATE_STYLE_DEFAULT
   );
   const sampleTask = { title: '提交实验报告', type: 'ddl', date: '2026-09-28', end_time: '12:00' };
   const sampleBuilt = buildMessageData(sampleTask, bjMsOfDateText('2026-09-28', '12:00'),
@@ -2023,9 +2177,14 @@ async function actionStatus(db, openid, deps) {
     ready_reason: readyReason,
     has_authorized: quota > 0 || enabled,
     field_map: fieldMapResolved.fieldMap,
-    // 当前**实际会发出去的形状**（含日期用哪种写法）—— 降级后这里跟着变
+    // 当前**实际会发出去的形状**（含日期用哪个候选）—— 试出赢家后这里跟着变
     date_style: statusStyle,
-    date_style_learned: DATE_STYLES.indexOf(toStr(row && row[SETTINGS_DATE_STYLE])) !== -1,
+    date_style_label: dateCandidateOf(statusStyle).label,
+    date_style_learned: isKnownDateStyle(row && row[SETTINGS_DATE_STYLE]),
+    // 候选表原样透出：前端/排查时能一眼看出"还会试哪几种"
+    date_style_candidates: DATE_STYLE_CANDIDATES.map((item) => ({
+      name: item.name, label: item.label, reason: item.reason, verified: item.verified,
+    })),
     // 这个模板/映射组合下"实际会发出去什么"（调试用；值来自样例任务，不含用户数据）
     field_preview: sampleBuilt.fields,
     field_preview_text: describeMessageFields(sampleBuilt.fields),
@@ -2186,18 +2345,21 @@ async function actionTest(db, openid, payload, deps) {
     return fail('当前可下发次数为 0，测试消息会消耗 1 条额度，已在调用微信之前中止（请先授权）');
   }
 
-  const storedStyle = DATE_STYLES.indexOf(toStr(storedRow && storedRow[SETTINGS_DATE_STYLE])) !== -1
+  const storedStyle = isKnownDateStyle(storedRow && storedRow[SETTINGS_DATE_STYLE])
     ? toStr(storedRow[SETTINGS_DATE_STYLE]) : '';
-  let style = pickDateStyle(storedStyle, DATE_STYLE_DATETIME);
+  let style = pickDateStyle(storedStyle, DATE_STYLE_DEFAULT);
   let built = buildMessageData(task, dueAt, fieldMapResolved.fieldMap, { now, dateStyle: style });
-  // 真机排查时先看日志：字段与值在这一行里（含用的是哪种日期形状）
-  console.log(`[remind] test：即将下发（日期形状=${style}），字段与值：${describeMessageFields(built.fields)}`);
+  // 真机排查时先看日志：字段与值在这一行里（含用的是哪个候选形状）
+  console.log(`[remind] test：即将下发（候选=${style}），字段与值：${describeMessageFields(built.fields)}`);
 
-  // ===== 发送（带一次"date 形状降级"重试，与 scan 路径同一套判定）=====
+  // ===== 发送：**按候选表逐个试**，第一个成功就停（与 scan 路径同一套判定）=====
+  // 【为什么 test 要试完整个候选表】一次真机往返很贵。把候选全试一遍，
+  // 一次"点测试"就能把"该用哪种形状"问出来并记住，不用再改一版部署一次。
   const attempts = [];
   let result = null;
   let classified = null;
-  for (let round = 0; round < 2; round += 1) {
+  const maxRounds = DATE_STYLE_CANDIDATES.length;
+  for (let round = 0; round < maxRounds; round += 1) {
     // eslint-disable-next-line no-await-in-loop
     result = await exports.sendSubscribeMessage(openid, templateId, page, built.data);
     classified = classifySendError(result.ok ? null : { errCode: result.errCode, errMsg: result.errMsg });
@@ -2210,14 +2372,16 @@ async function actionTest(db, openid, payload, deps) {
       ok: !!result.ok,
     });
     if (result.ok) break;
-    const decision = decideDateDowngrade({
+    const decision = decideNextDateStyle({
       ok: false, errCode: classified.code, errMsg: result.errMsg,
       fieldMap: fieldMapResolved.fieldMap, style,
     });
-    if (!decision.downgrade || round === 1) break;
-    console.log(`[remind] test：${decision.field} 被拒（err_code=${ERROR_FIELD_INVALID}），`
-      + '按真机反馈降级为纯日期并重试一次');
-    style = DATE_STYLE_DATE;
+    if (!decision.advance) {
+      console.log(`[remind] test：不换候选（${decision.reason}）`);
+      break;
+    }
+    console.log(`[remind] test：${decision.reason}（第 ${round + 1} 次尝试失败）`);
+    style = decision.next;
     built = buildMessageData(task, dueAt, fieldMapResolved.fieldMap, { now, dateStyle: style });
   }
   const fieldTrace = describeMessageFields(built.fields);
@@ -2238,7 +2402,7 @@ async function actionTest(db, openid, payload, deps) {
       type: 'test',
       ok: false,
       error: `${classified.hint} 本次发出的字段与值：${fieldTrace}`
-        + (attempts.length > 1 ? ` ；两次尝试都失败 —— ${attemptText}` : ''),
+        + (attempts.length > 1 ? ` ；${attempts.length} 个候选都失败 —— ${attemptText}` : ''),
       err_code: classified.code,
       date_style: style,
       attempts: attempts.map((item) => ({
@@ -2253,19 +2417,23 @@ async function actionTest(db, openid, payload, deps) {
         key: item.key, type: item.type, slot: item.slot, value: toStr(item.value).slice(0, FIELD_VALUE_LOG_MAX),
       })),
     });
-    console.warn(`[remind] test 下发失败（err_code=${classified.code}，尝试 ${attempts.length} 次），`
+    console.warn(`[remind] test 下发失败（err_code=${classified.code}，试了 ${attempts.length} 个候选），`
       + `字段与值：${attemptText || fieldTrace}`);
+    // 【为什么把每个候选都带回去】只留最后一个会把"试过哪几种形状"这个结论丢掉 ——
+    // 而这次真机往返的全部价值就在那份结论里。
     return fail(`测试下发失败：${classified.hint}；`
-      + (attempts.length > 1 ? `两次尝试的字段与值 —— ${attemptText}` : `本次发出的字段与值：${fieldTrace}`));
+      + (attempts.length > 1
+        ? `${attempts.length} 个候选都失败，逐次字段与值 —— ${attemptText}`
+        : `本次发出的字段与值：${fieldTrace}`));
   }
 
-  // 降级后成功 → 把学到的结果写进该用户设置，后续不再浪费一次失败尝试
-  const downgraded = attempts.length > 1 && style === DATE_STYLE_DATE;
-  if (downgraded) {
+  // 换过候选才成功 → 把赢家写进该用户设置，后续不再重复试前面的候选
+  const probed = attempts.length > 1;
+  if (probed) {
     try {
-      await writeSettingsFields(db, openid, { [SETTINGS_DATE_STYLE]: DATE_STYLE_DATE }, now);
-      console.log('[remind] test：按真机反馈自动降级为纯日期，已记入该用户设置'
-        + `（${SETTINGS_DATE_STYLE}=${DATE_STYLE_DATE}），后续直接按纯日期组装`);
+      await writeSettingsFields(db, openid, { [SETTINGS_DATE_STYLE]: style }, now);
+      console.log(`[remind] test：试出 date 形状赢家 ${SETTINGS_DATE_STYLE}=${style}`
+        + `（第 ${attempts.length} 个候选；${dateCandidateOf(style).label}），已记入该用户设置`);
     } catch (error) {
       console.error('[remind] 记录日期形状失败（不影响本次测试）：',
         scrubSecrets((error && error.message) || error));
@@ -2283,9 +2451,13 @@ async function actionTest(db, openid, payload, deps) {
     template_id: templateId,
     page,
     field_map: fieldMapResolved.fieldMap,
-    // 这次实际用的日期形状 + 是否降级过（前端/控制台据此判断"学的哪一套"）
+    // 这次实际用的候选 + 是否试过多个（前端/控制台据此判断"学到的哪一套"）
     date_style: style,
-    downgraded,
+    date_style_used: style,
+    date_style_label: dateCandidateOf(style).label,
+    date_style_learned: probed || isKnownDateStyle(storedStyle),
+    downgraded: probed, // 兼容旧字段名（= 试过不止一个候选才成功）
+    attempted_styles: attempts.map((item) => item.style),
     attempts: attempts.length,
     // 把**真正发出去的 data** 回给前端：模板字段对不上时，前端可以拿它和
     // 微信后台模板的字段名逐一对照 —— 这是排查 47003 最直接的办法
@@ -2424,11 +2596,17 @@ Object.assign(exports, {
   truncateToUnits,
   checkFieldCompliance,
   formatDueText,
+  formatDateByStyle,
   formatDateFieldText,
   formatDateOnlyText,
   dueTextByStyle,
   pickDateStyle,
-  canDowngradeStyle,
+  dateCandidateOf,
+  datePartsOf,
+  dateStyleIndex,
+  isKnownDateStyle,
+  nextDateStyle,
+  dateShapeReOf,
   typeLabelOf,
   fieldTypeOf,
   isAwkwardField,
@@ -2438,10 +2616,10 @@ Object.assign(exports, {
   describeMessageFields,
   shouldRefundQuota,
   refundQuotaOnce,
-  // 日期形状降级（真机学出来的）
+  // 日期形状候选表（真机教出来的"逐个试 + 记住赢家"）
   extractOffendingField,
   firstDateFieldOf,
-  decideDateDowngrade,
+  decideNextDateStyle,
   sendAttempt,
   describeAttempt,
   beijingIso,
@@ -2493,10 +2671,13 @@ Object.assign(exports, {
   UNKNOWN_FIELD_MAX,
   FIELD_VALUE_LOG_MAX,
   ELLIPSIS_UNITS,
-  // 日期形状样式
+  // 日期形状候选表
+  DATE_STYLE_CANDIDATES,
+  DATE_STYLE_NAMES,
+  DATE_STYLE_SHAPES,
+  DATE_STYLE_DEFAULT,
   DATE_STYLE_DATETIME,
   DATE_STYLE_DATE,
-  DATE_STYLES,
   SETTINGS_DATE_STYLE,
   DATE_ONLY_RE,
   ENV_TEMPLATE_ID,

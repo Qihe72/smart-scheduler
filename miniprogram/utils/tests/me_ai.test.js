@@ -516,7 +516,75 @@ function run() {
         isTrue(dump.indexOf('****' + DEEPSEEK_KEY.slice(-4)) > -1 || dump.indexOf('****') > -1, '只有掩码');
         eq(ctx.p6.data.aiKeyInput, '', '提交后输入框清空');
         eq(ctx.p6.data.aiHasKey, true, '状态变成"已填自己的 Key"');
-        return null;
+
+        // -------------------------------------------------------------------
+        // 11. 模型名写错的提示（modelAliasAdvice）
+        //   真机反馈：用户填的是 **deepseek-V4.1-Flash**（DeepSeek 的**宣传名**），
+        //   而 API 里的模型名是 deepseek-flash —— 请求失败，他却被错误信息误导去查 Key。
+        // -------------------------------------------------------------------
+        block('模型名提示 —— modelAliasAdvice（缺了也不能报错）');
+
+        // ① 函数**不存在**时：页面照常、不报错、没有任何提示
+        //    （utils/api.js 由另一位同学在加，加载顺序上可能还没有 —— 这正是要覆盖的分支）
+        var hadFn = Object.prototype.hasOwnProperty.call(api, 'modelAliasAdvice');
+        var savedFn = api.modelAliasAdvice;
+        if (hadFn) delete api.modelAliasAdvice;
+
+        serve({ config: { ok: true, provider: 'deepseek', model: '', hasKey: false, masked: '' } });
+        ctx.p7 = newPage();
+        ctx.p7.onLoad();
+        return settle().then(function () {
+          isTrue(typeof api.modelAliasAdvice === 'undefined',
+            '前置：此刻 api.modelAliasAdvice 不存在（模拟"还没落地"）');
+          var threw = false;
+          try {
+            ctx.p7.onAiModelInput({ detail: { value: 'deepseek-V4.1-Flash' } });
+          } catch (err) { threw = true; }
+          isFalse(threw, '**函数不存在时不抛异常**');
+          eq(ctx.p7.data.aiModelInput, 'deepseek-V4.1-Flash',
+            '用户填的值照旧被记下来（**绝不因为拿不到建议就把输入丢掉或改写**）');
+          eq(ctx.p7.data.aiModelAliasHint, '', '也不显示任何提示');
+          isTrue(ctx.p7.data.aiModel === 'deepseek-flash',
+            '页面其余部分照常（"当前生效的模型"照旧来自服务端）：'
+            + show(ctx.p7.data.aiModel));
+          isTrue(ctx.p7.data.aiStatusDetail.indexOf('deepseek-flash') > -1,
+            '状态行也照常渲染 —— 一条可选提示不该影响主流程');
+
+          // ② 函数存在且返回建议 → 页面出现该提示
+          api.modelAliasAdvice = function (model) {
+            var text = String(model || '').trim();
+            if (/^deepseek-?v4\.?1-?flash$/i.test(text) || /^deepseek-V4\.1-Flash$/i.test(text)) {
+              return '「' + text + '」是宣传名，API 里的模型名是 deepseek-flash，请改成它。';
+            }
+            return '';
+          };
+          ctx.p7.onAiModelInput({ detail: { value: 'deepseek-V4.1-Flash' } });
+          isTrue(/deepseek-flash/.test(ctx.p7.data.aiModelAliasHint),
+            '**返回建议时页面出现提示**：' + show(ctx.p7.data.aiModelAliasHint));
+          isTrue(/宣传名/.test(ctx.p7.data.aiModelAliasHint), '并说明那是宣传名');
+          eq(ctx.p7.data.aiModelInput, 'deepseek-V4.1-Flash',
+            '**提示归提示，用户填的值一个字都没被改**（静默改配置比让他自己改更糟）');
+
+          // ③ 返回空 → 不出现
+          ctx.p7.onAiModelInput({ detail: { value: 'deepseek-flash' } });
+          eq(ctx.p7.data.aiModelAliasHint, '', '**返回空 → 不显示提示**（正常模型名不该被唠叨）');
+          ctx.p7.onAiModelInput({ detail: { value: '' } });
+          eq(ctx.p7.data.aiModelAliasHint, '', '留空 → 也不显示提示');
+
+          // ④ 建议函数自己抛异常 → 页面不能跟着崩
+          api.modelAliasAdvice = function () { throw new Error('建议函数内部炸了'); };
+          var threw2 = false;
+          try {
+            ctx.p7.onAiModelInput({ detail: { value: 'deepseek-V4.1-Flash' } });
+          } catch (err) { threw2 = true; }
+          isFalse(threw2, '**建议函数抛异常时页面不崩**（它只是锦上添花的一条提示）');
+          eq(ctx.p7.data.aiModelAliasHint, '', '异常时退化成"没有提示"');
+          eq(ctx.p7.data.aiModelInput, 'deepseek-V4.1-Flash', '用户的输入照样保留');
+
+          // 还原 api.js 的原始状态，不影响别的用例
+          if (hadFn) api.modelAliasAdvice = savedFn; else delete api.modelAliasAdvice;
+          return null;
+        });
       });
     });
   });

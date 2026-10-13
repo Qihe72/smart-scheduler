@@ -16,7 +16,7 @@
  *                            character_string …，按 key 前缀）与各自长度格式约束 /
  *                            **长度按"权重"算（汉字/全角 = 2，真机证实）**及其截断保证 /
  *                            默认映射对齐真实模板（thing2 + date4 + short_thing19）/
- *                            **date 形状被拒 → 自动降级为纯日期并记住（真机证实 date 不吃带时刻）**
+ *                            **date 形状候选表：逐个试 + 记住赢家（真机证实 date 不吃带时刻）**
  *                            47003 失败留痕能自证"哪个字段、发了什么值" /
  *                            配置类失败退回额度（不烧用户授权）/ 错误码分类
  *                            （43101 / 47003 / 40001）/ 额度绝不超发 / 单用户失败不中断整轮。
@@ -1755,7 +1755,11 @@ testCaseAsync('9.9 用户自填 Key 失败 → 可操作文案；服务端预置
     const userDb = createSettingsDb([{ _openid: 'me', ai_api_key: USER_KEY, ai_provider: 'zhipu' }]);
     const userFailed = await aiParse.handleParse({ text: '明天三点开会' }, { db: userDb, openid: 'me', env: {} });
     eq(userFailed.ok, false, '失败');
-    eq(userFailed.error, aiParse.USER_KEY_FAILED_MESSAGE, '给的是"去 AI 设置"那句');
+    // 【口径更新（真机 bug）】用户自填 Key 时，失败文案**优先用分类得出的具体原因**：
+    // 401 这一类给"Key 无效/已过期"那句（仍属"去 AI 设置"那一类，只是更准确）。
+    // 以前不分原因一律说"你填的 AI Key 无法使用"，会把"模型名写错"误导成"Key 有问题"。
+    eq(userFailed.error, '你的 AI Key 无效或已过期，请到「我的 → AI 设置」检查或重新填写',
+      '401 → 给的是"Key 无效/已过期"那句');
     ok(userFailed.error.indexOf('AI 设置') !== -1, '文案里点名去哪儿改');
     ok(userFailed.error.indexOf('401') === -1, '不透传厂商内部信息（没有 401）');
     ok(userFailed.error.indexOf('身份验证失败') === -1, '不透传厂商原始 message');
@@ -1777,7 +1781,8 @@ testCaseAsync('9.9 用户自填 Key 失败 → 可操作文案；服务端预置
         { title: '写毕业论文', deadline: '2026-12-31' },
         { db: userDb, openid: 'me', env: {} }
       );
-      eq(decUserFailed.error, aiDecompose.USER_KEY_FAILED_MESSAGE, 'aiDecompose 用户 Key 失败文案一致');
+      eq(decUserFailed.error, '你的 AI Key 无效或已过期，请到「我的 → AI 设置」检查或重新填写',
+        'aiDecompose 用户 Key 失败文案与 aiParse 一致（同样是 Key 类文案）');
       const decServerFailed = await aiDecompose.handleDecompose(
         { title: '写毕业论文', deadline: '2026-12-31' },
         { db: createSettingsDb([]), openid: 'me', env: { ZHIPU_API_KEY: 'sk-SERVER-BAD' } }
@@ -2049,10 +2054,11 @@ testCase('10.7 默认映射对齐真实模板：thing2 / date4 / short_thing19 �
   eq(built.data.thing2.value, '提交实验报告', 'thing2 = 标题原文');
   ok(remind.fieldUnits(built.data.thing2.value) <= remind.THING_MAX, '权重在 thing 上限内（12 ≤ 20）');
   eq(built.data.thing2.value.indexOf('还剩'), -1, '标题栏不带"还剩…"（平台字段放不下，见 10.8）');
-  // ② date4「日程时间」= 年月日形状、**不补零**、带时刻（与官方示例 2019年10月1日15:01 一致）
-  eq(built.data.date4.value, '2026年9月28日12:00', 'date4 = 年月日 + 时刻');
-  ok(/^\d{4}年\d{1,2}月\d{1,2}日\d{1,2}:\d{1,2}$/.test(built.data.date4.value),
-    'date4 匹配 ^\\d{4}年\\d{1,2}月\\d{1,2}日\\d{1,2}:\\d{1,2}$');
+  // ② date4「日程时间」= 默认候选（纯日期，候选表第 1 项）
+  eq(built.data.date4.value, '2026年9月28日', 'date4 = 默认候选（纯日期）');
+  eq(built.date_style, 'date', '默认候选名是 date（候选表第 1 项）');
+  ok(/^\d{4}年\d{1,2}月\d{1,2}日$/.test(built.data.date4.value),
+    'date4 匹配 ^\\d{4}年\\d{1,2}月\\d{1,2}日$');
   ok(built.data.date4.value.indexOf('-') === -1, '不带 "2026-09-28" 那种内部格式的连字符');
   // ③ short_thing19「日程类别」= 中文标签，且**权重**不超 5
   eq(built.data.short_thing19.value, '截止', 'ddl 的类别是「截止」');
@@ -2062,8 +2068,9 @@ testCase('10.7 默认映射对齐真实模板：thing2 / date4 / short_thing19 �
   // 这个模板 + 默认映射下，**只有**一条关于日期形状的提醒（不是配置错误，是"形状靠真机判定"）
   eq(built.warnings.length, 1, '恰好一条提醒');
   ok(built.warnings[0].indexOf('date4') !== -1, '提醒针对 date4');
-  ok(built.warnings[0].indexOf('年月日+时刻') !== -1 || built.warnings[0].indexOf('纯日期') !== -1,
-    '并且说清当前用的是哪种写法（而不是笼统的"可能有问题"）');
+  ok(built.warnings[0].indexOf('date') !== -1, '并且说清当前用的是哪个候选');
+  ok(built.warnings[0].indexOf('真机') !== -1,
+    '照实说明：date 类收哪种形状只能由真机判定，代码不假装知道');
   ok(built.warnings[0].indexOf('只能由真机判定') !== -1,
     '照实说明：date 类收哪种形状只能由真机判定，代码不假装知道');
 
@@ -2084,10 +2091,10 @@ testCase('10.7 默认映射对齐真实模板：thing2 / date4 / short_thing19 �
   eq(built.fields.map((f) => `${f.slot}:${f.key}:${f.type}`),
     ['title:thing2:thing', 'due:date4:date', 'category:short_thing19:short_thing'],
     'fields 留痕是「槽位 → key → 类型」');
-  eq(built.fields.map((f) => f.value), ['提交实验报告', '2026年9月28日12:00', '截止'], '留痕里带最终值');
-  eq(built.fields.map((f) => f.units), [12, 18, 4], '留痕里带权重（date4 = 18 权重）');
+  eq(built.fields.map((f) => f.value), ['提交实验报告', '2026年9月28日', '截止'], '留痕里带最终值');
+  eq(built.fields.map((f) => f.units), [12, 13, 4], '留痕里带权重（纯日期 date4 = 13 权重）');
   eq(remind.describeMessageFields(built.fields),
-    'thing2=提交实验报告 | date4=2026年9月28日12:00 | short_thing19=截止',
+    'thing2=提交实验报告 | date4=[纯日期]2026年9月28日 | short_thing19=截止',
     'describeMessageFields 压成一行可读文本');
 
   // 空标题不留空 —— 微信不接受空 value
@@ -2197,7 +2204,7 @@ testCase('10.9 buildMessageData / resolveFieldMap：字段名映射与非法映�
   eq(Object.keys(mapped.data).sort(), ['phrase3', 'thing1', 'time2'], '字段名跟着映射变');
   eq(mapped.data.thing1.value, '交报告', 'thing1 拿标题（不带尾巴）');
   // time 类：形状由类型决定（年月日 + 时刻），两种写法都收
-  ok(/^\d{4}年\d{1,2}月\d{1,2}日\d{1,2}:\d{1,2}$/.test(mapped.data.time2.value), 'time2 也是年月日形状');
+  ok(/^\d{4}年\d{1,2}月\d{1,2}日$/.test(mapped.data.time2.value), 'time2 也是默认候选的纯日期形状');
   // phrase 类只允许 5 权重、**不允许空格** —— 给紧凑写法，且放不下就按权重裁
   eq(mapped.data.phrase3.value, '截止', 'phrase3 拿类别的紧凑写法（4 权重 ≤ 5）');
   eq(mapped.truncated, [], '这些值都没超各自类型的上限');
@@ -2454,7 +2461,7 @@ testCaseAsync('10.13 端到端：发一条 → 扣额度 → 第二遍不再发�
   eq(sender.calls[0].page, '/pages/tasks/tasks', '跳转页');
   eq(sender.calls[0].data.thing2.value, '交实验报告', '模板 data 里的标题（不带尾巴）');
   eq(remind.fieldUnits(sender.calls[0].data.thing2.value) <= remind.THING_MAX, true, '标题权重合规');
-  eq(sender.calls[0].data.date4.value, remind.formatDateFieldText(dueAt), 'date4 是截止时刻（年月日形状）');
+  eq(sender.calls[0].data.date4.value, remind.formatDateByStyle(dueAt, 'date'), 'date4 是截止时刻（默认候选=纯日期）');
   eq(sender.calls[0].data.short_thing19.value, '截止', 'short_thing19 是任务类别');
   eq(db.store.settings[0].remind_quota, 2, '发一条扣一条额度');
   eq(db.store.reminders.length, 1, '落了一条已发记录');
@@ -2591,7 +2598,8 @@ testCaseAsync('10.16b actionTest 的 47003 失败也能自证：返回与记录�
     eq(failed.ok, false, '如实报失败');
     ok(failed.error.indexOf('thing2=') !== -1, '失败返回里带 thing2 的值');
     ok(failed.error.indexOf('date4=') !== -1, '并且带 date4 的值（模板字段对照全靠它）');
-    ok(/^\d{4}年\d{1,2}月\d{1,2}日/.test(String(failed.error).split('date4=')[1] || ''), 'date4 的值是年月日形状');
+    // 候选表会一路试下去，所以这里断言"值出现在 error 里"，不锁死是哪一种形状
+    ok(/date4=(\[纯日期\])?\d{4}/.test(String(failed.error)), 'date4 的值是某种日期形状');
 
     const record = db.store.reminders[0];
     eq(record.ok, false, '失败记录');
@@ -2617,7 +2625,7 @@ testCaseAsync('10.16c 配置类失败要把额度还回去（否则模板配错�
   eq(result.quota_refunded, 1, 'scan 汇总里报告"退了 1 次"');
   eq(db.store.settings[0].remind_quota, 3, '额度被退回：还是 3（扣了又还）');
   const rec = db.store.reminders[0];
-  eq(rec.quota_refunded, true, '失败记录里标明额度已回退（否则"额度为什么没少"会查不出来）');
+  eq(rec.quota_refunded_count, 1, '失败记录里标明额度已回退（否则"额度为什么没少"会查不出来）');
   ok(String(rec.error).indexOf('退回') !== -1 || String(result.errors[0]).indexOf('退回') !== -1,
     '错误文案里也说明了这次没占额度');
   // 分类函数本身
@@ -2634,7 +2642,7 @@ testCaseAsync('10.16c 配置类失败要把额度还回去（否则模板配错�
   eq(tokenResult.failed, 1, 'token 失败也记失败');
   eq(tokenResult.quota_refunded, 0, 'token 类不退还');
   eq(dbToken.store.settings[0].remind_quota, 2, '额度保持在扣减后的 2');
-  eq(dbToken.store.reminders[0].quota_refunded, false, '记录里写明没退');
+  eq(dbToken.store.reminders[0].quota_refunded_count, 0, '记录里写明没退');
 
   // ③ 43101 也不退（用户拒收，额度本来就是无效的）
   const dbRej = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'q3' })] });
@@ -2658,12 +2666,15 @@ testCaseAsync('10.16c 配置类失败要把额度还回去（否则模板配错�
   eq(dbTwice.store.settings[0].remind_quota, 2, '连跑两轮 47003，额度仍是 2（没有被烧掉）');
 });
 
-testCaseAsync('10.16d 【真机证实】date 形状被拒 → 自动降级为纯日期并记住', async () => {
-  // 真机原文（第二轮）：
-  //   openapi.subscribeMessage.send fail: argument invalid data format,
-  //   invalid value of property: data.date4
-  //   thing2=【测试】到期提醒 | date4=2026年10月13日00:09 | short_thing19=截止
-  // 微信**没给期望形状** → 所以代码不猜：先用带时刻的，被点名拒绝就降级成纯日期并记住。
+testCaseAsync('10.16d date 形状候选表：逐个试 + 记住赢家（不再靠猜格式）', async () => {
+  // ===========================================================================
+  // 【真机三轮才逼出来的机制】
+  //   第 1 轮：thing2 超长被拒 → 权重口径已修
+  //   第 2 轮：2026年10月13日00:09（时刻补零）→ invalid value of property: data.date4
+  //   第 3 轮：2026年10月13日0:21（时刻不补零）→ 仍然被拒
+  // 微信**没给期望形状**，而每次往返都要"改一版 → 部署 → 点一次测试"。
+  // 所以改成一次走完候选表：第一个成功的就是答案，记进 remind_date_style。
+  // ===========================================================================
   const DATE4_REJECT = {
     ok: false,
     errCode: 47003,
@@ -2672,134 +2683,145 @@ testCaseAsync('10.16d 【真机证实】date 形状被拒 → 自动降级为纯
   };
   const dueAt = R_NOW + 5 * MIN;
 
-  // ===== ① 第一次被拒（点名 date4）→ 自动降级重试 → 第二次成功 =====
+  // ===== ① 候选表本身：有序、名字唯一、每项都能生成合规的值 =====
+  const names = remind.DATE_STYLE_NAMES;
+  eq(names.length >= 6, true, '候选表至少有 6 项');
+  eq(names[0], 'date', '第 1 项是纯日期（最保守、真机唯一没试过的方向）');
+  eq(names.indexOf('iso') !== -1, true, '含 ISO 形状');
+  eq(names.indexOf('slash') !== -1, true, '含斜杠形状');
+  eq(names.indexOf('dot') !== -1, true, '含点分形状');
+  eq(names.indexOf('datetime_space') !== -1, true, '含"日期 空格 时刻"（用来区分是空格还是时刻的问题）');
+  eq(names.indexOf('datetime_pad') !== -1, true, '含补零时刻（真机已拒那一种）');
+  eq(new Set(names).size, names.length, '名字唯一（要拿它去落库与上报，重名会串）');
+  eq(names.length, remind.DATE_STYLE_CANDIDATES.length, 'NAMES 与 CANDIDATES 一一对应');
+  // 每项都要有名字/标签/依据/验证状态，且能生成一个符合**自己形状**的值
+  names.forEach((name) => {
+    const candidate = remind.DATE_STYLE_CANDIDATES.find((item) => item.name === name);
+    ok(!!candidate && candidate.label.length > 0, `${name} 有可读标签`);
+    ok(!!candidate && candidate.reason.length > 0, `${name} 写了依据`);
+    ok(!!candidate && ['untried', 'rejected', 'verified'].indexOf(candidate.verified) !== -1,
+      `${name} 标了真机验证状态（不假装知道）`);
+    const value = remind.formatDateByStyle(dueAt, name);
+    ok(String(value).length > 0, `${name} 能生成值`);
+    const re = remind.DATE_STYLE_SHAPES[name];
+    ok(!!re && re.test(value), `${name} 的值符合自己的形状：${value}`);
+  });
+  // 真机已拒的那两种要如实标出来（这是"证据"，不是"猜测"）
+  eq(remind.dateCandidateOf('datetime_pad').verified, 'rejected', 'datetime_pad 标注"真机已拒绝"');
+  eq(remind.dateCandidateOf('date').verified, 'untried', '纯日期标注"尚未在真机验证"（不能吹成已验证）');
+
+  // ===== ② 前两个候选被拒 → 自动试第 3 个 → 成功 → 记住赢家（iso）=====
+  // 用"依次返回"的桩：第 1、2 次失败，第 3 次成功 —— 这正是真机上一次测试会走的路
   const db = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'd1' })] });
-  const sender = stubSender([DATE4_REJECT, { ok: true }]);
+  const sender = stubSender([DATE4_REJECT, DATE4_REJECT, { ok: true }]);
   const result = await runScan(db, sender);
 
   eq(result.ok, true, '整轮不炸');
-  eq(result.sent, 1, 'sent = 1（降级后发成功了）');
+  eq(result.sent, 1, 'sent = 1（试到第 3 个候选才成功）');
   eq(result.failed, 0, '不算失败');
-  eq(result.downgraded, 1, '汇总里报告"有 1 条是降级后才发出去的"');
-  eq(sender.calls.length, 2, '确实发了两次（第一次带时刻、第二次纯日期）');
-  // 第一次：带时刻
-  ok(sender.calls[0].data.date4.value.indexOf(':') !== -1, '第一次发的是"年月日+时刻"');
-  ok(/^\d{4}年\d{1,2}月\d{1,2}日\d{1,2}:\d{1,2}$/.test(sender.calls[0].data.date4.value), '第一次形状合法（本地校验通过）');
-  // 第二次：纯日期
-  ok(sender.calls[1].data.date4.value.indexOf(':') === -1, '第二次发的是纯日期（不含 :）');
-  ok(/^\d{4}年\d{1,2}月\d{1,2}日$/.test(sender.calls[1].data.date4.value),
-    '纯日期匹配 ^\\d{4}年\\d{1,2}月\\d{1,2}日$');
-  eq(sender.calls[1].data.date4.value, remind.formatDateOnlyText(dueAt), '纯日期的值就是 formatDateOnlyText');
+  eq(sender.calls.length, 3, '一共发了 3 次（候选表逐个试）');
+  eq(sender.calls.map((c) => c.data.date4.value), [
+    remind.formatDateByStyle(dueAt, 'date'),
+    remind.formatDateByStyle(dueAt, 'datetime_space'),
+    remind.formatDateByStyle(dueAt, 'datetime_pad'),
+  ], '第 1/2/3 次分别用候选表的第 1/2/3 项');
+  eq(sender.calls[0].data.date4.value, remind.formatDateByStyle(dueAt, 'date'), '第 1 次就是纯日期');
+  eq(db.store.settings[0][remind.SETTINGS_DATE_STYLE], 'datetime_pad',
+    '赢家（第 3 个候选 datetime_pad）已落库');
 
-  // ===== ② 额度净变化必须是 -1（不能扣两次，也不能一次都不扣）=====
-  eq(db.store.settings[0].remind_quota, 2, '额度净变化 = -1（第一次失败被退回，第二次成功才真扣）');
-  eq(result.quota_refunded, 1, '汇总里报告退了 1 次（第一次的额度）');
-
-  // ===== ③ 降级结果被记住 =====
-  eq(db.store.settings[0][remind.SETTINGS_DATE_STYLE], remind.DATE_STYLE_DATE,
-    'remind_date_style = "date" 已落库');
-  eq(db.store.reminders.length, 1, '只落一条**成功**记录（失败那次不该当成"已提醒"）');
+  // ===== ③ 额度：最终净扣 = 成功条数（这里成功 1 条 → 净扣 1）=====
+  eq(db.store.settings[0].remind_quota, 2, '额度净变化 = -1（两次失败都退回了，只有成功那次真扣）');
+  eq(result.quota_refunded, 2, '汇总里报告退了 2 次（前两个候选各一次）');
+  eq(db.store.reminders.length, 1, '只落一条**成功**记录（失败尝试不算"已提醒"）');
   eq(db.store.reminders[0].ok, true, '记录是成功');
-  eq(db.store.reminders[0].date_style, remind.DATE_STYLE_DATE, '记录标明用的纯日期');
-  eq(db.store.reminders[0].attempts, 2, '记录标明试了 2 次');
+  eq(db.store.reminders[0].date_style, 'datetime_pad', '记录标明最终用的候选');
+  eq(db.store.reminders[0].attempts, 3, '记录标明试了 3 次');
 
-  // ===== ④ 已记住 style → 下一次**第一次就用纯日期**（不再浪费一次失败尝试）=====
-  const db2 = remindWorld({
-    quota: 3,
-    tasks: [ddlAt(dueAt, { _id: 'd2' })],
-  });
-  db2.store.settings[0][remind.SETTINGS_DATE_STYLE] = remind.DATE_STYLE_DATE; // 模拟"上次学到的"
+  // ===== ④ 已记住赢家 → 第一次就用它（不再重复试前面的候选）=====
+  const db2 = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'd2' })] });
+  db2.store.settings[0][remind.SETTINGS_DATE_STYLE] = 'iso'; // 模拟"上次试出来的赢家"
   const sender2 = stubSender([{ ok: true }]);
   const result2 = await runScan(db2, sender2);
-  eq(result2.sent, 1, '第二次扫描（已记住 style）也发成功');
-  eq(sender2.calls.length, 1, '**只发一次**（不再先试带时刻）');
-  ok(sender2.calls[0].data.date4.value.indexOf(':') === -1, '第一次请求的 date4 就不含 :');
-  eq(sender2.calls[0].data.date4.value, remind.formatDateOnlyText(dueAt), '直接用纯日期');
-  eq(result2.downgraded, 0, '这次不算"降级"（本来就用纯日期）');
+  eq(result2.sent, 1, '已记住时也发成功');
+  eq(sender2.calls.length, 1, '**只发一次**（不重复试前面的候选）');
+  eq(sender2.calls[0].data.date4.value, remind.formatDateByStyle(dueAt, 'iso'), '第一次就用 ISO 形状');
+  ok(/^\d{4}-\d{2}-\d{2}$/.test(sender2.calls[0].data.date4.value), '确实是 ISO 形状（含 -）');
   eq(db2.store.settings[0].remind_quota, 2, '额度同样只扣一次');
 
-  // ===== ⑤ 点名的是 thing2 → **绝不重试**（那是真问题，重试只会掩盖它）=====
+  // ===== ⑤ 点名 thing2 → **一个候选都不换**（只发一次）=====
   const db3 = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'd3' })] });
   const sender3 = stubSender([{
-    ok: false,
-    errCode: 47003,
-    errMsg: 'invalid value of property: data.thing2',
+    ok: false, errCode: 47003, errMsg: 'invalid value of property: data.thing2',
   }]);
   const result3 = await runScan(db3, sender3);
-  eq(sender3.calls.length, 1, '**只发生一次发送**（不重试）');
+  eq(sender3.calls.length, 1, '**只发生一次发送**（点名 thing2 时绝不换候选）');
   eq(result3.sent, 0, '没发成功');
   eq(result3.failed, 1, '如实记 1 条失败');
   eq(result3.quota_refunded, 1, '配置类失败照旧退额度');
   eq(db3.store.settings[0].remind_quota, 3, '额度没被扣');
   eq(db3.store.settings[0][remind.SETTINGS_DATE_STYLE], undefined, '**没有**写入 date style（不是日期的问题）');
 
-  // ===== ⑥ 两次都失败 → 返回的 error 里两次的字段值都在 =====
+  // ===== ⑥ 全部候选失败 → error 里**每个候选**的值都在 =====
   const db4 = remindWorld({ quota: 3, tasks: [ddlAt(dueAt, { _id: 'd4', title: '交报告' })] });
-  const sender4 = stubSender([DATE4_REJECT, DATE4_REJECT]); // 降级之后还是被拒
+  const sender4 = stubSender([DATE4_REJECT]); // 桩只有一项 → 每次都返回它
   const result4 = await runScan(db4, sender4);
-  eq(sender4.calls.length, 2, '试了两次');
+  eq(sender4.calls.length, remind.DATE_STYLE_NAMES.length,
+    `试完了整个候选表（${remind.DATE_STYLE_NAMES.length} 个）`);
   eq(result4.failed, 1, '记失败');
-  eq(db4.store.settings[0].remind_quota, 3, '两次都失败 → 两次都退回，额度净变化 0');
+  eq(result4.quota_refunded, remind.DATE_STYLE_NAMES.length, '每个候选失败都退了一次额度');
+  eq(db4.store.settings[0].remind_quota, 3, '净变化 0（全失败）');
+  eq(db4.store.settings[0][remind.SETTINGS_DATE_STYLE], undefined, '全失败 → 不记任何赢家');
   const errText = result4.errors.join(' | ');
-  ok(errText.indexOf('两次尝试') !== -1, '错误里明确说"两次尝试都失败"');
-  ok(errText.indexOf('第 1 次') !== -1 && errText.indexOf('第 2 次') !== -1, '两次尝试都在');
-  ok(errText.indexOf('带时刻') !== -1, '第一次标注"带时刻"');
-  ok(errText.indexOf('纯日期') !== -1, '第二次标注"纯日期"');
-  // 关键：第一次的"带时刻"值不能被丢掉，否则"哪种形状不行"这个结论就查不到了
-  ok(errText.indexOf('2026年') !== -1, '第一次的实际值也在（年月日…）');
-  const recText = String(db4.store.reminders[0].error);
-  ok(recText.indexOf('两次尝试') !== -1, '失败记录里同样保留两次');
-  ok(Array.isArray(db4.store.reminders[0].attempts), '记录里有结构化的 attempts');
-  eq(db4.store.reminders[0].attempts.length, 2, 'attempts 有两条');
-  eq(db4.store.reminders[0].attempts.map((a) => a.date_style),
-    [remind.DATE_STYLE_DATETIME, remind.DATE_STYLE_DATE], 'attempts 记下每次用的形状');
-  ok(db4.store.reminders[0].attempts[0].sent_fields.find((f) => f.key === 'date4').value.indexOf(':') !== -1,
-    'attempts[0] 保留了第一次那个"带时刻"的值（这就是证据）');
+  ok(errText.indexOf(`${remind.DATE_STYLE_NAMES.length} 个候选都失败`) !== -1, '错误里说明候选都试完了');
+  // 关键：**每个候选的形状名与值**都要在，否则"试过哪几种"这个结论就丢了
+  remind.DATE_STYLE_NAMES.forEach((name) => {
+    ok(errText.indexOf(name) !== -1, `error 里带候选名 ${name}`);
+    ok(errText.indexOf(remind.formatDateByStyle(dueAt, name)) !== -1, `error 里带 ${name} 的实际值`);
+  });
+  const rec4 = db4.store.reminders[0];
+  eq(Array.isArray(rec4.attempts), true, '失败记录里有结构化 attempts');
+  eq(rec4.attempts.length, remind.DATE_STYLE_NAMES.length, 'attempts 覆盖每个候选');
+  eq(rec4.attempts.map((a) => a.date_style), remind.DATE_STYLE_NAMES.slice(), 'attempts 按候选顺序记录形状');
+  ok(String(rec4.error).indexOf('个候选都失败') !== -1, '记录里也保留"候选都试完"这个结论');
+  ok(rec4.attempts[0].sent_fields.find((f) => f.key === 'date4').value.length > 0,
+    'attempts[0] 保留了第 1 个候选的实际值（这就是证据）');
 
-  // ===== ⑦ 降级只影响 date 类：thing2 / short_thing19 逐字不变 =====
-  const same = (field) => sender.calls[0].data[field].value === sender.calls[1].data[field].value;
-  eq(same('thing2'), true, 'thing2 两次逐字相同（降级没碰它）');
-  eq(same('short_thing19'), true, 'short_thing19 两次逐字相同');
-  eq(Object.keys(sender.calls[1].data).sort(), Object.keys(sender.calls[0].data).sort(), '字段集合也没变');
-
-  // ===== ⑧ 判定函数本身（它就是"该不该重试"的唯一口径）=====
+  // ===== ⑦ 判定函数：换候选的条件卡得很死 =====
   const fm = remind.DEFAULT_FIELD_MAP;
   eq(remind.extractOffendingField('invalid value of property: data.date4'), 'date4', '认 property: data.xxx 形状');
   eq(remind.extractOffendingField('argument invalid! data.thing3.value invalid'), 'thing3', '也认 data.xxx.value 形状');
   eq(remind.extractOffendingField('没有字段名的一句话'), '', '挖不到就给空串（不瞎猜）');
-  eq(remind.firstDateFieldOf(fm), 'date4', '默认映射里的 date 字段是 date4');
-  eq(remind.firstDateFieldOf({ thing1: 'title' }), '', '没有 date 字段时给空串');
-  eq(remind.decideDateDowngrade({
-    ok: false, errCode: 47003, errMsg: 'invalid value of property: data.date4', fieldMap: fm, style: 'datetime',
-  }).downgrade, true, '点名 date4 + 带时刻 → 降级');
-  eq(remind.decideDateDowngrade({
-    ok: false, errCode: 47003, errMsg: 'invalid value of property: data.thing2', fieldMap: fm, style: 'datetime',
-  }).downgrade, false, '点名 thing2 → 不降级');
-  eq(remind.decideDateDowngrade({
-    ok: false, errCode: 47003, errMsg: 'data.date4', fieldMap: fm, style: 'date',
-  }).downgrade, false, '已经是纯日期 → 无从再降，不重试');
-  eq(remind.decideDateDowngrade({
-    ok: false, errCode: 43101, errMsg: 'data.date4', fieldMap: fm, style: 'datetime',
-  }).downgrade, false, '43101 不是参数问题 → 不降级');
-  eq(remind.decideDateDowngrade({
-    ok: false, errCode: 47003, errMsg: 'invalid value of property: data.time9', fieldMap: { time9: 'due' }, style: 'datetime',
-  }).downgrade, false, '字段名对不上映射 → 不乱降级');
+  eq(remind.nextDateStyle('date'), 'datetime_space', '第 1 项之后是第 2 项');
+  eq(remind.nextDateStyle('dot'), '', '最后一项之后没有下一项（不会绕回开头 → 不会死循环）');
+  eq(remind.decideNextDateStyle({
+    ok: false, errCode: 47003, errMsg: 'invalid value of property: data.date4', fieldMap: fm, style: 'date',
+  }).advance, true, '点名 date4 → 换下一个候选');
+  eq(remind.decideNextDateStyle({
+    ok: false, errCode: 47003, errMsg: 'invalid value of property: data.thing2', fieldMap: fm, style: 'date',
+  }).advance, false, '点名 thing2 → 不换');
+  eq(remind.decideNextDateStyle({
+    ok: false, errCode: 43101, errMsg: 'data.date4', fieldMap: fm, style: 'date',
+  }).advance, false, '43101 不是参数问题 → 不换');
+  eq(remind.decideNextDateStyle({
+    ok: false, errCode: 47003, errMsg: 'invalid value of property: data.time9',
+    fieldMap: { time9: 'due' }, style: 'date',
+  }).advance, false, '点名的字段类型不是 date（是 time）→ 不换');
+  eq(remind.decideNextDateStyle({
+    ok: false, errCode: 47003, errMsg: 'invalid value of property: data.date9', fieldMap: fm, style: 'date',
+  }).advance, false, '点名的 date9 不在当前映射里 → 不换');
+  eq(remind.decideNextDateStyle({
+    ok: false, errCode: 47003, errMsg: 'invalid value of property: data.date4', fieldMap: fm, style: 'dot',
+  }).advance, false, '已经是最后一个候选 → 不换（试完就停）');
 
-  // ===== ⑨ status 的预览必须反映"实际会发出去的形状" =====
-  const deps = { env: { REMIND_TEMPLATE_ID: 'TPL-X' } };
-  const before = await remind.actionStatus(remindWorld({ quota: 1 }), 'me', deps);
-  eq(before.date_style, remind.DATE_STYLE_DATETIME, '还没学到 → 预览用带时刻');
-  ok(before.field_preview_text.indexOf(':') !== -1, 'field_preview_text 里能看到时刻');
-  eq(before.date_style_learned, false, '并标明这是"还没学过"的默认值');
-  const dbLearned = remindWorld({ quota: 1 });
-  dbLearned.store.settings[0][remind.SETTINGS_DATE_STYLE] = remind.DATE_STYLE_DATE;
-  const after = await remind.actionStatus(dbLearned, 'me', deps);
-  eq(after.date_style, remind.DATE_STYLE_DATE, '学到之后 → 预览改成纯日期');
-  eq(after.date_style_learned, true, '并标明是学到的');
-  ok(after.field_preview_text.indexOf('date4=') !== -1, '预览里仍有 date4');
-  const date4Preview = after.field_preview.find((f) => f.key === 'date4');
-  ok(/^\d{4}年\d{1,2}月\d{1,2}日$/.test(date4Preview.value), '预览的 date4 就是纯日期形状');
-  eq(after.field_preview_text.indexOf(':'), -1, '预览文本里没有时刻（与实际发送一致）');
+  // ===== ⑧ 两个带时刻的候选：值能生成且形状正确（本地自检，不依赖网络）=====
+  const spaceValue = remind.formatDateByStyle(dueAt, 'datetime_space');
+  const padValue = remind.formatDateByStyle(dueAt, 'datetime_pad');
+  ok(/^\d{4}年\d{1,2}月\d{1,2}日 \d{1,2}:\d{2}$/.test(spaceValue), `datetime_space 形状正确：${spaceValue}`);
+  ok(/^\d{4}年\d{1,2}月\d{1,2}日\d{2}:\d{2}$/.test(padValue), `datetime_pad 形状正确：${padValue}`);
+  ok(spaceValue.indexOf(' ') !== -1, 'datetime_space 真的含那个空格');
+  ok(padValue.indexOf(' ') === -1, 'datetime_pad 不含空格');
+  // 这两个只在"时刻"上不同，正好用来区分"是空格的问题还是时刻的问题"
+  eq(spaceValue.replace(' ', ''), padValue.replace(/(\d{4}年\d{1,2}月\d{1,2}日)(\d):/, '$10$2'), '两者只差一个空格与补零');
 });
 
 testCaseAsync('10.17 未配模板：不扫描、不下发，并说清原因', async () => {
@@ -3105,7 +3127,7 @@ testCaseAsync('10.25 scan：REMIND_FIELD_MAP 生效（换模板字段名不改�
   eq(result.sent, 1, '发了');
   eq(Object.keys(sender.calls[0].data).sort(), ['thing5', 'time6'], 'data 的键按环境变量映射来');
   eq(sender.calls[0].data.thing5.value, '换模板也要能发', 'thing5 拿标题');
-  eq(sender.calls[0].data.time6.value, remind.formatDateFieldText(dueAt), 'time6 拿时刻（time 类也是年月日形状）');
+  eq(sender.calls[0].data.time6.value, remind.formatDateByStyle(dueAt, 'date'), 'time6 拿时刻（time 类用同一个默认候选）');
   eq(result.warnings, [], '合法映射没有警告');
 
   // 写坏的映射：回退默认 + 警告（功能不整体挂掉）

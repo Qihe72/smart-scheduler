@@ -119,6 +119,23 @@ Page({
     this.loadWeek();
   },
 
+  /**
+   * 【切回本页时重新拉一次 —— 这条不能删】
+   *
+   * pages/week 是 **tabBar 页**，而 tab 页在切走再切回时**不会重新执行 onLoad**
+   * （页面实例一直活着，只是被切到后台）。所以"在编辑页删掉一条子任务/截止"
+   * 或"新增一条日程"之后切回课表，卡片当然还是旧的 —— 真机上用户报的
+   * 「删除后没变化」「新加的日程不显示」就是这个根因，两条现象同一个原因。
+   *
+   * 写法与 pages/tasks/tasks.js 的 onShow 完全一致：
+   * 用 loadedOnce 挡住**首次**显示（onLoad 已经拉过一次，不然启动就连发两次请求），
+   * 之后每次显示都重拉并重画网格。
+   */
+  onShow() {
+    // 首次 onLoad 已经拉过一次；这里用 loadedOnce 避免刚进页面连发两次请求
+    if (this.loadedOnce) this.loadWeek();
+  },
+
   /** 下拉刷新：重新读任务与设置（保留当前 weekOffset，不把用户弹回本周） */
   onPullDownRefresh() {
     this.loadWeek().then(() => {
@@ -139,10 +156,33 @@ Page({
    * 并且失败时它自己已经弹过一次 toast。所以这里必须显式判 ok，
    * 否则请求失败会被当成"一周没有任何任务"，静默显示成空课表 —— 那比报错更难排查。
    *
+   * ===========================================================================
+   * 【首次加载 vs 之后的静默刷新 —— 两种失败要区别对待】
+   * ===========================================================================
+   *   tab 切换是**高频动作**：每次切回课表都会走一次 onShow → loadWeek。
+   *   如果每次重拉都先置 `loading: true`，用户每次切回来都会闪一下"正在加载课表"
+   *   的骨架态 —— 页面明明已经有内容了，闪一下比"短暂看到旧数据"更难受。
+   *   所以：
+   *     * **首次**加载（loadedOnce 还是 false，页面上什么都没有）→ 照旧显示 loading；
+   *     * **之后的**刷新 → 不动 `loading`，保持当前内容，拉到新数据再**一次性重画**
+   *       （renderWeek 里是整体 setData，不会出现半新半旧）。
+   *
+   *   失败同理要分开：
+   *     * 首次失败 → 整页错误态（页面上本来就没内容，必须告诉他）；
+   *     * 之后刷新失败 → **保留用户已经看到的课表**，只把一句轻提示挂在 errorText 之外，
+   *       绝不用"刷新失败"把已经渲染好的网格清掉。
+   *       （服务端的 error 由 api.js 弹过 toast，所以这里连 toast 都不用再补。）
+   *
    * @returns {Promise<void>}
    */
   loadWeek() {
-    this.setData({ loading: true, errorText: '' });
+    // 首次加载才显示骨架态；之后的刷新静默替换（见上面那段取舍）。
+    // 判据就用 loadedOnce：onLoad 调它时还是 false，onShow 重拉时已经是 true。
+    const firstLoad = this.loadedOnce !== true;
+
+    if (firstLoad) {
+      this.setData({ loading: true, errorText: '' });
+    }
     return Promise.all([api.listTasks(), api.getSettings()]).then((results) => {
       const listResult = results[0];
       const settingsResult = results[1];
@@ -155,13 +195,21 @@ Page({
       this.semesterStart = settings.semester_start || '';
       this.periodTimes = settings.period_times || null;
       this.renderWeek();
+      // 标记"已经加载过一次"：onShow 靠它区分"首次显示"（onLoad 刚拉过，不重复拉）
+      // 与"从别的页面切回来"（必须重拉，否则看不到别处的增删）
+      this.loadedOnce = true;
       this.setData({ loading: false, errorText: '' });
     }).catch((err) => {
-      // 服务端的 error 由 api.js 弹过 toast 了，这里只把失败落在页面上（不再重复弹一次）
-      this.setData({
-        loading: false,
-        errorText: `加载失败：${describeError(err)}`,
-      });
+      const message = describeError(err);
+      if (firstLoad) {
+        // 服务端的 error 由 api.js 弹过 toast 了，这里只把失败落在页面上（不再重复弹一次）
+        this.setData({ loading: false, errorText: `加载失败：${message}` });
+        return;
+      }
+      // 【之后的刷新失败：保留旧内容】不置 errorText（那会把整页变成错误态、
+      // 把用户已经看到的课表清掉），只在控制台留一条线索。
+      this.setData({ loading: false });
+      console.warn('[week] 静默刷新失败，保留已有课表：', message);
     });
   },
 
@@ -316,6 +364,10 @@ Page({
     chipHeightOf: chipHeightOf,
     ROW_HEIGHT_RPX: ROW_HEIGHT_RPX,
     CHIP_GAP_RPX: CHIP_GAP_RPX,
+    // 加载链路的两个取值口：onShow 那组断言要按真实契约喂数据
+    // （{ok:true, data:{tasks}} / {ok:true, ...settings}），而不是测试里另抄一份形状
+    extractTasks: extractTasks,
+    extractSettings: extractSettings,
   },
 });
 

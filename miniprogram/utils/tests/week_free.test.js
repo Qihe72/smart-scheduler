@@ -147,6 +147,252 @@ function titlesAt(built, dayIndex, key) {
 }
 
 // ===========================================================================
+// onShow 刷新（这一组需要真实跑页面的加载链路：要 stub 最底层 wx.cloud.callFunction）
+// ===========================================================================
+/**
+ * 【为什么单独一段】前面所有断言都是纯函数（buildGrid / locateRow…），一行网络都不碰。
+ * 而 onShow 这件事的本质是"**什么时候发请求、发几次**"，只能在页面级验：
+ *   * 首次显示（loadedOnce 为假）→ **不许**再拉一次；
+ *   * 之后每次显示 → 必须重拉并重画，而且网格要按**新数据**变。
+ * 做法照 ai_page.test.js：stub 掉 wx / getApp / Page，require 页面，调用生命周期方法。
+ * 用的是**真实的 utils/api.js**（只 stub 最底层 wx.cloud.callFunction），
+ * 这样"发了几个请求"是真的从云函数调用次数上数出来的。
+ *
+ * ---------------------------------------------------------------------------
+ * 【本组怎么证明自己不是摆设 —— 后人请保留这段自检方式】
+ *   把 `pages/week/week.js` 里 `onShow` 的刷新那行**临时注释掉**再跑本组，
+ *   应当恰好红 3 条：「加载过之后再显示没重拉」「删掉后卡片没消失」「新增后卡片没出现」
+ *   —— 与真机用户反馈的两个现象一字对应。恢复后必须立刻转绿。
+ *   断言要么是**有效载荷**，要么就只是装饰；这条自检就是它们属于前者的证据。
+ *
+ * 【⚠️ 假绿警告：调用异步用例必须 return / await】
+ *   本文件第一版写的是 `testOnShow();` —— 没接住它返回的 Promise，于是这一整批断言
+ *   **一条都没执行**，通过数停在 181，报告却全绿。**这种假绿比红更危险**：
+ *   红至少会有人过来看，假绿会让所有人以为这块已经被测住了。
+ *   同理，文件末尾 `done` 链里那句也必须写成 `.then(function () { return run(); })` ——
+ *   少了 return，report 会赶在断言之前打印。
+ *   写异步用例时请确认：**每一个异步分支都被 return 或 await 串回主链**。
+ * ---------------------------------------------------------------------------
+ */
+function testOnShow() {
+  var savedWx = global.wx;
+  var savedGetApp = global.getApp;
+  var savedCurrentPages = global.getCurrentPages;
+
+  // 【为什么这里用"真实本周"而不是 WEEK_MONDAY】renderWeek 画的是**当前真实那一周**
+  // （它自己按 today + weekOffset 算周一起点）。本文件第一版把任务日期写成固定的
+  // 2026-09-07，而真机此刻是 10 月 → taskOnDate 判 false → 卡片当然画不出来，
+  // 我却以为是 onShow 没生效。凡是走页面的用例，日期必须锚在真实这一周。
+  function fmtDay(d) {
+    var pad = function (n) { return n < 10 ? '0' + n : String(n); };
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  }
+  var now = new Date();
+  var realMonday = fmtDay(new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7)));
+
+  var callLog = [];
+  var tasksReply = [];
+  var settingsReply = { ok: true, semester_start: realMonday, period_times: null };
+
+  global.wx = {
+    showToast: function () {},
+    showModal: function () {},
+    stopPullDownRefresh: function () {},
+    navigateTo: function () {},
+    showLoading: function () {},
+    hideLoading: function () {},
+    cloud: {
+      callFunction: function (options) {
+        var data = (options && options.data) || {};
+        callLog.push(data.action);
+        if (data.action === 'list') {
+          return Promise.resolve({ result: { ok: true, tasks: tasksReply, count: tasksReply.length } });
+        }
+        if (data.action === 'settings_get') {
+          return Promise.resolve({ result: settingsReply });
+        }
+        return Promise.resolve({ result: { ok: false, error: 'unexpected ' + data.action } });
+      }
+    }
+  };
+  global.getApp = function () {
+    return { globalData: { semesterStart: realMonday, periodTimes: {} }, applySettings: function () {} };
+  };
+  global.getCurrentPages = function () { return [{}]; };
+
+  // 重新 require 页面，让 Page() 在**本组自己的桩**下注册一次
+  var pagePath = path.join(ROOT, 'pages', 'week', 'week.js');
+  delete require.cache[require.resolve(pagePath)];
+  var captured = null;
+  global.Page = function (options) { captured = options; };
+  try {
+    require(pagePath);
+  } catch (err) {
+    H.record(false, 'week.js 能在桩下加载', '抛异常：' + ((err && err.message) || err));
+  }
+
+  var restore = function () {
+    if (savedWx === undefined) delete global.wx; else global.wx = savedWx;
+    if (savedGetApp === undefined) delete global.getApp; else global.getApp = savedGetApp;
+    if (savedCurrentPages === undefined) delete global.getCurrentPages; else global.getCurrentPages = savedCurrentPages;
+    delete require.cache[require.resolve(pagePath)];
+    global.Page = function (options) { registered = options; };   // 还原给别的用例用
+  };
+
+  if (!captured) {
+    restore();
+    return;
+  }
+
+  isTrue(typeof captured.onShow === 'function',
+    '**week.js 暴露了 onShow**（tab 页切回来靠它刷新；没有它 = 编辑页的增删都看不到）');
+
+  /** 造一个页面实例（setData 要认 'a.b' 这种带点的键） */
+  function makePage() {
+    var page = {};
+    Object.keys(captured).forEach(function (key) { page[key] = captured[key]; });
+    page.data = JSON.parse(JSON.stringify(captured.data));
+    page.setData = function (patch) {
+      Object.keys(patch || {}).forEach(function (key) {
+        if (key.indexOf('.') === -1) { page.data[key] = patch[key]; return; }
+        var parts = key.split('.');
+        var target = page.data;
+        for (var i = 0; i < parts.length - 1; i += 1) target = target[parts[i]];
+        target[parts[parts.length - 1]] = patch[key];
+      });
+    };
+    return page;
+  }
+
+  function settle() {
+    return new Promise(function (resolve) { setTimeout(resolve, 40); });
+  }
+
+  /** 网格里有没有这张卡片（按标题找） */
+  function hasCard(page, title) {
+    return page.data.days.some(function (day) {
+      return day.cells.some(function (cell) {
+        return (cell.tasks || []).some(function (t) { return t.title === title; });
+      });
+    });
+  }
+
+  var oneTask = {
+    _id: 'c1', title: '要删掉的课', type: 'event', date: realMonday, periods: '3-4',
+    priority: 'mid', repeat: 'none', done: false, start_time: '', end_time: ''
+  };
+
+  tasksReply = [oneTask];
+  var page = makePage();
+  page.onLoad();
+  return settle().then(function () {
+    eq(callLog.filter(function (a) { return a === 'list'; }).length, 1,
+      'onLoad 拉了一次任务列表');
+    isTrue(page.loadedOnce === true, '加载成功后标记 loadedOnce');
+    isTrue(hasCard(page, '要删掉的课'), '**卡片画出来了**（准备验它会不会消失）');
+
+    // ① 首次显示：不该重复拉
+    // 【小程序真实生命周期】onLoad 之后紧跟一次 onShow，而小程序**不会等 onLoad 里的
+    // 异步请求跑完**才触发 onShow。所以"首次显示"那一刻 loadedOnce 还是 false ——
+    // 这一点必须用一个**刚创建、还没加载完**的页面来测。
+    // 本文件第一版在这里用"onLoad 已经 settle 过的页面"验它，那时 loadedOnce 已是 true，
+    // 于是它按契约**应该**重拉，我却断言它不该拉 —— 是测试建模错了，不是代码错了
+    // （真机上用户先看到页面、请求随后才回来，不会连发两次）。
+    var freshPage = makePage();
+    callLog.length = 0;
+    freshPage.onLoad();                    // onLoad 里发第一次请求，loadedOnce 还没置位
+    eq(freshPage.loadedOnce === true, false, 'onLoad 刚调用时 loadedOnce 还是 false（还没加载完）');
+    var duringLoad = callLog.length;
+    freshPage.onShow();                    // 首次显示（紧随 onLoad）
+    eq(callLog.length, duringLoad,
+      '**首次 onShow 不重复加载**：onLoad 正在拉的请求没有被再拉一遍'
+      + '（实际新增调用：' + show(callLog.length - duringLoad) + '）');
+
+    // 这里再等第一个页面把 onLoad 的请求跑完 —— 顺便验证它 settle 后 loadedOnce 置位
+    return settle().then(function () {
+      isTrue(freshPage.loadedOnce === true, 'onLoad 的请求 settle 后 loadedOnce 置为 true');
+      isTrue(hasCard(freshPage, '要删掉的课'), '这个新页面也把卡片画出来了');
+
+      // ② 之后每次显示：必须重拉
+      //    此时 freshPage 已经是"加载过一次"的页面，再显示就该重拉 —— 这正是
+      //    用户"从编辑页切回课表"时发生的那一次 onShow。
+      callLog.length = 0;
+      // 【静默刷新：切 tab 回来不许闪骨架态】tab 切换是高频动作，
+      // 每次重拉都先置 loading 的话，用户每次切回来都闪一下"正在加载课表"。
+      isFalse(freshPage.data.loading === true, '重拉之前 loading 就是 false（页面已有内容）');
+      freshPage.onShow();
+      isFalse(freshPage.data.loading === true,
+        '**非首次 onShow 重拉时 loading 始终为 false**（不闪骨架态）');
+      return settle().then(function () {
+        isFalse(freshPage.data.loading === true, '拉到数据之后 loading 仍是 false');
+        eq(callLog.filter(function (a) { return a === 'list'; }).length, 1,
+          '**加载过之后再显示 → 重新拉了一次任务列表**（切回课表刷新靠的就是它）');
+
+        // ③ 端到端：外部把任务删掉 → onShow → 网格里那张卡片消失（用户报的现象）
+        tasksReply = [];               // 模拟"在编辑页把它删了"
+        freshPage.onShow();
+        return settle().then(function () {
+          isFalse(hasCard(freshPage, '要删掉的课'),
+            '**删掉后切回课表：那张卡片消失了**（这正是用户报的「删除后没变化」）');
+
+          // ④ 端到端：外部新增 → onShow → 卡片出现
+          tasksReply = [oneTask, {
+            _id: 'c2', title: '刚加的日程', type: 'event', date: realMonday, periods: '7-8',
+            priority: 'mid', repeat: 'none', done: false, start_time: '', end_time: ''
+          }];
+          freshPage.onShow();
+          return settle().then(function () {
+            isTrue(hasCard(freshPage, '刚加的日程'),
+              '**新增后切回课表：卡片出现了**（这正是用户报的「新加的日程不显示」）');
+            isTrue(hasCard(freshPage, '要删掉的课'), '原先那条也还在（数据是整份替换，不是追加）');
+
+            // ④b 【最重要的一条】非首次刷新**失败**时：保留旧内容，不许清空
+            //     用户已经看到课表了，一次后台刷新失败不该把它变成整页错误态 ——
+            //     "切个 tab 回来课表没了"比"看到的是旧数据"严重得多。
+            tasksReply = [];
+            var failMode = false;
+            var origFetch = global.wx.cloud.callFunction;
+            global.wx.cloud.callFunction = function (o) {
+              if (failMode) return Promise.resolve({ result: { ok: false, error: '模拟刷新失败' } });
+              return origFetch.apply(null, arguments);
+            };
+            failMode = true;
+            freshPage.onShow();            // 这次一定失败
+            return settle().then(function () {
+              failMode = false;
+              global.wx.cloud.callFunction = origFetch;
+              isTrue(freshPage.data.errorText === '',
+                '**非首次刷新失败：errorText 仍为空**（不把整页变成错误态）：'
+                + show(freshPage.data.errorText));
+              isFalse(freshPage.data.loading === true, '失败后也不会卡在 loading');
+              isTrue(hasCard(freshPage, '刚加的日程'),
+                '**旧的网格内容还在**（刷新失败没有把用户看到的课表清掉）');
+              isTrue(hasCard(freshPage, '要删掉的课'), '两条旧卡片都还在');
+
+              // ⑤ 加载失败时不标记 loadedOnce（下次切回来还会重试）
+              tasksReply = [];
+              var page2 = makePage();
+              var origHandler = global.wx.cloud.callFunction;
+              global.wx.cloud.callFunction = function () {
+                return Promise.resolve({ result: { ok: false, error: '模拟失败' } });
+              };
+              page2.onLoad();
+              return settle().then(function () {
+                global.wx.cloud.callFunction = origHandler;
+                isTrue(/加载失败/.test(page2.data.errorText), '首次加载失败 → 照旧是整页错误态：'
+                  + show(page2.data.errorText));
+                isFalse(page2.loadedOnce === true,
+                  '**失败时不标记 loadedOnce** —— 下次切回本页还会再试一次');
+                restore();
+              });
+            });
+          });
+        });
+      });
+    });
+  });
+}
+// ===========================================================================
 // 正式用例
 // ===========================================================================
 function run() {
@@ -680,7 +926,19 @@ function run() {
     '**全量校准下 16:00 落第 9 节**（校准第 9 节 = 16:00-16:40）—— 与默认作息的第 7 节不同');
 
   // -------------------------------------------------------------------------
+  // onShow 刷新（真机反馈：「删除后没变化」「新加的日程不显示」）
+  //   pages/week 是 **tabBar 页**，切走再切回**不会重跑 onLoad**，
+  //   所以必须靠 onShow 补一次重拉 + 重画；否则编辑页里的增删都看不到。
+  // -------------------------------------------------------------------------
+  block('onShow 刷新 —— tab 页切回来必须重拉');
+  // ⚠️ 这一组是**异步**的（要等真实的 Promise 链跑完），所以它的 Promise 必须被接住。
+  // 本文件第一版写成 `testOnShow();` 而没接住 —— 那批断言**一条都没跑到**，
+  // 通过数停在 181 看着却是全绿（典型的假绿：报告里没有失败，因为断言根本不存在）。
+  // 注意：本函数结尾要 `return` 它，所以这段之后**不能再有同步断言**（会被 return 跳过）。
+
+  // -------------------------------------------------------------------------
   // 回归：行数与"每节课一行"这条基本结构没被改坏
+  // （放在 onShow 那组之前，确保它一定会跑）
   // -------------------------------------------------------------------------
   block('回归 —— 行结构');
   eq(builtA.rows.length, DEFAULT_ROWS, '默认作息 = 13 行（第 1~13 节）');
@@ -694,6 +952,9 @@ function run() {
   eq(T.locateRow(course('x', 'x', '3'), { 3: 2 }, null), 2, '有 periods 时按起始节次定位到行');
   eq(T.locateRow(course('x', 'x', ''), { 3: 2 }, null), -1,
     '既没节次也没时间 → -1（交给「其他时段」）');
+
+  // 最后才跑异步那组，并把它的 Promise 交出去（run() 的调用方会等它）
+  return testOnShow();
 }
 
 // ---------------------------------------------------------------------------
@@ -703,7 +964,7 @@ function run() {
 // 结束再打印总结；而且这样"单独跑"与"经 run.js 跑"是**同一条代码路径**，
 // 不会出现两边行为不一致（本文件第一版就踩过：done 与 require.main 各跑了一遍）。
 var done = Promise.resolve()
-  .then(function () { run(); })
+  .then(function () { return run(); })   // ⚠️ 必须 return：run() 现在会返回异步那组的 Promise
   .then(function () {
     if (require.main === module) H.report('课表页空闲统计');
   })

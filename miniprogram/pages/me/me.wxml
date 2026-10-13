@@ -189,6 +189,9 @@
           />
         </view>
         <view class="note" wx:if="{{aiDefaultModelText}}">{{aiDefaultModelText}}</view>
+        <!-- 模型名写错时的提示（例如填了宣传名 deepseek-V4.1-Flash，而 API 里叫 deepseek-flash）。
+             只提示、**绝不自动改用户填的值** —— 静默改配置比让他自己改一遍更糟。 -->
+        <view class="note note-warn" wx:if="{{aiModelAliasHint}}">{{aiModelAliasHint}}</view>
         <view class="note" wx:if="{{aiModel}}">
           当前生效：{{aiModel}}（上面留空就是继续用它；填了按你填的来）
         </view>

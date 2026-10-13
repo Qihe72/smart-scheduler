@@ -143,6 +143,51 @@ var VISION_TEXT_ONLY_MODELS = ['glm-4.7-flash', 'deepseek-chat', 'deepseek-reaso
 /** 各服务商的默认模型（用户没填模型时云函数用哪个） */
 var AI_DEFAULT_MODELS = { zhipu: 'glm-4.7-flash', deepseek: 'deepseek-flash' };
 
+/**
+ * 模型名的"宣传名"纠正表（**与云函数 aiParse / aiDecompose 逐字一致**，由契约测试钉住）。
+ *
+ * 【为什么需要】真机上用户把 DeepSeek 的宣传名 `deepseek-V4.1-Flash` 填进模型框 →
+ * 服务端回"模型不存在" → 而界面让他去查 Key，他反复换 Key、问题依旧。
+ * 所以：**先把名字改对**，再谈别的。`modelAliasAdvice(model)` 就是给页面用的那一句。
+ *
+ * 【写法归一化】小写 + 去掉 `.` `-` `_` 空格（分隔符因人而异），所以
+ * `deepseek-v4.1-flash` / `deepseek_v4_1_flash` / `DeepSeek-V41-Flash` 都能命中。
+ * 【只写真的会失败的写法】纯大小写差异（例如 GLM-5.3-Flash）不提示 —— 那多半能正常调用。
+ * 【数组形式】是为了让 utils/tests 的"从源码文本抽数组比对"能与云侧对账（对象抽不出来）。
+ */
+var MODEL_ALIAS_TARGET = 'deepseek-flash';
+var MODEL_ALIAS_KEYS = [
+  'deepseekv41flash',   // deepseek-v4.1-flash / deepseek-V4.1-Flash / deepseek_v4_1_flash
+  'deepseekv41',        // deepseek-v4.1
+  'deepseekflashv41',   // deepseek-flash-v4.1
+  'v41flash'            // v4.1-flash
+];
+
+/** 归一化成"只看字母数字"的键（与云函数 aliasKeyOf 同口径） */
+function aliasKeyOf(model) {
+  var text = String(model === null || model === undefined ? '' : model).trim().toLowerCase();
+  var slash = text.lastIndexOf('/');   // 容忍 provider/model
+  if (slash !== -1) text = text.slice(slash + 1);
+  var colon = text.indexOf(':');       // 容忍 model:tag
+  if (colon !== -1) text = text.slice(0, colon);
+  return text.replace(/[.\-_\s]/g, '');
+}
+
+/**
+ * 用户填的模型名是不是某个模型的"宣传名"？是的话返回一句**可操作**的建议，否则返回 ''。
+ *
+ * 页面用法（`typeof` 守卫，老版本 api.js 没有这个函数时不至于报错）：
+ *   var advice = typeof api.modelAliasAdvice === 'function' ? api.modelAliasAdvice(input) : '';
+ *
+ * @param {string} model 用户填的模型名
+ * @returns {string} '' = 没什么可说的（**不瞎猜**）；否则是一句给人看的建议
+ */
+function modelAliasAdvice(model) {
+  var key = aliasKeyOf(model);
+  if (!key || MODEL_ALIAS_KEYS.indexOf(key) === -1) return '';
+  return 'DeepSeek 的 API 模型名是 ' + MODEL_ALIAS_TARGET + '（V4.1-Flash 是它的宣传名）';
+}
+
 // ---------------------------------------------------------------------------
 // 小工具
 // ---------------------------------------------------------------------------
@@ -757,6 +802,9 @@ module.exports = {
   effectiveModelName: effectiveModelName,
   normalizeModelKey: normalizeModelKey,
   normalizeImageMime: normalizeImageMime,
+  // 模型"宣传名"纠正（me 页在模型输入框旁提示用；与云函数那张表一致）
+  modelAliasAdvice: modelAliasAdvice,
+  aliasKeyOf: aliasKeyOf,
   // AI Key 配置（转发给 tasks 云函数；前端不缓存 Key）
   aiConfigGet: aiConfigGet,
   aiConfigSave: aiConfigSave,
@@ -776,5 +824,7 @@ module.exports = {
   VISION_TEXT_ONLY_MODELS: VISION_TEXT_ONLY_MODELS,
   VISION_MIME_TYPES: VISION_MIME_TYPES,
   MAX_IMAGE_BASE64_CHARS: MAX_IMAGE_BASE64_CHARS,
-  AI_DEFAULT_MODELS: AI_DEFAULT_MODELS
+  AI_DEFAULT_MODELS: AI_DEFAULT_MODELS,
+  MODEL_ALIAS_TARGET: MODEL_ALIAS_TARGET,
+  MODEL_ALIAS_KEYS: MODEL_ALIAS_KEYS
 };

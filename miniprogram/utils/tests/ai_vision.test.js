@@ -104,20 +104,26 @@ function imageEvent(overrides) {
 
 /**
  * 把云函数的 postJson 换成假的，并记录每次调用。
+ *
+ * 【target 参数不能省】aiParse 与 aiDecompose 各有**自己的** postJson 导出，
+ * 只桩住 aiParse 的话，调 aiDecompose 时那个请求会**真的发出去**（本套测试必须零网络）。
+ *
  * @param {Function} handler (index, url, payload) → Promise<{status, text}>
+ * @param {Object} [target] 要打桩的模块，默认 aiParse；测拆解时传 aiDecomposeFn
  * @returns {{calls: Array, restore: Function}}
  */
-function stubPostJson(handler) {
+function stubPostJson(handler, target) {
+  var mod = target || aiParseFn;
   var state = { calls: [], restored: false };
-  var real = aiParseFn.postJson;
-  aiParseFn.postJson = function (url, payload, headers, timeoutMs) {
+  var real = mod.postJson;
+  mod.postJson = function (url, payload, headers, timeoutMs) {
     state.calls.push({ url: url, payload: payload, headers: headers, timeoutMs: timeoutMs });
     return handler(state.calls.length - 1, url, payload);
   };
   state.restore = function () {
     if (state.restored) return;
     state.restored = true;
-    aiParseFn.postJson = real;
+    mod.postJson = real;
   };
   return state;
 }
@@ -218,7 +224,9 @@ var pageError = null;
  * @returns {string[]} 去重后的模型名
  */
 function stringArraysFromSource(source, key) {
-  var pattern = new RegExp(key + '\\s*:\\s*\\[([\\s\\S]*?)\\]', 'g');
+  // `键: [ ... ]`（对象字段）与 `键 = [ ... ]`（常量赋值）都要认：
+  // PROVIDERS 里的名单是前者，MODEL_ALIAS_KEYS 是后者。
+  var pattern = new RegExp(key + '\\s*[:=]\\s*\\[([\\s\\S]*?)\\]', 'g');
   var found = [];
   var matched = pattern.exec(source);
   while (matched) {
@@ -232,11 +240,22 @@ function stringArraysFromSource(source, key) {
   return found;
 }
 
+/**
+ * 从源码里抽一个**字符串常量**（`名字 = '值'`），用来比对三处的 `MODEL_ALIAS_TARGET`。
+ * 数组用上面的 stringArraysFromSource 抽；这里只处理单值常量（不写正则就没法对账）。
+ */
+function stringConstFromSource(source, name) {
+  var matched = new RegExp(name + '\\s*=\\s*[\'"]([^\'"]+)[\'"]').exec(source);
+  return matched ? matched[1] : '';
+}
+
 // ===========================================================================
 // 正式用例
 // ===========================================================================
 function run() {
   var source = fs.readFileSync(AI_PARSE_PATH, 'utf8');
+  var decomposeSource = fs.readFileSync(path.join(ROOT, 'cloudfunctions', 'aiDecompose', 'index.js'), 'utf8');
+  var apiSource = fs.readFileSync(path.join(ROOT, 'utils', 'api.js'), 'utf8');
   // 跨 .then 传递的桩 / 页面实例（var 写在回调里会串作用域）
   var visionStub = null;
   var ctx = {};
@@ -322,6 +341,44 @@ function run() {
   eq(api.effectiveModelName('zhipu', 'glm-5.3-flash'), 'glm-5.3-flash', '填了就用自己的');
   isTrue(api.VISION_TEXT_ONLY_MODELS.indexOf('deepseek-chat') !== -1,
     'deepseek-chat 仍在"不支持识图"名单里（页面据此给"已停用，改成 deepseek-flash"）');
+
+  // ---- 1b. 模型的"宣传名"纠正表（三处必须一致）----
+  //   真机案例：用户填了 DeepSeek 的宣传名 deepseek-V4.1-Flash → 服务端说"模型不存在"，
+  //   而界面让他去查 Key（他反复换 Key、问题依旧）。这张表就是为了把人引到模型名上。
+  block('识图 —— 模型宣传名：云侧两份 + 前端那份必须一致');
+  var aliasKeysFromCloud = stringArraysFromSource(source, 'MODEL_ALIAS_KEYS');
+  var aliasKeysFromDecompose = stringArraysFromSource(decomposeSource, 'MODEL_ALIAS_KEYS');
+  var aliasTargetFromCloud = stringConstFromSource(source, 'MODEL_ALIAS_TARGET');
+  var aliasTargetFromDecompose = stringConstFromSource(decomposeSource, 'MODEL_ALIAS_TARGET');
+  var aliasTargetFromApi = stringConstFromSource(apiSource, 'MODEL_ALIAS_TARGET');
+  isTrue(aliasKeysFromCloud.length > 0, '从 aiParse 源码里抽到了宣传名表：' + show(aliasKeysFromCloud));
+  eq(aliasKeysFromCloud.slice().sort().join(','), api.MODEL_ALIAS_KEYS.slice().sort().join(','),
+    '**api.js 的 MODEL_ALIAS_KEYS 与 aiParse 那份逐字一致**（只改一边就红）');
+  eq(aliasKeysFromDecompose.slice().sort().join(','), aliasKeysFromCloud.slice().sort().join(','),
+    'aiDecompose 镜像的那份也一致（它走同一条用户自填 Key 的失败文案）');
+  eq(api.MODEL_ALIAS_TARGET, aliasTargetFromCloud, 'api.js 的目标模型名与 aiParse 一致');
+  eq(aliasTargetFromDecompose, aliasTargetFromCloud, 'aiDecompose 的目标模型名也一致');
+  eq(aliasTargetFromApi, aliasTargetFromCloud, '（源码文本对照）api.js 的常量值也一致');
+  eq(aiParseFn.MODEL_ALIAS_TARGET, 'deepseek-flash', '目标模型名就是 deepseek-flash');
+
+  eq(api.modelAliasAdvice('deepseek-V4.1-Flash').indexOf('deepseek-flash') !== -1, true,
+    "modelAliasAdvice('deepseek-V4.1-Flash') → 给出正确写法");
+  eq(api.modelAliasAdvice('deepseek-v41-flash').indexOf('deepseek-flash') !== -1, true,
+    "modelAliasAdvice('deepseek-v41-flash') 也命中（分隔符不敏感）");
+  eq(api.modelAliasAdvice('deepseek_v4_1_flash').indexOf('deepseek-flash') !== -1, true,
+    "下划线写法也命中");
+  eq(api.modelAliasAdvice('v4.1-flash').indexOf('deepseek-flash') !== -1, true,
+    '只写 v4.1-flash 也命中');
+  eq(api.modelAliasAdvice('deepseek-flash'), '', '**正确的模型名不提示**（不瞎猜）');
+  eq(api.modelAliasAdvice('glm-4.7-flash'), '', '智谱的模型名不误报');
+  eq(api.modelAliasAdvice('deepseek-chat'), '', '已停用的名字不由这张表管（另有停用文案）');
+  eq(api.modelAliasAdvice(''), '', '空串 → 空串（不抛异常）');
+  eq(api.modelAliasAdvice(null), '', 'null → 空串（不抛异常）');
+  eq(aiParseFn.modelAliasAdvice('DeepSeek-V4.1-Flash'), api.modelAliasAdvice('deepseek-v4.1-flash'),
+    '**云侧与前端给的是同一句建议**（口径统一，不出现两种说法）');
+  eq(aiDecomposeFn.modelAliasAdvice('deepseek-v4.1-flash'), aiParseFn.modelAliasAdvice('deepseek-v4.1-flash'),
+    'aiDecompose 那份也是同一句');
+  isTrue(/deepseek-flash/.test(api.modelAliasAdvice('deepseek-v4.1')), 'deepseek-v4.1（不带 flash）也命中');
 
   // ---- 2. 请求体：URL / 模型 / 参数 / 超时 / 图片传法 ----
   block('识图 —— 请求体构造（模型 + Base64 Data URL + 45 秒超时）');
@@ -1208,6 +1265,99 @@ function run() {
     // 第一行 `});` 关掉最后一段 `.then(function (routed) {...})`，
     // 第二行 `});` 关掉最外层那个 `.then(function (out) {...})`，
     // 最后一行 `}` 才是 `function run()` 的。
+  }).then(function () {
+    // ---- 19. 用户自填 Key 的失败文案：具体原因优先于通用 Key 文案 ----
+    //   【真机 bug】用户填 `deepseek-V4.1-Flash`（宣传名）→ 服务端"模型不存在" →
+    //   界面却说「你填的 AI Key 无法使用」→ 他去反复换 Key，问题依旧。
+    block('失败文案 —— 用户自填 Key：分类得出的具体原因优先，通用文案只兜底');
+    return loadSettingsDb();
+  }).then(function (db) {
+    isTrue(!!db, '借到了 createSettingsDb（用户自填 Key 那条路径要真读一遍库）');
+    if (!db) return null;
+    // 用户的 Key 是好的，只是模型名填成了宣传名
+    ctx.userDb = db([
+      { _openid: 'me', ai_provider: 'zhipu', ai_api_key: 'sk-user-own-key', ai_model: 'deepseek-V4.1-Flash' }
+    ]);
+    // 服务端回"模型不存在"（DeepSeek 风格：没有业务码，只有一句 message）
+    ctx.stub = stubPostJson(function () {
+      return httpFail(400, '{"error":{"message":"Model Not Exist"}}');
+    });
+    return aiParseFn.handleParse({ text: '明天下午三点开组会' },
+      { env: {}, db: ctx.userDb, openid: 'me' });
+  }).then(function (resMissing) {
+    ctx.stub.restore();
+    eq(resMissing.ok, false, '模型名不对 → ok:false');
+    isTrue(resMissing.error.indexOf('模型不存在') !== -1,
+      '**error 说的是"模型不存在"**：' + show(resMissing.error));
+    isTrue(resMissing.error.indexOf('deepseek-V4.1-Flash') !== -1, 'error 里带上了用户填的那个模型名');
+    isTrue(resMissing.error.indexOf('deepseek-flash') !== -1, '**并给出正确的 API 模型名**（宣传名纠正）');
+    isFalse(resMissing.error.indexOf(aiParseFn.USER_KEY_FAILED_MESSAGE) !== -1,
+      '**不再说"你填的 AI Key 无法使用"**（那会把人带去改 Key）');
+    isFalse(resMissing.error.indexOf('AI 服务暂不可用') !== -1, '也不是那句统一文案');
+
+    // 认证失败那一支：仍然说 Key（这一支是对的，别改坏）
+    ctx.stub = stubPostJson(function () {
+      return httpFail(401, '{"error":{"message":"Authentication Fails"}}');
+    });
+    return aiParseFn.handleParse({ text: '明天下午三点开组会' },
+      { env: {}, db: ctx.userDb, openid: 'me' });
+  }).then(function (resAuth) {
+    ctx.stub.restore();
+    eq(resAuth.ok, false, '401 → ok:false');
+    isTrue(resAuth.error.indexOf('Key') !== -1, '**认证失败仍然指向 Key**：' + show(resAuth.error));
+    isTrue(resAuth.error.indexOf('无效') !== -1 || resAuth.error.indexOf('过期') !== -1, '并说明是无效/过期');
+    isFalse(resAuth.error.indexOf('模型不存在') !== -1, '这一支不该说模型名的问题');
+
+    // 额度那一支：说额度，不甩给 Key
+    ctx.stub = stubPostJson(function () {
+      return httpFail(429, '{"error":{"code":"1302","message":"当前并发量过高"}}');
+    });
+    return aiParseFn.handleParse({ text: '明天下午三点开组会' },
+      { env: {}, db: ctx.userDb, openid: 'me' });
+  }).then(function (resQuota) {
+    ctx.stub.restore();
+    eq(resQuota.ok, false, '429 → ok:false');
+    isTrue(resQuota.error.indexOf('额度') !== -1, '额度/限流那一支说的是额度：' + show(resQuota.error));
+    isFalse(resQuota.error.indexOf('模型不存在') !== -1, '不误报成模型名问题');
+
+    // 归类不出来的失败（超时/网络）→ 仍是通用 Key 文案
+    ctx.stub = stubPostJson(function () {
+      return Promise.reject(new Error('socket hang up'));
+    });
+    return aiParseFn.handleParse({ text: '明天下午三点开组会' },
+      { env: {}, db: ctx.userDb, openid: 'me' });
+  }).then(function (resNet) {
+    ctx.stub.restore();
+    eq(resNet.ok, false, '网络失败 → ok:false');
+    eq(resNet.error, aiParseFn.USER_KEY_FAILED_MESSAGE,
+      '**归类不出来时才回通用的 Key 文案**（这一支不变）');
+
+    // 拆解那条路径同构：模型名错也要说模型名
+    // 【必须指定 aiDecomposeFn】它有自己的 postJson，只桩 aiParse 会让请求真的发出去
+    ctx.stub = stubPostJson(function () {
+      return httpFail(400, '{"error":{"message":"Model Not Exist"}}');
+    }, aiDecomposeFn);
+    return aiDecomposeFn.handleDecompose({ title: '写毕业论文', deadline: '2026-12-31' },
+      { env: {}, db: ctx.userDb, openid: 'me' });
+  }).then(function (resDecompose) {
+    ctx.stub.restore();
+    eq(resDecompose.ok, false, '拆解路径同样失败');
+    isTrue(resDecompose.error.indexOf('模型不存在') !== -1,
+      'aiDecompose 也说"模型不存在"（两条路径同构，不出现两套说法）：' + show(resDecompose.error));
+    isTrue(resDecompose.error.indexOf('deepseek-flash') !== -1, '同样带宣传名纠正');
+    isFalse(resDecompose.error.indexOf('你填的 AI Key 无法使用') !== -1, '同样不再误报 Key');
+
+    // 【边界】服务端预置 Key 那条路径保持统一文案（用户对预置 Key 无能为力，说了也改不了）
+    ctx.stub = stubPostJson(function () {
+      return httpFail(400, '{"error":{"code":"1211","message":"模型不存在，请检查模型代码"}}');
+    });
+    return aiParseFn.handleParse({ text: '明天下午三点开组会' },
+      { env: { ZHIPU_API_KEY: 'server-preset-key' }, disableDb: true, openid: '' });
+  }).then(function (resServer) {
+    ctx.stub.restore();
+    eq(resServer.ok, false, '预置 Key 失败 → ok:false');
+    eq(resServer.error, aiParseFn.ERROR_MESSAGE,
+      '**预置 Key 路径仍是统一文案**（与 _selftest 8b.9 的口径一致，没被这次改动影响）');
   });
 }
 
@@ -1248,6 +1398,7 @@ var tasksStubConfigFails = false;       // true = ai_config_get 返回失败（�
 var tasksStubSettingsFails = false;     // true = settings_get 返回失败（验 silent 的**行为**：弹不弹 toast）
 var savedWx = global.wx;
 var savedGetApp = global.getApp;
+var savedHttpsRequest = null;
 
 /** 最近一次云函数调用 */
 function lastCall() { return callLog[callLog.length - 1]; }
@@ -1297,6 +1448,14 @@ function tasksStub(data) {
 
 function useStub() {
   reset();
+  // 【零网络的兜底闸门】云函数里的 postJson 走 https.request；谁要是忘了打桩、
+  // 真的去联网（本文件就踩过一次：只桩了 aiParse、漏了 aiDecompose 自己的 postJson），
+  // 这里会立刻抛出来，而不是"悄悄发了一个 401 请求然后断言莫名其妙地红"。
+  var https = require('https');
+  if (!savedHttpsRequest) savedHttpsRequest = https.request;
+  https.request = function () {
+    throw new Error('本套测试必须零网络：有请求绕过了 postJson 桩（检查 stubPostJson 的 target）');
+  };
   global.wx = {
     showToast: function (options) { toasts.push((options && options.title) || ''); },
     showModal: function (options) {
@@ -1336,6 +1495,10 @@ function useStub() {
 function restoreGlobals() {
   if (savedWx === undefined) delete global.wx; else global.wx = savedWx;
   if (savedGetApp === undefined) delete global.getApp; else global.getApp = savedGetApp;
+  if (savedHttpsRequest) {
+    require('https').request = savedHttpsRequest;   // 还原真身，别影响别的测试文件
+    savedHttpsRequest = null;
+  }
 }
 
 /** 造一个"页面实例"：复制注册对象、给独立的 data 与 setData（与 ai_page.test.js 同一套做法） */

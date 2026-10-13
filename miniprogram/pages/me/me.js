@@ -498,6 +498,7 @@ Page({
     aiModelInput: '',           // 用户填的模型名；留空 = 不改（保存时不带 model 字段）
     aiModelPlaceholder: '留空 = 用该服务商的默认模型',
     aiModelHint: '',            // 该服务商的默认模型是什么（帮用户决定要不要填）
+    aiModelAliasHint: '',       // 「你填的是宣传名，API 里的名字是 X」——纯提示，不改用户输入
     // --- Key 形状识别（纯本地，不发请求） ---
     aiKeyShapeHint: '',         // 形状与服务商不一致时的黄字提醒；一致/认不出时为空
     aiKeyShapeFixIndex: -1,     // 「切到 X」按钮要切到哪个下标；-1 = 不显示按钮
@@ -864,9 +865,11 @@ Page({
         : '粘贴你的 API Key（不会显示出来）',
       // 模型输入框也留空：留空 = 保持服务端当前生效的模型（保存时不带 model 字段）
       aiModelInput: '',
+      aiModelAliasHint: '',
     });
-    // 状态回填后 Key 输入框已清空 → 形状提示自然要重算（会算成"无提示"）
+    // 状态回填后两个输入框都清空了 → 两条提示自然要重算（都会算成"无提示"）
     this.refreshKeyShapeHint('');
+    this.refreshModelAliasHint('');
   },
 
   /**
@@ -929,7 +932,39 @@ Page({
 
   /** 模型输入框：只存进 data；留空 = 保存时不带 model 字段 */
   onAiModelInput(event) {
-    this.setData({ aiModelInput: str(event.detail && event.detail.value) });
+    const value = str(event.detail && event.detail.value);
+    this.setData({ aiModelInput: value });
+    // 边打字边给"名字写错了"的提示（纯本地、零请求）
+    this.refreshModelAliasHint(value);
+  },
+
+  /**
+   * 模型名写错时的提醒（纯本地，不发请求）。
+   *
+   * 真机反馈：用户填的是 **`deepseek-V4.1-Flash`**（那是 DeepSeek 的**宣传名**），
+   * 而 API 里的模型名是 `deepseek-flash` —— 于是请求失败，
+   * 而报错信息把他误导去查 Key。所以这里把"宣传名 → API 名"的对应关系提示出来。
+   *
+   * 【只提示，绝不自动改用户填的值】静默改写用户的配置比让他自己改一遍更糟：
+   * 他下次看到输入框里的值和自己填的不一样，会怀疑程序在乱动他的东西。
+   *
+   * 【拿不到那个函数就静默跳过】utils/api.js 的 modelAliasAdvice 由另一位同学在加，
+   * 加载顺序上可能还不存在 —— 用 typeof 守卫，缺了就当没有这条提示，绝不报错。
+   *
+   * @param {string} model 当前输入框里的模型名
+   */
+  refreshModelAliasHint(model) {
+    let advice = '';
+    if (typeof api.modelAliasAdvice === 'function') {
+      try {
+        advice = str(api.modelAliasAdvice(str(model)));
+      } catch (err) {
+        // 建议函数自己出错不能连累页面（它只是锦上添花的一条提示）
+        console.warn('[me] modelAliasAdvice 异常，已跳过提示：', err);
+        advice = '';
+      }
+    }
+    this.setData({ aiModelAliasHint: advice });
   },
 
   /** 保存：provider 必须是白名单里的值，key 必须非空 */

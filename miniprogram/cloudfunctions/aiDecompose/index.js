@@ -377,6 +377,71 @@ function classifyHttpError(provider, status, bodyText, model) {
 /** 星期几的中文名（下标 0 = 周一） */
 const WEEKDAY_CN = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 
+// ---------------------------------------------------------------------------
+// 模型名的"宣传名"纠正（与 aiParse **逐字一致**；真机踩过的坑）
+// ---------------------------------------------------------------------------
+/**
+ * 【会被误填的宣传名】归一化后的键（小写、去掉 . - _ 空格）→ 它真正对应的 API 模型名。
+ *
+ * 真机案例：用户填了 `deepseek-V4.1-Flash`（宣传名），服务端回"模型不存在"，
+ * 而文案却让他去查 Key —— 他反复换 Key，问题依旧。
+ * 一致性由 utils/tests/ai_vision.test.js 的"从源码文本抽数组比对"钉住（三个文件一起比）。
+ */
+const MODEL_ALIAS_TARGET = 'deepseek-flash';
+const MODEL_ALIAS_KEYS = [
+  'deepseekv41flash',   // deepseek-v4.1-flash / deepseek-V4.1-Flash / deepseek_v4_1_flash
+  'deepseekv41',        // deepseek-v4.1
+  'deepseekflashv41',   // deepseek-flash-v4.1
+  'v41flash',           // v4.1-flash
+];
+
+/** 归一化成"只看字母数字"的键：小写 + 去掉 . - _ 空格（分隔符写法因人而异） */
+function aliasKeyOf(model) {
+  let text = String(model === null || model === undefined ? '' : model).trim().toLowerCase();
+  const slash = text.lastIndexOf('/');         // 容忍 provider/model
+  if (slash !== -1) text = text.slice(slash + 1);
+  const colon = text.indexOf(':');             // 容忍 model:tag
+  if (colon !== -1) text = text.slice(0, colon);
+  return text.replace(/[.\-_\s]/g, '');
+}
+
+/** 这个模型名是不是"宣传名"？是的话给一句纠正建议，否则返回 ''（**不瞎猜**） */
+function modelAliasAdvice(model) {
+  const key = aliasKeyOf(model);
+  if (!key || MODEL_ALIAS_KEYS.indexOf(key) === -1) return '';
+  return `DeepSeek 的 API 模型名是 ${MODEL_ALIAS_TARGET}（V4.1-Flash 是它的宣传名）`;
+}
+
+/**
+ * 把 HTTP 失败翻译成**给用户看**的那句话（不含厂商原文、不含业务码）。
+ * 与 aiParse 的同名函数同源同口径；归类不出具体原因时返回 ''，由调用方用通用文案兜底。
+ */
+function userFacingHttpError(provider, status, bodyText, model) {
+  const body = String(bodyText === null || bodyText === undefined ? '' : bodyText);
+  const codeMatched = body.match(/"code"\s*:\s*"?([0-9A-Za-z_.-]{1,32})"?/);
+  const code = codeMatched ? codeMatched[1] : '';
+  const hasCode = (list) => !!code && (list || []).indexOf(code) !== -1;
+  const current = String(model === null || model === undefined ? '' : model).trim();
+  const advice = modelAliasAdvice(current);
+  const tail = advice ? `。${advice}` : '';
+
+  if (hasCode(provider && provider.modelMissingCodes) || status === 404
+    || /模型不存在|model not exist|model not found/i.test(body)) {
+    return `模型不存在：当前模型「${current}」这个模型名服务端不认，`
+      + '请到「我的 → AI 设置」检查模型名' + tail;
+  }
+  if (hasCode(provider && provider.quotaCodes) || status === 429) {
+    return 'AI 额度不足或请求过于频繁，请稍后重试；也可以到「我的 → AI 设置」检查你这个 Key 的额度';
+  }
+  if (hasCode(provider && provider.authCodes) || status === 401 || status === 403) {
+    return '你的 AI Key 无效或已过期，请到「我的 → AI 设置」检查或重新填写';
+  }
+  if (hasCode(provider && provider.paramCodes) || status === 400 || status === 422) {
+    return `请求参数有误（当前模型「${current}」）：请到「我的 → AI 设置」确认模型名与参数` + tail;
+  }
+  return '';
+}
+
 /** 云函数容器时区是 UTC，这里统一按北京时间（UTC+8）算「今天」 */
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 
@@ -645,7 +710,11 @@ async function chatCompletion(messages, jsonMode, temperature, options) {
   // 日志里的来源字样（只写这四个字，绝不写 Key 本身或它的前缀）
   const sourceLabel = source === 'user' ? '来源=用户自填' : '来源=服务端环境变量';
   // 用户自填 Key 失败 → 可操作文案；预置 Key 失败 → 统一文案
+  // 【分类得出的具体原因优先于通用 Key 文案】用户自填 Key 时，把"模型名写错"一律说成
+  // "你的 Key 无法使用"会把人带偏（真机踩过：他反复换 Key，问题在模型名）。
+  // 只有归类不出原因（超时 / 网络 / 返回不合法）时才回通用的那句。
   const failureMessage = source === 'user' ? USER_KEY_FAILED_MESSAGE : ERROR_MESSAGE;
+  const failureFor = (specific) => ((source === 'user' && specific) ? specific : failureMessage);
 
   const payload = {
     model, // 模型名来自白名单映射或用户设置，**不接受 event 里传的模型/地址**
@@ -687,7 +756,10 @@ async function chatCompletion(messages, jsonMode, temperature, options) {
   if (response.status !== 200) {
     const reason = describe(classifyHttpError(provider, response.status, response.text, model));
     console.error(`[aiDecompose] ${reason}`);
-    return { content: null, error: failureMessage, provider: provider.name, model, source, reason };
+    const specific = userFacingHttpError(provider, response.status, response.text, model);
+    return {
+      content: null, error: failureFor(specific), provider: provider.name, model, source, reason,
+    };
   }
 
   let data;
@@ -819,6 +891,11 @@ Object.assign(exports, {
   providerNames,
   chatEndpoint,
   classifyHttpError,
+  userFacingHttpError,
+  modelAliasAdvice,
+  aliasKeyOf,
+  MODEL_ALIAS_TARGET,
+  MODEL_ALIAS_KEYS,
   PROVIDERS,
   DEFAULT_PROVIDER,
   ENV_PROVIDER,

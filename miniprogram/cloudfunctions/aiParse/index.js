@@ -436,6 +436,83 @@ function classifyHttpError(provider, status, bodyText, model) {
 /** 星期几的中文名（下标 0 = 周一，与 Python date.weekday() 一致） */
 const WEEKDAY_CN = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 
+// ---------------------------------------------------------------------------
+// 模型名的"宣传名"纠正（真机踩过的坑）
+// ---------------------------------------------------------------------------
+/**
+ * 【会被误填的宣传名】归一化后的键（小写、去掉 . - _ 空格）→ 它真正对应的 API 模型名。
+ *
+ * 真机案例：用户在「我的 → AI 设置」的模型框里填了 `deepseek-V4.1-Flash`（DeepSeek 的宣传名），
+ * 服务端回"模型不存在"，而当时的文案却让他去查 Key —— 他反复换 Key，问题依旧。
+ * 所以：**先把名字改对**，再谈别的。
+ *
+ * 【为什么是"扁平数组 + 一个目标名"而不是对象】utils/tests 的一致性断言用
+ * "从源码文本里抽字符串数组"的办法把云侧/前端两张表对账（与 PROVIDERS 的名单同一套做法），
+ * 数组形式能被直接抽出来，对象不行。
+ *
+ * 【只写真的会失败的写法】大小写差异（GLM-5.3-Flash 之类）不提示 —— 那多半能正常调用，
+ * 提示了反而是噪音；没有把握的一律不写（不瞎猜）。
+ */
+const MODEL_ALIAS_TARGET = 'deepseek-flash';
+const MODEL_ALIAS_KEYS = [
+  'deepseekv41flash',   // deepseek-v4.1-flash / deepseek-V4.1-Flash / deepseek_v4_1_flash
+  'deepseekv41',        // deepseek-v4.1
+  'deepseekflashv41',   // deepseek-flash-v4.1
+  'v41flash',           // v4.1-flash
+];
+
+/** 归一化成"只看字母数字"的键：小写 + 去掉 . - _ 空格（分隔符写法因人而异） */
+function aliasKeyOf(model) {
+  return normalizeModelKey(model).replace(/[.\-_\s]/g, '');
+}
+
+/**
+ * 这个模型名是不是"宣传名"？是的话给一句纠正建议，否则返回 ''（**不瞎猜**）。
+ *
+ * @param {string} model 用户填的模型名
+ * @returns {string} '' = 没什么可说的；否则是一句给人看的建议
+ */
+function modelAliasAdvice(model) {
+  const key = aliasKeyOf(model);
+  if (!key || MODEL_ALIAS_KEYS.indexOf(key) === -1) return '';
+  return `DeepSeek 的 API 模型名是 ${MODEL_ALIAS_TARGET}（V4.1-Flash 是它的宣传名）`;
+}
+
+/**
+ * 把 HTTP 失败翻译成**给用户看**的那句话（不含厂商原文、不含业务码）。
+ *
+ * 与 classifyHttpError 的分工：
+ *   * classifyHttpError      → 日志用，允许带厂商细节（业务码、原文 message）
+ *   * userFacingHttpError    → 用户用，只说"哪一类问题 + 去哪儿改"，并尽量带上模型名
+ * 两条口径必须同源（同一个业务码集合），否则会出现"日志说模型不存在、界面说 Key 有问题"。
+ *
+ * @returns {string} '' = 归类不出具体原因（超时/网络/5xx 等），由调用方用通用文案兜底
+ */
+function userFacingHttpError(provider, status, bodyText, model) {
+  const body = toStr(bodyText);
+  const codeMatched = body.match(/"code"\s*:\s*"?([0-9A-Za-z_.-]{1,32})"?/);
+  const code = codeMatched ? codeMatched[1] : '';
+  const hasCode = (list) => !!code && (list || []).indexOf(code) !== -1;
+  const current = toStr(model);
+  const advice = modelAliasAdvice(current);
+  const tail = advice ? `。${advice}` : '';
+
+  if (hasCode(provider && provider.modelMissingCodes) || status === 404
+    || /模型不存在|model not exist|model not found/i.test(body)) {
+    return `模型不存在：当前模型「${current}」这个模型名服务端不认，`
+      + '请到「我的 → AI 设置」检查模型名' + tail;
+  }
+  if (hasCode(provider && provider.quotaCodes) || status === 429) {
+    return 'AI 额度不足或请求过于频繁，请稍后重试；也可以到「我的 → AI 设置」检查你这个 Key 的额度';
+  }
+  if (hasCode(provider && provider.authCodes) || status === 401 || status === 403) {
+    return '你的 AI Key 无效或已过期，请到「我的 → AI 设置」检查或重新填写';
+  }
+  if (hasCode(provider && provider.paramCodes) || status === 400 || status === 422) {
+    return `请求参数有误（当前模型「${current}」）：请到「我的 → AI 设置」确认模型名与参数` + tail;
+  }
+  return '';
+}
 /** 云函数容器时区是 UTC，这里统一按北京时间（UTC+8）算「今天」 */
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 
@@ -927,8 +1004,16 @@ async function chatCompletion(messages, jsonMode, temperature, options) {
   const source = config.source;
   // 日志里的来源字样（**只写这四个字，绝不写 Key 本身或它的前缀**）
   const sourceLabel = source === 'user' ? '来源=用户自填' : '来源=服务端环境变量';
-  // 用户自填 Key 失败时给"可操作"的文案，预置 Key 失败仍走统一文案
+  // 【用户自填 Key 的失败文案】分两档：
+  //   * 能被 classifyHttpError 归类（模型不存在 / 额度 / 参数 / 认证）→ 用户可见的就是**那句具体的**；
+  //   * 归类不了（超时 / 网络 / 返回不合法 / 内容为空）→ 才回通用的那句。
+  //
+  // 【为什么必须这样】真机上踩过：用户把 DeepSeek 的宣传名 `deepseek-V4.1-Flash` 填进模型框，
+  // 服务端回"模型不存在"，而我们一律显示「你填的 AI Key 无法使用」—— 于是他去反复换 Key，
+  // 而真正错的是模型名。**通用文案会把"参数错"误导成"凭证错"**，这是最贵的一类误导。
+  // 预置 Key 那条路径保持统一文案不变（用户对服务端预置的 Key 无能为力，说了也改不了）。
   const failureMessage = source === 'user' ? USER_KEY_FAILED_MESSAGE : ERROR_MESSAGE;
+  const failureFor = (specific) => ((source === 'user' && specific) ? specific : failureMessage);
 
   const payload = {
     model, // 模型名来自白名单映射或用户设置，**不接受 event 里传的模型/地址**
@@ -973,7 +1058,11 @@ async function chatCompletion(messages, jsonMode, temperature, options) {
     // 认证失败 / 额度不足 / 模型不存在 / 参数有误 各自成一条明确日志
     const reason = describe(classifyHttpError(provider, response.status, response.text, model));
     console.error(`[aiParse] ${reason}`);
-    return { content: null, error: failureMessage, provider: provider.name, model, source, reason };
+    // 用户可见的那句：归类得出具体原因就用它（不含厂商原文/业务码，见 userFacingHttpError）
+    const specific = userFacingHttpError(provider, response.status, response.text, model);
+    return {
+      content: null, error: failureFor(specific), provider: provider.name, model, source, reason,
+    };
   }
 
   let data;
@@ -1266,9 +1355,12 @@ function classifyVisionFailure(provider, status, bodyText, model) {
 
   if (hasCode(provider && provider.modelMissingCodes) || status === 404
     || /模型不存在|model not exist|model not found/i.test(toStr(bodyText))) {
+    // 模型名写错时，若它是"宣传名"，把正确写法一起给出来（真机踩过：用户填 deepseek-V4.1-Flash）
+    const advice = modelAliasAdvice(model);
     return {
       code: CODE_MODEL_MISSING,
-      error: `当前模型 ${toStr(model)} 不存在或不可用，请到「我的 → AI 设置」检查模型名（${suggestions}）`,
+      error: `当前模型 ${toStr(model)} 不存在或不可用，请到「我的 → AI 设置」检查模型名（${suggestions}）`
+        + (advice ? `。${advice}` : ''),
     };
   }
   if (hasCode(provider && provider.quotaCodes) || status === 429) {
@@ -2173,6 +2265,11 @@ Object.assign(exports, {
   providerNames,
   chatEndpoint,
   classifyHttpError,
+  userFacingHttpError,
+  modelAliasAdvice,
+  aliasKeyOf,
+  MODEL_ALIAS_TARGET,
+  MODEL_ALIAS_KEYS,
   PROVIDERS,
   DEFAULT_PROVIDER,
   ENV_PROVIDER,
