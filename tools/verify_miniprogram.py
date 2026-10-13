@@ -319,6 +319,48 @@ def main() -> int:
             tasks_src = fh.read()
         check("tasks 用 stripIdentity 剥离前端传入的身份字段", "stripIdentity" in tasks_src)
 
+    # 7b) 到期提醒「少点几次」的三条路 —— 静态红线
+    #     用户的原话是"为什么日程提醒要自己一个个手动申请啊，能不能全部放开"。
+    #     平台规则一条都改不了（一次性订阅 = 授权一次只能发一条、授权窗必须由用户的
+    #     点击行为触发、长期订阅只对特定行业类目开放），所以这三条路全都走在规则的缝里：
+    #       ① 一次补齐：点一下连弹到 3 条；② 勾过「总是保持以上选择」后静默补额度；
+    #       ③ 写进手机系统日历（不消耗微信额度、不限条数）。
+    #     缝里最容易越界，于是把最关键的几行钉死在这里；行为级断言在
+    #     utils/tests/subscribe.test.js 与 utils/tests/remind_page.test.js 里。
+    subscribe_js = os.path.join(root, "utils", "subscribe.js")
+    if os.path.exists(subscribe_js):
+        with open(subscribe_js, encoding="utf-8") as fh:
+            sub_src = fh.read()
+        with open(os.path.join(root, "pages", "me", "me.js"), encoding="utf-8") as fh:
+            me_page_src = fh.read()
+        with open(os.path.join(root, "pages", "me", "me.wxml"), encoding="utf-8") as fh:
+            me_page_wxml = fh.read()
+
+        check("静默补额度之前必过 canSilentTopUp 这道闸",
+              "canSilentTopUp(setting, tmplId)" in sub_src)
+        check("读订阅设置带了 withSubscriptions:true（不带就查不到订阅状态）",
+              "withSubscriptions: true" in sub_src)
+        check("静默那条路一轮只补 1 条（宁可少攒，不可虚报额度）",
+              re.search(r"return silentAllowed \? 1 : TOPUP_ROUND_MAX", sub_src) is not None)
+        check("只有平台回答 accept 才允许上报额度",
+              "answer.result !== 'accept'" in sub_src)
+        check("写手机日历走 wx.addPhoneCalendar（不耗微信额度那条路）",
+              "addPhoneCalendar" in sub_src)
+        check("日历与微信提醒同一判据：非 ddl 不写",
+              "toStr(task.type) !== 'ddl'" in sub_src)
+        check("日历同样跳过缺 end_time 的事项（不瞎猜 23:59）",
+              "'no-time'" in sub_src)
+        check("me 页把三条路都接上了（一次补齐 / 写日历 / 免打扰状态）",
+              all(k in me_page_wxml
+                  for k in ("onRemindTopUpRound", "onAddToCalendar", "remindSilentText")))
+        check("me 页不自己直接调 getSetting（统一走 utils/subscribe.js）",
+              "withSubscriptions" not in me_page_src)
+    else:
+        # 【缺文件必须自己报出来】静默跳过会让这一整段检查凭空消失（总数少了几条，
+        # 而输出全是 PASS）—— 这个脚本里已经踩过一次同款坑，见上面 6b 的注释。
+        check("utils/subscribe.js 就位（少点几次的三条路都在里面）", False,
+              "缺少 utils/subscribe.js：下面 9 条检查会被整体跳过")
+
     # 8) 交付卫生：临时/诊断脚本不能留在工程里
     scratch = []
     for base, dirs, files in os.walk(root):

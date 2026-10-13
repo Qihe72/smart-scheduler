@@ -26,6 +26,9 @@
 
 const api = require('../../utils/api.js');
 const periods = require('../../utils/periods.js');
+// 三点六（静默补额度 / 一次补齐 / 写进手机系统日历）的实现都在这个模块里：
+// 它只封装 wx 能力、不碰网络，所以能独立单测（utils/tests/subscribe.test.js）。
+const subscribe = require('../../utils/subscribe.js');
 
 // ---------------------------------------------------------------------------
 // utils/ics.js 是**并行开发中**的模块（不归本页维护，所以不主动创建它）。
@@ -735,6 +738,14 @@ Page({
     remindResultType: '',       // '' | 'ok' | 'warn'
     remindTestAvailable: false, // 能不能发测试提醒（模板配好 + 至少授权过）
 
+    // --- 三点六、"别让我一个个点"（utils/subscribe.js） ---
+    remindSilentAllowed: false, // 用户勾过「总是保持以上选择，不再询问」→ 再调用不弹窗，可静默补额度
+    remindSilentText: '',       // 上面这件事的说明（已开启自动补充 / 怎么勾才能免打扰）
+    remindTopUpLabel: '',       // 按钮文案：「一次补齐 3 次」/「补充 1 次（不会弹窗）」
+    remindTopUpBusy: false,     // 正在连弹授权窗（防连点）
+    remindCalBusy: false,       // 正在写手机系统日历
+    remindCalText: '',          // 写日历的结果：成功几条 + 其余几条为什么没写
+
     // --- 四、导入课表 ---
     icsAvailable: true,         // 解析器是否可用
     icsUnavailableText: '',
@@ -1212,6 +1223,8 @@ Page({
       syncGlobalSettings(result);
       wx.showToast({ title: '已保存', icon: 'success' });
       this.renderSemester(saved.semester_start || value);
+      // 这是用户的一次真实点击 → 顺手看看能不能静默补一次提醒额度（没勾"保持选择"的人不会被调用）
+      this.maybeSilentTopUp();
     }).catch((err) => {
       this.setData({ savingSemester: false });
       wx.showToast({ title: `保存失败：${describeError(err)}`, icon: 'none' });
@@ -1551,6 +1564,11 @@ Page({
         throw new Error(describeError(result));
       }
       this.applyRemindStatus(readRemindStatus(result));
+      // 顺手读一次"用户勾过『总是保持以上选择』没有" —— 它决定能不能静默补额度。
+      // 【为什么跟着状态一起读】模板 ID 刚拿到手（canSilentTopUp 要用它去查设置页），
+      // 而这件事只有本地一次 getSetting，不放这儿就得再找个时机。失败无所谓：
+      // refreshSubscribeSetting 内部一律按"没勾过"处理，也就是安全的那一侧。
+      this.refreshSubscribeSetting();
     }).catch((err) => {
       // 【为什么只是灰字】见 loadRemindStatus 上面的说明与文件头的第四条。
       this.setData({
@@ -1738,9 +1756,10 @@ Page({
       const patch = readRemindPatch(result);
       this.setData({
         remindBusy: false,
-        remindResultText: patch.capped
+        remindResultText: (patch.capped
           ? `已上报授权，但服务端额度已到上限（${patch.max_quota} 条），这次没有增加。`
-          : '已增加 1 次提醒机会（一次性订阅：授权一次只能收到一条提醒）。',
+          : '已增加 1 次提醒机会（一次性订阅：授权一次只能收到一条提醒）。')
+          + remindSilentGuide(this.data.remindSilentAllowed),
         remindResultType: 'ok',
       });
       toastText(patch.capped ? '额度已达上限' : '已增加 1 次提醒机会');
@@ -1756,6 +1775,204 @@ Page({
         remindResultType: 'warn',
       });
       toastText(`上报失败：${detail}`);
+    });
+  },
+
+  // =========================================================================
+  // 三点六、"别让我一个个点"：静默补额度 + 一次补齐 + 写进手机系统日历
+  // =========================================================================
+  // 【这一节解决什么】微信的规则一条都改不了（授权一次只能发一条、授权窗必须由用户的
+  // 点击行为触发、长期订阅只对特定类目开放 —— 见 utils/subscribe.js 文件头与
+  // docs/到期提醒.md）。但用户那句"我就是不想再一次一次点去了"是合理的诉求，所以：
+  //   1. `refreshSubscribeSetting` —— 判出用户勾没勾弹窗里的「总是保持以上选择，不再询问」。
+  //      勾过之后，再次调用**不会再弹窗**（官方文档：勾选后模板会出现在小程序设置页，
+  //      可用 getSetting 读状态），于是本页每一次点击都能顺手静默补 1 条。
+  //   2. `onRemindTopUpRound` —— 没勾过的人：点一下连弹到 3 条，不必来回找同一颗按钮
+  //      （每个授权窗仍然要各自点一次"允许"：那是微信的交互，我们替代不了）。
+  //   3. `onAddToCalendar` —— 两条都不想要的人：把截止事项写进**手机系统日历**，
+  //      不消耗微信额度、不限条数、离线也响。这才是真正意义的"全部放开"。
+
+  /**
+   * 读一次"用户勾过『总是保持以上选择，不再询问』没有"，并据此重画两张说明。
+   *
+   * 【失败一律按"没勾过"处理】那是安全的一侧：判不出来就不许静默调用，
+   * 于是绝不会因为一次读失败而给用户弹出意料之外的授权窗。
+   */
+  refreshSubscribeSetting() {
+    return subscribe.readSubscribeSetting().then((setting) => {
+      const allowed = subscribe.canSilentTopUp(setting, this.remindTemplateId);
+      const maxTimes = subscribe.maxTimesForRound(allowed);
+      this.setData({
+        remindSilentAllowed: allowed,
+        remindSilentText: allowed
+          ? '已开启自动补充：你在这页每点一次（保存作息、改提前量、写日历…），我都会顺手补 1 次额度，10 分钟最多一次，不用再惦记。'
+          : '想彻底不用点：下次授权弹窗里勾上「总是保持以上选择，不再询问」，之后我就能自动帮你补额度。'
+            + '（这个开关由微信弹窗提供，小程序改不了它，只能请你勾一次。）',
+        remindTopUpLabel: maxTimes === 1
+          ? '补充 1 次（不会弹窗）'
+          : `一次补齐 ${subscribe.TOPUP_ROUND_MAX} 次（少点两次）`,
+      });
+      return allowed;
+    });
+  },
+
+  /**
+   * 顺手静默补 1 条额度。
+   *
+   * 【三道闸，缺一不可】① 模板 ID 有了（没有就什么都没得谈）；② 用户勾过"保持以上选择"
+   * （否则这次调用会**弹窗**，那是打扰不是省心）；③ 距上次静默补充够 10 分钟
+   * （不然每点一次都调一次，等于刷）。任何一步不满足就直接返回，用户什么都感觉不到。
+   *
+   * 【为什么全程静默】这个动作不是用户点出来的（他点的是"保存作息"），
+   * 所以失败绝不能弹 toast —— 与 status 那次顺手读同一个道理（见本文件文件头第四条）。
+   */
+  maybeSilentTopUp() {
+    if (!this.remindTemplateId) return;
+    if (!this.data.remindSilentAllowed) return;
+    subscribe.silentTopUpOnce({
+      tmplId: this.remindTemplateId,
+      // 上报失败要**当成失败**：服务端没有额度，留一条"假的已授权"只会让下次下发 43101。
+      onAccept: () => remindAck(1).then((result) => {
+        if (!result || result.ok !== true) throw new Error(describeError(result));
+        return result;
+      }),
+    }).then((result) => {
+      if (!result || result.done !== true) return;
+      // 额度真的变了，安静地把卡片上的数字对齐服务端（silent：这一步失败也不再打扰）
+      this.loadRemindStatus({ silent: true });
+    }).catch((err) => {
+      console.warn('[me] 静默补额度失败（不影响使用）：', describeError(err));
+    });
+  },
+
+  /**
+   * 点「一次补齐」：连弹授权窗到 N 次，每次"允许"各上报 +1。
+   *
+   * 【N 是几：由"会不会弹窗"决定】没勾"保持以上选择"时 N=3（每个窗都有用户逐次同意的
+   * 记录，3 条就是 3 条真额度）；勾过之后 N=1 —— 静默调用只回一个 accept，
+   * 里面并没有"几次"这回事（勾选框能不能累积额度，官方文档没写、我们也没真机证据）。
+   * **宁可少攒，不可虚报**：虚报出来的额度在下发时必然 43101 失败，那是把用户的提醒玩坏。
+   *
+   * 【中途停下也要如实说】用户第 2 个窗点了拒绝、或第 2 次调用直接失败，
+   * 都要说清"补到了几次、为什么没继续"，不能只报一个成功数。
+   */
+  onRemindTopUpRound() {
+    if (this.data.remindTopUpBusy || this.data.remindBusy || this.data.remindLoading) return;
+    if (!this.remindTemplateId) {
+      this.promptRemindConfig();
+      return;
+    }
+
+    const maxTimes = subscribe.maxTimesForRound(this.data.remindSilentAllowed);
+    this.setData({ remindTopUpBusy: true, remindResultText: '', remindResultType: '' });
+
+    let added = 0;
+    let stopped = '';
+    let detail = '';
+
+    const step = (index) => {
+      if (index >= maxTimes) return Promise.resolve();
+      return subscribe.requestSubscribeOnce(this.remindTemplateId).then((answer) => {
+        if (answer.result !== 'accept') {
+          stopped = answer.result;
+          detail = answer.detail || '';
+          return null;
+        }
+        // 每一次"允许"各上报一次：count 恒为 1（一次授权只能发一条，报多了就是骗服务端）
+        return remindAck(1).then((result) => {
+          if (!result || result.ok !== true) throw new Error(describeError(result));
+          added += 1;
+          return step(index + 1);
+        });
+      });
+    };
+
+    step(0).then(() => {
+      const text = roundResultText(added, stopped, detail, this.data.remindSilentAllowed);
+      this.setData({
+        remindTopUpBusy: false,
+        remindResultText: text,
+        remindResultType: added > 0 ? 'ok' : 'warn',
+      });
+      toastText(added > 0 ? `已增加 ${added} 次提醒机会` : '这次没有增加额度');
+      // 额度/开关都变了，把卡片对齐服务端的真值（silent：失败不再打扰）
+      return this.loadRemindStatus({ silent: true });
+    }).catch((err) => {
+      // 报到一半失败：**已经补上的那几次是真的**，如实说，别让用户以为全丢了
+      const detailText = describeError(err);
+      this.setData({
+        remindTopUpBusy: false,
+        remindResultText: added > 0
+          ? `已增加 ${added} 次，但后面上报失败：${detailText}。剩下的请再点一次「补充」。`
+          : `上报失败：${detailText}。这次机会可能没记上，请再点一次。`,
+        remindResultType: 'warn',
+      });
+      toastText(`上报失败：${detailText}`);
+    });
+  },
+
+  /**
+   * 把**还没到期的截止事项**写进手机系统日历（不消耗微信提醒额度、不限条数）。
+   *
+   * 【为什么这条通道重要】微信那条路每发一条都要用户授权一次；日历这条路一次授权
+   * （scope.addPhoneCalendar）之后就一直能用，系统闹钟到点会响，断网也响。
+   * 对"我的截止事项必须有人提醒我"这个需求来说，它比订阅消息更可靠。
+   *
+   * 【口径与微信那条通道完全一致】只写 `type==='ddl'`、未完成、且**填了截止时刻**的
+   * 事项 —— 云函数的 dueInstantOf 就是这么判的（缺 end_time 一律跳过，"不瞎猜 23:59"）。
+   * 两条通道对同一条数据给出不同答案，比两条都不做还糟。
+   *
+   * 【重复点击不会写两份】写成功的键记在本地，下次默认跳过（见 utils/subscribe.js）。
+   */
+  onAddToCalendar() {
+    if (this.data.remindCalBusy) return;
+
+    if (!subscribe.calendarSupported()) {
+      const text = `当前微信版本不支持写系统日历（需要基础库 ${subscribe.CAL_MIN_SDK} 及以上，请先升级微信）。`;
+      this.setData({ remindCalText: text });
+      toastText('微信版本过低，写不了日历');
+      return;
+    }
+
+    this.setData({ remindCalBusy: true, remindCalText: '正在读取截止事项…' });
+
+    api.listTasks().then((result) => {
+      if (result && result.ok === false) throw new Error(describeError(result));
+      const tasks = extractTasks(result);
+      const built = subscribe.calendarEventsOf(tasks, {
+        leadMin: this.data.remindLeadMin,
+        skipKeys: subscribe.readWrittenKeys(),
+        max: subscribe.CAL_MAX_EVENTS,
+        // 【可注入的"现在"】与 pages/tasks 的 remindNowMs 同一约定：生产环境里它是 undefined
+        // （subscribe 内部回落到 Date.now()），单测钉死一个时刻，"哪些算过期"就与跑测试的机器日期无关。
+        nowMs: this.remindNowMs,
+      });
+
+      if (!built.events.length) {
+        // 【一条都写不了时必须说清"为什么"】否则用户只会认为这个按钮坏了
+        this.setData({ remindCalBusy: false, remindCalText: noCalendarText(built, tasks.length) });
+        toastText('没有可写入的截止事项');
+        return null;
+      }
+
+      return subscribe.addCalendarEvents(built.events, {
+        onEach: (progress) => {
+          this.setData({ remindCalText: `正在写入手机日历 ${progress.index} / ${progress.total}…` });
+        },
+      }).then((summary) => {
+        // 只把**真的写成功**的那些记下来（失败的下次还会再试）
+        subscribe.rememberWrittenKeys(summary.okIndexes.map((i) => built.events[i] && built.events[i].key));
+        this.setData({
+          remindCalBusy: false,
+          remindCalText: calendarSummaryText(summary, built, this.data.remindLeadText),
+        });
+        toastText(summary.added ? `已写入 ${summary.added} 条到手机日历` : '写入失败');
+        // 写日历是用户的一次点击 → 顺手看看能不能补一次额度（没勾"保持选择"的人不会被调用）
+        this.maybeSilentTopUp();
+      });
+    }).catch((err) => {
+      this.setData({ remindCalBusy: false, remindCalText: `写日历失败：${describeError(err)}` });
+      toastText(`写日历失败：${describeError(err)}`);
     });
   },
 
@@ -1804,6 +2021,8 @@ Page({
           remindResultType: 'ok',
         });
         toastText('已保存提前量');
+        // 用户点过 picker 了 → 顺手静默补一次额度（判定与节流都在 maybeSilentTopUp 里）
+        this.maybeSilentTopUp();
       });
     }).catch((err) => {
       this.setData({
@@ -1871,6 +2090,8 @@ Page({
         remindResultType: 'ok',
       });
       toastText('测试提醒已发出');
+      // 用户点过按钮了 → 顺手静默补一次额度（这是"以后不用管"的关键一步）
+      this.maybeSilentTopUp();
       return this.loadRemindStatus({ silent: true });
     }).catch((err) => {
       this.setData({
@@ -2340,6 +2561,11 @@ Page({
     readRemindStatus: readRemindStatus,
     readRemindPatch: readRemindPatch,
     subscribeErrorText: subscribeErrorText,
+    // 三点六 · "别让我一个个点"：静默补额度的引导 + 两个结果行（utils/tests/remind_page.test.js 用）
+    remindSilentGuide: remindSilentGuide,
+    roundResultText: roundResultText,
+    noCalendarText: noCalendarText,
+    calendarSummaryText: calendarSummaryText,
     REMIND_FUNCTION: REMIND_FUNCTION,
     REMIND_DOC: REMIND_DOC,
     REMIND_NO_TEMPLATE_TIP: REMIND_NO_TEMPLATE_TIP,
@@ -2664,6 +2890,89 @@ function subscribeErrorText(err) {
 }
 
 /**
+ * 授权成功后那句"以后怎么才能不用点"的引导。
+ *
+ * 【为什么放在结果行里，而不是在授权窗前弹一个提示】在授权窗前再弹一个"请记得勾选…"的
+ * 确认框，等于让用户为省事**先多点一次** —— 那正好违背这一节的目的。弹窗里那个勾选框由
+ * 微信提供，我们改不了它，只能在他点完一次之后把这句话说清楚（下一轮他就能顺手勾上）。
+ *
+ * @param {boolean} silentAllowed 用户是否已经勾过「总是保持以上选择，不再询问」
+ * @returns {string} 空串表示不需要再念一遍
+ */
+function remindSilentGuide(silentAllowed) {
+  if (silentAllowed) return '';
+  return '　想以后不用点：在这个弹窗里勾上「总是保持以上选择，不再询问」，之后我会自动帮你补额度。';
+}
+
+/**
+ * 「一次补齐」的结果行。四种情况必须说得出区别（用户看不到别的东西）：
+ * 全部补上 / 补了一部分就停 / 一个都没补上（拒绝、被封、调用失败）/ 没拿到结果。
+ *
+ * @param {number} added 真的上报成功的次数
+ * @param {string} stopped '' 表示没停下（全部成功）；否则是 reject/ban/fail/unknown
+ * @param {string} detail 失败时的原始原因（原样带上，不翻译成猜的语义）
+ * @param {boolean} silentAllowed 是否走的静默那条路（决定"弹了几次窗"这句怎么写）
+ * @returns {string}
+ */
+function roundResultText(added, stopped, detail, silentAllowed) {
+  const n = Math.max(0, Math.floor(Number(added) || 0));
+  if (n > 0 && !stopped) {
+    return silentAllowed
+      ? `一轮补齐完成：增加 ${n} 次提醒机会（已勾「保持以上选择」，全程没有弹窗）。`
+      : `一轮补齐完成：增加 ${n} 次提醒机会（微信一次授权只能发一条，所以弹了 ${n} 次窗）。`;
+  }
+  if (n > 0) {
+    const why = stopped === 'reject' ? `你在第 ${n + 1} 个窗点了拒绝`
+      : stopped === 'ban' ? '这个模板在微信那边被你拒过'
+        : stopped === 'fail' ? `授权窗没能弹出来${detail ? `（${detail}）` : ''}`
+          : `第 ${n + 1} 次没有拿到结果（${stopped || '空'}）`;
+    return `已增加 ${n} 次；${why}，剩下的没继续。`;
+  }
+  if (stopped === 'reject') return '你拒绝了授权，可以不授权，但这样到期时就收不到微信提醒了。';
+  if (stopped === 'ban') return '你之前拒绝了订阅消息，需要到微信「设置 → 订阅消息」里把本小程序打开，再回来点一次。';
+  if (stopped === 'fail') return `授权窗没能弹出来：${detail || '未知原因'}。`;
+  return `没有拿到授权结果（${stopped || '空'}），请再点一次试试。`;
+}
+
+/** 一条都写不进日历时，把"为什么"按原因列出来（否则用户只会觉得按钮坏了） */
+function noCalendarText(built, total) {
+  const skipped = (built && built.skipped) || {};
+  const reasons = [];
+  // 顺序 = 用户最可能遇到的原因排在前面
+  if (skipped.noTime) {
+    reasons.push(`${skipped.noTime} 条只填了日期、没填截止时刻（微信提醒那条路也一样跳过它，先去编辑页补个时间）`);
+  }
+  if (skipped.noDate) reasons.push(`${skipped.noDate} 条连日期都没有`);
+  if (skipped.invalid) reasons.push(`${skipped.invalid} 条的日期或时刻格式不对`);
+  if (skipped.past) reasons.push(`${skipped.past} 条已经过期了`);
+  if (skipped.already) reasons.push(`${skipped.already} 条之前已经写过（不重复写第二份）`);
+  if (skipped.done) reasons.push(`${skipped.done} 条已经做完了`);
+  if (skipped.notDdl) reasons.push(`${skipped.notDdl} 条不是「截止」类型（日程和子任务没有"到期"这个概念）`);
+  const head = total
+    ? `当前 ${total} 条任务里没有可以写进日历的截止事项`
+    : '当前还没有任务';
+  return reasons.length ? `${head}：${reasons.join('；')}。` : `${head}。`;
+}
+
+/** 写入完成后的结果行：成功几条 + 失败几条 + 其余几条为什么没写 */
+function calendarSummaryText(summary, built, leadText) {
+  const added = Math.max(0, Math.floor(Number(summary && summary.added) || 0));
+  const skipped = (built && built.skipped) || {};
+  const notes = [`已写入 ${added} 条到手机日历${leadText ? `，按「${leadText}」提前提醒` : ''}`];
+  if (summary && summary.failed) {
+    const auth = summary.authDenied
+      ? '：多半是你没允许「添加到日历」，去微信的「设置 → 授权管理」里打开再来一次'
+      : '';
+    notes.push(`有 ${summary.failed} 条没写成（${(summary && summary.firstError) || '未知原因'}）${auth}`);
+  }
+  if (skipped.noTime) notes.push(`另有 ${skipped.noTime} 条没填截止时刻，没写`);
+  if (skipped.already) notes.push(`${skipped.already} 条之前写过，已跳过`);
+  if (skipped.past) notes.push(`${skipped.past} 条已过期`);
+  if (built && built.truncated) notes.push(`一次最多写 ${subscribe.CAL_MAX_EVENTS} 条，其余的过一会儿再点一次`);
+  return `${notes.join('；')}。`;
+}
+
+/**
  * 到期提醒那几个纯函数也导出一份给单测（utils/tests/remind_page.test.js）。
  *
  * 【为什么页面文件也写 module.exports】小程序运行时会 `require` 页面文件、调用它里面的
@@ -2679,6 +2988,11 @@ module.exports = {
     readRemindStatus: readRemindStatus,
     readRemindPatch: readRemindPatch,
     subscribeErrorText: subscribeErrorText,
+    // 三点六 · "别让我一个个点"：静默补额度的引导 + 两个结果行（utils/tests/remind_page.test.js 用）
+    remindSilentGuide: remindSilentGuide,
+    roundResultText: roundResultText,
+    noCalendarText: noCalendarText,
+    calendarSummaryText: calendarSummaryText,
     REMIND_FUNCTION: REMIND_FUNCTION,
     REMIND_DOC: REMIND_DOC,
     REMIND_NO_TEMPLATE_TIP: REMIND_NO_TEMPLATE_TIP,

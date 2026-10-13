@@ -483,6 +483,14 @@ chain = chain.then(function () {
   // 这个文件钉住那次产品缺口的修复，并守住"补一节不许把别的作息冲掉"。
   var mePeriods = loadTest('me_periods.test.js');
   return waitFor(mePeriods);
+}).then(function () {
+  // 订阅授权"少点几次"（静默补额度 / 一次补齐 / 写系统日历）。
+  // 用户的真话："为什么日程提醒要自己一个个手动申请啊，能不能全部放开" —— 平台规则改不了，
+  // 这个文件钉住缝里的那几条红线：没勾「保持以上选择」时一次静默调用都不许发、
+  // 静默那条路一轮只补 1 条（宁可少攒不可虚报）、只有平台回 accept 才上报、
+  // 写日历的口径与微信提醒完全一致（缺 end_time 的 DDL 两边都不处理）。
+  var subscribeTest = loadTest('subscribe.test.js');
+  return waitFor(subscribeTest);
 });
 
 // ---------------------------------------------------------------------------
@@ -491,5 +499,5 @@ chain = chain.then(function () {
 chain.then(function () {
   console.log('\n已加载的测试文件：' + loaded.join(', '));
   if (skipped.length) console.log('未包含（文件不存在）：' + skipped.join(', '));
-  H.report('periods + planner + tasks + AI 契约 + AI 页入口 + 课表页空闲统计 + 我的页导入');
+  H.report('periods + planner + tasks + AI 契约 + AI 页入口 + 课表页空闲统计 + 我的页导入 + 订阅少点几次');
 });

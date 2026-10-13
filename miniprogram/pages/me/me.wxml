@@ -359,18 +359,53 @@
 
       <!-- 平台限制的解释 —— 少了这一行，用户会觉得"怎么又要授权"是 bug -->
       <view class="note">
-        <text class="note-strong">一次性订阅：授权一次只能收到一条提醒，多攒几次更保险。</text>
-        所以每点一次「补充授权」只会 +1 次，微信每次都会弹一次授权窗。
+        <text class="note-strong">一次性订阅：授权一次只能收到一条提醒。</text>
+        这是微信的规则（长期订阅只对特定类目开放，工具类申请不到），所以每点一次「补充授权」只会 +1 次。
+        下面的三条路能让你少点几次，甚至以后不用点。
       </view>
-      <view class="note" wx:if="{{remindReadFailed}}">
-        需要重试时下拉刷新本页即可。
+
+      <!-- ===================================================================
+           三点六、少点几次（三条路，按"省事程度"排）
+           1. 一次补齐     —— 点一下连弹到 3 条（每个授权窗仍要各点一次"允许"，那是微信的交互）
+           2. 勾选免打扰   —— 用户勾过「总是保持以上选择」后，本页任何一次点击都会静默补 1 次额度
+           3. 写系统日历   —— 不消耗微信额度、不限条数、离线也响（真正的"全部放开"）
+           =================================================================== -->
+      <view class="sub-title">少点几次</view>
+
+      <view class="btn-row">
+        <view
+          class="primary-btn {{(remindTopUpBusy || remindBusy || remindLoading) ? 'btn-disabled' : ''}}"
+          hover-class="primary-btn-hover"
+          bindtap="onRemindTopUpRound"
+        >{{remindTopUpLabel || '一次补齐 3 次（少点两次）'}}</view>
       </view>
+      <view class="note" wx:if="{{remindSilentText}}">{{remindSilentText}}</view>
+
+      <view class="btn-row">
+        <view
+          class="wide-btn {{remindCalBusy ? 'btn-disabled' : ''}}"
+          hover-class="wide-btn-hover"
+          bindtap="onAddToCalendar"
+        >{{remindCalBusy ? '正在写入…' : '把截止事项写进手机日历'}}</view>
+      </view>
+      <view class="note">
+        <text class="note-strong">这条路不消耗微信提醒次数，也没有条数限制。</text>
+        写进手机自带的日历后由系统闹钟提醒，断网也会响；第一次会问一次「添加到日历」权限，之后不再问。
+        只有填了截止时刻的「截止」事项能写 —— 与微信提醒那条通道的判定完全一致（没填时间的不会瞎猜）。
+      </view>
+      <view
+        class="result-line"
+        wx:if="{{remindCalText}}"
+      >{{remindCalText}}</view>
 
       <!-- 结果行：成功 / 失败 / 拒绝 / 未消耗额度，都如实写在这里 -->
       <view
         class="result-line {{remindResultType === 'warn' ? 'result-line-warn' : ''}}"
         wx:if="{{remindResultText}}"
       >{{remindResultText}}</view>
+      <view class="note" wx:if="{{remindReadFailed}}">
+        需要重试时下拉刷新本页即可。
+      </view>
 
       <view class="note">
         「发一条测试提醒」需要① 服务端配好了模板、② 你至少授权过一次；

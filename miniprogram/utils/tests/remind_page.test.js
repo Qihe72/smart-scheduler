@@ -52,6 +52,16 @@ var cloudHandler = null;
 /** 授权窗的返回：null = 正常弹；{ fail: {...} } = 调用就失败（不是用户拒绝） */
 var subscribeAnswer = null;
 
+// 【三点六新增】订阅设置 / 本地缓存 / 系统日历这三件事的桩状态。
+// 默认一律取**最保守**的那一侧：设置里没有任何模板（= 用户没勾过"保持以上选择"，
+// 于是静默补额度这条路必须一次都不调用）、缓存可用但为空、日历按成功返回。
+// 用例要别的行为就自己改这几个变量。
+var subscribeSetting = { subscriptionsSetting: { mainSwitch: true, itemSettings: {} } };
+var storageMap = {};
+var calendarCalls = [];
+var calendarFailsAt = -1;
+var calendarSupported = true;
+
 var savedWx = global.wx;
 var savedGetApp = global.getApp;
 
@@ -62,6 +72,11 @@ function useStub() {
   cloudHandler = null;
   subscribeAnswer = null;
   subscribed = [];
+  subscribeSetting = { subscriptionsSetting: { mainSwitch: true, itemSettings: {} } };
+  storageMap = {};
+  calendarCalls = [];
+  calendarFailsAt = -1;
+  calendarSupported = true;
 
   global.wx = {
     showToast: function (options) { toasts.push((options && options.title) || ''); },
@@ -80,6 +95,29 @@ function useStub() {
       ids.forEach(function (id) { res[id] = answer; });
       if (subscribeAnswer && subscribeAnswer.raw) res = subscribeAnswer.raw(ids[0]);
       if (options && typeof options.success === 'function') options.success(res);
+    },
+    // 【三点六】订阅设置：真实形状是 { subscriptionsSetting: { mainSwitch, itemSettings } }。
+    // 默认值是"设置页里没有任何模板" —— 也就是用户没勾过「总是保持以上选择，不再询问」。
+    getSetting: function (options) {
+      if (options && typeof options.success === 'function') options.success(subscribeSetting);
+    },
+    // 【三点六】本地缓存：节流（10 分钟一次）与"写过的日历不重复写"都靠它
+    getStorageSync: function (key) { return storageMap[key] === undefined ? '' : storageMap[key]; },
+    setStorageSync: function (key, value) { storageMap[key] = value; },
+    // 【三点六】写系统日历（wx.addPhoneCalendar 一次只能加一个事件）
+    canIUse: function (name) { return name === 'addPhoneCalendar' ? calendarSupported : true; },
+    addPhoneCalendar: function (options) {
+      var index = calendarCalls.length;
+      calendarCalls.push(options);
+      if (index === calendarFailsAt) {
+        if (options && typeof options.fail === 'function') {
+          options.fail({ errMsg: 'addPhoneCalendar:fail auth deny' });
+        }
+        return;
+      }
+      if (options && typeof options.success === 'function') {
+        options.success({ errMsg: 'addPhoneCalendar:ok' });
+      }
     },
     stopPullDownRefresh: function () {},
     navigateTo: function () {},
@@ -199,6 +237,8 @@ var served = {
   statusFails: false,
   acked: [],
   configs: [],
+  // 这一页要用的任务列表（"写进手机日历"这条链会去读它；其余用例用不到，默认空）
+  tasks: [],
 };
 
 function serveRemind(options) {
@@ -211,6 +251,7 @@ function serveRemind(options) {
   served.statusFails = !!o.statusFails;
   served.acked = [];
   served.configs = [];
+  served.tasks = Array.isArray(o.tasks) ? o.tasks : [];
   cloudCalls = [];
   subscribed = [];   // 每个场景自己数"弹了几次授权窗"
 
@@ -218,7 +259,7 @@ function serveRemind(options) {
     // me 页 onLoad 还会顺手拉一次任务列表（给"替换课表会删几门课"用）。
     // 这里一并服务它，免得那次请求落到"unexpected"分支、把断言搅浑。
     if (name === 'tasks' && data && data.action === 'list') {
-      return Promise.resolve({ ok: true, tasks: [], count: 0 });
+      return Promise.resolve({ ok: true, tasks: served.tasks, count: served.tasks.length });
     }
     if (name !== 'remind') return Promise.resolve({ ok: false, error: 'unexpected function: ' + name });
     var action = data && data.action;
@@ -900,6 +941,306 @@ function run() {
     eq(p.data.emptyText, '24 小时内没有要到期的截止事项', '并且给出正确的空态文案');
 
     // =====================================================================
+    // 12. 三点六 · 一次补齐：点一下连弹到 3 条（用户"不想一个个点"的正解之一）
+    // =====================================================================
+    block('me 页 · 少点几次 —— 一次补齐：连弹 3 次，每次"允许"各 +1');
+    serveRemind({ enabled: true, quota: 1 });
+    ctx.top1 = newPage(me);
+    ctx.top1.onLoad();
+    return settle(6);
+  }).then(function () {
+    var p = ctx.top1;
+    eq(p.data.remindTopUpLabel, '一次补齐 3 次（少点两次）', '没勾过保持选择 → 按钮说的是 3 次');
+    eq(subscribed.length, 0, '（基线）读状态不弹授权窗');
+    subscribeAnswer = null;                    // 用户在每一个窗里都点「允许」
+    p.onRemindTopUpRound();
+    return settle(14);
+  }).then(function () {
+    var p = ctx.top1;
+    eq(subscribed.length, 3, '**一次点击弹了 3 次授权窗**（不用来回找同一颗按钮）');
+    var acks = callsOf('ack');
+    eq(acks.length, 3, '每一次"允许"各上报一次');
+    eq(acks[0].data.count, 1, '每处 count 恒为 1（一次授权只能发一条）');
+    eq(acks[1].data.count, 1, '第二处也是 1');
+    eq(acks[2].data.count, 1, '第三处也是 1');
+    eq(p.data.remindQuota, 4, '额度 1 → 4（服务端返回的真值）');
+    isTrue(p.data.remindResultText.indexOf('增加 3 次') > -1,
+      '结果行如实报数：' + show(p.data.remindResultText));
+    isTrue(p.data.remindResultText.indexOf('弹了 3 次窗') > -1,
+      '并说明"为什么弹了 3 次"（平台限制那句话不能省）：' + show(p.data.remindResultText));
+    eq(p.data.remindTopUpBusy, false, 'busy 要收敛（否则按钮永远置灰）');
+
+    // ---- 中途拒绝：停下 + 如实报数（不许假装 3 条都成了）----
+    block('me 页 · 少点几次 —— 一次补齐：第 2 个窗被拒 → 停下并如实报数');
+    serveRemind({ enabled: true, quota: 0 });
+    ctx.top2 = newPage(me);
+    ctx.top2.onLoad();
+    return settle(6);
+  }).then(function () {
+    var p = ctx.top2;
+    var seen = 0;
+    subscribeAnswer = {
+      raw: function (id) {
+        seen += 1;
+        var res = { errMsg: 'requestSubscribeMessage:ok' };
+        res[id] = seen >= 2 ? 'reject' : 'accept';
+        return res;
+      },
+    };
+    p.onRemindTopUpRound();
+    return settle(14);
+  }).then(function () {
+    var p = ctx.top2;
+    eq(subscribed.length, 2, '**拒绝之后不再弹第 3 个窗**');
+    eq(callsOf('ack').length, 1, '只上报了"允许"的那 1 次');
+    isTrue(p.data.remindResultText.indexOf('已增加 1 次') > -1,
+      '结果行说你补到了 1 次：' + show(p.data.remindResultText));
+    isTrue(p.data.remindResultText.indexOf('拒绝') > -1,
+      '并说明是因为中间拒绝了：' + show(p.data.remindResultText));
+    eq(p.data.remindTopUpBusy, false, 'busy 收敛');
+    subscribeAnswer = null;
+
+    // ---- 勾过保持选择：只补 1 次（**不许虚报 3 条**）----
+    block('me 页 · 少点几次 —— 勾过保持选择：一次补齐只补 1 次（宁可少攒，不可虚报）');
+    serveRemind({ enabled: true, quota: 2 });
+    subscribeSetting = { subscriptionsSetting: { mainSwitch: true, itemSettings: { TPL_TEST_1: 'accept' } } };
+    ctx.top3 = newPage(me);
+    ctx.top3.onLoad();
+    return settle(6);
+  }).then(function () {
+    var p = ctx.top3;
+    eq(p.data.remindTopUpLabel, '补充 1 次（不会弹窗）', '按钮文案如实降级（不再是"3 次"）');
+    subscribed = [];
+    p.onRemindTopUpRound();
+    return settle(14);
+  }).then(function () {
+    var p = ctx.top3;
+    eq(subscribed.length, 1, '**只调用一次**（静默那条路没有"逐次同意"的凭据）');
+    eq(callsOf('ack').length, 1, '只上报 1 次');
+    eq(p.data.remindQuota, 3, '额度只 +1');
+    isTrue(p.data.remindResultText.indexOf('没有弹窗') > -1,
+      '结果行说明全程没有弹窗：' + show(p.data.remindResultText));
+
+    // =====================================================================
+    // 13. 三点六 · 静默补额度：勾过之后，"点别的按钮"就能顺手攒
+    // =====================================================================
+    block('me 页 · 少点几次 —— 勾过保持选择：点别的按钮时顺手补 1 次（不弹窗、不打扰）');
+    serveRemind({ enabled: true, quota: 1, leadMin: 60 });
+    subscribeSetting = { subscriptionsSetting: { mainSwitch: true, itemSettings: { TPL_TEST_1: 'accept' } } };
+    ctx.sil1 = newPage(me);
+    ctx.sil1.onLoad();
+    return settle(6);
+  }).then(function () {
+    var p = ctx.sil1;
+    isTrue(p.data.remindSilentAllowed, '读出了"用户勾过保持选择"这个状态');
+    isTrue(p.data.remindSilentText.indexOf('已开启自动补充') > -1,
+      '文案说明会自动补充：' + show(p.data.remindSilentText));
+    eq(subscribed.length, 0, '（基线）读状态本身不调用授权');
+    subscribed = [];
+    toasts = [];
+    // 用户改提前量（一次真实点击）→ 收尾时顺手补一次
+    p.onRemindLeadChange({ detail: { value: 1 } });    // 60 → 30 分钟
+    return settle(14);
+  }).then(function () {
+    var p = ctx.sil1;
+    eq(subscribed.length, 1, '**点击之后静默调用了一次**');
+    eq(callsOf('ack').length, 1, '平台回 accept → 上报 1 次');
+    eq(p.data.remindQuota, 2, '额度 +1');
+    eq(toasts.length, 1, '**只有"已保存提前量"那一条 toast**，静默补充不额外弹：' + show(toastsText()));
+    eq(lastToast(), '已保存提前量', '那条 toast 是这次点击本身的反馈');
+    // 节流：10 分钟内再点一次不再调用
+    subscribed = [];
+    p.onRemindLeadChange({ detail: { value: 2 } });    // 30 → 60 分钟
+    return settle(14);
+  }).then(function () {
+    eq(subscribed.length, 0, '**10 分钟内再点不会重复调用**（节流生效）');
+    eq(callsOf('ack').length, 1, '也没有多上报');
+    storageMap = {};   // 清掉节流记录，别影响后面的用例
+
+    // ---- 没勾过：一次静默调用都不许发 ----
+    block('me 页 · 少点几次 —— 没勾过保持选择：**一次静默调用都不许发**');
+    serveRemind({ enabled: true, quota: 1, leadMin: 60 });
+    subscribeSetting = { subscriptionsSetting: { mainSwitch: true, itemSettings: {} } };
+    ctx.sil2 = newPage(me);
+    ctx.sil2.onLoad();
+    return settle(6);
+  }).then(function () {
+    var p = ctx.sil2;
+    isFalse(p.data.remindSilentAllowed, '状态：没勾过');
+    isTrue(p.data.remindSilentText.indexOf('总是保持以上选择') > -1,
+      '文案告诉他怎么才能免打扰：' + show(p.data.remindSilentText));
+    eq(p.data.remindTopUpLabel, '一次补齐 3 次（少点两次）', '按钮文案仍是 3 次');
+    subscribed = [];
+    p.onRemindLeadChange({ detail: { value: 1 } });
+    return settle(14);
+  }).then(function () {
+    eq(subscribed.length, 0,
+      '**没勾过 → 一次都不调用**（那时调用会弹窗：用户没点却看到授权窗就是骚扰）');
+    eq(callsOf('ack').length, 0, '也没有上报');
+    storageMap = {};
+
+    // =====================================================================
+    // 14. 三点六 · 授权成功后的引导：告诉他"勾一次以后就不用点"
+    // =====================================================================
+    block('me 页 · 少点几次 —— 授权成功后教他勾那个框；已经勾过的人不再念');
+    serveRemind({ enabled: false, quota: 0 });
+    subscribeSetting = { subscriptionsSetting: { mainSwitch: true, itemSettings: {} } };
+    ctx.guide1 = newPage(me);
+    ctx.guide1.onLoad();
+    return settle(6);
+  }).then(function () {
+    subscribeAnswer = null;
+    ctx.guide1.onRemindEnable();
+    return settle(10);
+  }).then(function () {
+    var text = ctx.guide1.data.remindResultText;
+    isTrue(text.indexOf('总是保持以上选择') > -1, '**结果行里教他勾那个框**：' + show(text));
+    isTrue(text.indexOf('一次性订阅') > -1, '原来那句平台解释还在（没被顶掉）：' + show(text));
+
+    serveRemind({ enabled: true, quota: 1 });
+    subscribeSetting = { subscriptionsSetting: { mainSwitch: true, itemSettings: { TPL_TEST_1: 'accept' } } };
+    ctx.guide2 = newPage(me);
+    ctx.guide2.onLoad();
+    return settle(6);
+  }).then(function () {
+    subscribeAnswer = null;
+    ctx.guide2.onRemindEnable();
+    return settle(10);
+  }).then(function () {
+    isFalse(ctx.guide2.data.remindResultText.indexOf('总是保持以上选择') > -1,
+      '**已经勾过的人不再念这句**（他本来就做到了）：' + show(ctx.guide2.data.remindResultText));
+    isTrue(ctx.guide2.data.remindResultText.indexOf('一次性订阅') > -1,
+      '但平台解释照旧保留：' + show(ctx.guide2.data.remindResultText));
+
+    // =====================================================================
+    // 15. 三点六 · 写进手机系统日历（真正"全部放开"的那条路）
+    // =====================================================================
+    block('me 页 · 少点几次 —— 写进手机日历：只写"填了截止时刻的未完成截止事项"');
+    serveRemind({
+      enabled: true,
+      quota: 0,
+      tasks: [
+        task({ _id: 'c1', title: '交实验报告', date: '2026-10-20', end_time: '23:59' }),
+        task({ _id: 'c2', title: '没时刻的', date: '2026-10-21', end_time: '' }),
+        task({ _id: 'c3', title: '做完了', date: '2026-10-22', end_time: '10:00', done: true }),
+        task({ _id: 'c4', title: '过期了', date: '2026-10-01', end_time: '10:00' }),
+        task({ _id: 'c5', title: '一条日程', type: 'event', date: '2026-10-23', start_time: '08:00', end_time: '10:00' }),
+      ],
+    });
+    ctx.cal1 = newPage(me);
+    ctx.cal1.onLoad();
+    return settle(6);
+  }).then(function () {
+    var p = ctx.cal1;
+    p.remindNowMs = NOW_MS;      // 钉死"现在"（与 tasks 页同一约定），结果与机器日期无关
+    calendarCalls = [];
+    p.onAddToCalendar();
+    return settle(12);
+  }).then(function () {
+    var p = ctx.cal1;
+    eq(calendarCalls.length, 1, '**5 条里只写了 1 条**（只有它既填了时刻、又没完成、又没过期）');
+    eq(calendarCalls[0].title, '⏰ 截止：交实验报告', '标题带「⏰ 截止：」前缀（与 .ics 导出同一约定）');
+    eq(new Date(calendarCalls[0].startTime * 1000).toISOString(), '2026-10-20T15:59:00.000Z',
+      '**截止时刻按北京时间换算正确**（23:59 北京 = 15:59Z）');
+    eq(calendarCalls[0].alarmOffset, p.data.remindLeadMin * 60, '提前量用的就是页面上那个提前量');
+    isTrue(p.data.remindCalText.indexOf('已写入 1 条') > -1, '结果行报数：' + show(p.data.remindCalText));
+    isTrue(p.data.remindCalText.indexOf('没填截止时刻') > -1,
+      '并说明"有一条没填时刻、所以没写"：' + show(p.data.remindCalText));
+    isTrue(p.data.remindCalText.indexOf('过期') > -1, '以及"有一条已过期"：' + show(p.data.remindCalText));
+    eq(p.data.remindCalBusy, false, 'busy 收敛');
+    var written = storageMap['remind_calendar_written'] || [];
+    eq(written.length, 1, '把写成功的那条记进了防重复名单：' + show(written));
+
+    // ---- 点第二次：不写第二份 ----
+    block('me 页 · 少点几次 —— 写进手机日历：点第二次不会在日历里写第二份');
+    calendarCalls = [];
+    ctx.cal1.onAddToCalendar();
+    return settle(12);
+  }).then(function () {
+    eq(calendarCalls.length, 0, '**第二次点击一条都不写**（日历里不会出现重复条目）');
+    isTrue(ctx.cal1.data.remindCalText.indexOf('没有可以写进日历') > -1,
+      '结果行说清"这次没有可写的"：' + show(ctx.cal1.data.remindCalText));
+    isTrue(ctx.cal1.data.remindCalText.indexOf('之前已经写过') > -1,
+      '并指出原因：之前写过');
+
+    // ---- 一条都写不了：必须说清为什么 ----
+    block('me 页 · 少点几次 —— 写进手机日历：一条都写不了时说清"为什么"');
+    serveRemind({
+      enabled: false,
+      quota: 0,
+      tasks: [task({ _id: 'n1', title: '没时刻', date: '2026-10-21', end_time: '' })],
+    });
+    ctx.cal2 = newPage(me);
+    ctx.cal2.onLoad();
+    return settle(6);
+  }).then(function () {
+    var p = ctx.cal2;
+    p.remindNowMs = NOW_MS;
+    calendarCalls = [];
+    toasts = [];
+    p.onAddToCalendar();
+    return settle(12);
+  }).then(function () {
+    eq(calendarCalls.length, 0, '没有可写的 → 一次都不调用');
+    isTrue(ctx.cal2.data.remindCalText.indexOf('没填截止时刻') > -1,
+      '**把"为什么写不了"说清楚**（只说"失败"用户会以为按钮坏了）：' + show(ctx.cal2.data.remindCalText));
+    isTrue(lastToast().indexOf('没有可写入') > -1, '也给一句短 toast：' + show(toastsText()));
+
+    // ---- 基础库太低：明说，不静默 ----
+    block('me 页 · 少点几次 —— 写进手机日历：基础库太低 → 明说需要什么版本');
+    serveRemind({
+      enabled: false,
+      quota: 0,
+      tasks: [task({ _id: 'c9', date: '2026-10-20', end_time: '23:59' })],
+    });
+    calendarSupported = false;    // canIUse('addPhoneCalendar') 返回 false
+    ctx.cal3 = newPage(me);
+    ctx.cal3.onLoad();
+    return settle(6);
+  }).then(function () {
+    var p = ctx.cal3;
+    calendarCalls = [];
+    toasts = [];
+    p.onAddToCalendar();
+    return settle(4);
+  }).then(function () {
+    eq(calendarCalls.length, 0, '不支持 → 一次都不调用（不硬碰）');
+    isTrue(ctx.cal3.data.remindCalText.indexOf('基础库') > -1,
+      '说明需要的基础库版本：' + show(ctx.cal3.data.remindCalText));
+    isTrue(lastToast().indexOf('微信版本') > -1, '也给一句 toast：' + show(toastsText()));
+    calendarSupported = true;
+
+    // ---- 授权被拒：指向"设置 → 授权管理"，且不记进防重复名单 ----
+    block('me 页 · 少点几次 —— 写进手机日历：第一条就失败 → 立刻停 + 指出是权限问题');
+    serveRemind({
+      enabled: false,
+      quota: 0,
+      tasks: [
+        task({ _id: 'd1', title: '甲', date: '2026-10-20', end_time: '23:59' }),
+        task({ _id: 'd2', title: '乙', date: '2026-10-21', end_time: '23:59' }),
+      ],
+    });
+    ctx.cal4 = newPage(me);
+    ctx.cal4.onLoad();
+    return settle(6);
+  }).then(function () {
+    var p = ctx.cal4;
+    p.remindNowMs = NOW_MS;
+    calendarCalls = [];
+    calendarFailsAt = 0;          // 第一条就失败（模拟没允许「添加到日历」）
+    p.onAddToCalendar();
+    return settle(12);
+  }).then(function () {
+    var p = ctx.cal4;
+    eq(calendarCalls.length, 1, '**第一条失败就停**（后面几条必然同样失败，不必连着弹）');
+    isTrue(p.data.remindCalText.indexOf('授权管理') > -1,
+      '指向"设置 → 授权管理"：' + show(p.data.remindCalText));
+    var written = storageMap['remind_calendar_written'] || [];
+    isFalse(written.some(function (key) { return key.indexOf('d1@') === 0; }),
+      '**失败的那条没有被记进防重复名单**（下次还会再试）：' + show(written));
+    calendarFailsAt = -1;
+
+    // =====================================================================
     // 11. 静态自检（源码层面的红线）
     // =====================================================================
     block('remind 前端 —— 静态自检（不硬编码模板 ID / 不读错层级 / 不用对象展开）');
@@ -985,6 +1326,27 @@ function run() {
       '**页面上真的写了"授权一次只能收到一条提醒"**（不解释用户会以为功能坏了）');
     isTrue(meWxml.indexOf('{{remindReadyReason}}') > -1, 'ready_reason 被渲染出来了（服务端那句人话）');
     isTrue(meWxml.indexOf('{{remindQuotaText}}') > -1, '剩余次数被渲染出来了');
+
+    // ⑦ 三点六的三条路都真的接在页面上（少任何一条，用户又得一个个点）
+    isTrue(meWxml.indexOf('bindtap="onRemindTopUpRound"') > -1, '「一次补齐」按钮接的是 onRemindTopUpRound');
+    isTrue(meWxml.indexOf('bindtap="onAddToCalendar"') > -1, '「写进手机日历」按钮接的是 onAddToCalendar');
+    isTrue(meWxml.indexOf('remindTopUpLabel') > -1,
+      '按钮文案跟着状态走（静默时不许还写着"3 次"）');
+    isTrue(meWxml.indexOf('{{remindSilentText}}') > -1, '免打扰状态那行真的渲染出来了');
+    isTrue(meWxml.indexOf('不消耗微信提醒次数') > -1, '写日历那条路明说了"不消耗额度"');
+    isTrue(meSrc.indexOf('总是保持以上选择') > -1, '文案里明说了那个勾选框（免打扰的唯一开关）');
+    isTrue(meSrc.indexOf('this.maybeSilentTopUp()') > -1, '点击顺手补额度真的被接上了');
+    isFalse(meSrc.indexOf('withSubscriptions') > -1,
+      'me 页**不自己**直接调 getSetting（走 utils/subscribe.js，那边带着 withSubscriptions）');
+
+    // ⑧ 新模块那几条红线必须仍然写在源码里（有人"顺手删掉"这里就会红）
+    var subSrc = fs.readFileSync(path.join(ROOT, 'utils', 'subscribe.js'), 'utf8');
+    isTrue(subSrc.indexOf('canSilentTopUp(setting, tmplId)') > -1,
+      '静默补额度之前必须过 canSilentTopUp 这道闸');
+    isTrue(subSrc.indexOf('maxTimesForRound') > -1, '一次补齐的条数由 maxTimesForRound 决定');
+    isTrue(subSrc.indexOf('addPhoneCalendar') > -1, '写系统日历走 wx.addPhoneCalendar');
+    isTrue(subSrc.indexOf("toStr(task.type) !== 'ddl'") > -1,
+      '写日历那条路只认 ddl（与云函数 dueInstantOf 同一判据）');
     return null;
   });
 }
