@@ -422,16 +422,16 @@ python tools/verify_ics_cross.py
 
 它会用项目自己的 `exporter.py` 现生成一份 `.ics`、同时喂给两边、逐字段比对并打印结果（退出码 0 = 全一致）。另外 `miniprogram/utils/tests/ics.test.js` 把 Python 的实际输出抄成了期望值（文件头写明每条依据的 Python 行号），装了 node 就能单独跑，两边都能复跑，结论不必只凭这一句话。
 
-测试规模（装了 node 就能跑，零依赖、不联网；下面的数字是 2026-10-13 本机实跑的结果）：
+测试规模（装了 node 就能跑，零依赖、不联网；下面的数字是 2026-10-14 本机实跑的结果）：
 
 | 命令 | 结果 |
 |---|---|
-| `node miniprogram/utils/tests/run.js` | **2912 / 2912**（汇总入口，加载 13 个测试文件） |
+| `node miniprogram/utils/tests/run.js` | **2928 / 2928**（汇总入口，加载 13 个测试文件） |
 | `node miniprogram/utils/tests/planner.test.js` | 247 / 247 |
 | `node miniprogram/utils/tests/tasks.test.js` | 132 / 132 |
 | `node miniprogram/utils/tests/ics.test.js` | 196 / 196 |
 | `node miniprogram/utils/tests/ai_contract.js` | 225 / 225 |
-| `node miniprogram/utils/tests/ai_page.test.js` | 115 / 115 |
+| `node miniprogram/utils/tests/ai_page.test.js` | 131 / 131 |
 | `node miniprogram/utils/tests/ai_vision.test.js` | 475 / 475（识图：模型三态判定、入参校验、base64 不入日志、零网络闸门） |
 | `node miniprogram/utils/tests/edit_busy.test.js` | 83 / 83（占用提示与避让） |
 | `node miniprogram/utils/tests/me_import.test.js` | 142 / 142（导入与作息落库） |
@@ -562,6 +562,8 @@ AI Key 的两种配法（优先级：用户自填 > 程序预置 > 报「未配�
 | 11 | **有「午休」空档行的那天，「空闲 N 节」的分母是 12** | 不是 13。空档行不计入「空闲 N 节」，所以那一天的分母是 `13 − 1 = 12`，这是正确值，不是掉了一节课。容易误以为是 bug，所以写在这里 |
 | 12 | **"勾选『总是保持以上选择』之后能否累积额度"没有真机证据** | 官方文档只说了"勾选后模板会进小程序设置页、可用 `getSetting` 读状态"，**没有说**之后的每次静默调用是否仍然 +1 条下发额度。所以实现取了保守解（静默一轮只补 1 条）。30 秒验证法：点一次授权并在弹窗里勾上那个框 → 记下额度 → 再点一次「补充」——没弹窗且额度 +1 就说明能静默累积；额度不动就说明勾选只是"免打扰"，那就以写系统日历为主 |
 | 13 | **`wx.addPhoneCalendar` 没在真机上验证过** | 基础库 2.15.0+ 的版本判定、`scope.addPhoneCalendar` 的授权弹窗时机、`alarmOffset` 在 iOS/Android 上的实际触发，都按官方文档写；`canIUse` 判定与失败分支有单测覆盖，但"真机上确实写进了系统日历、到点真的响了"还没发生 |
+| 14 | **小程序版的 AI 功能依赖一个手动部署步骤：把云函数超时时间调大** | 微信云函数默认超时只有 **3 秒**，而模型回复通常要 3~15 秒（云函数内部本来就准备了文本 15 秒 / 识图 45 秒，根本没机会用上）。不改就会在真机上看到 `FUNCTIONS_TIME_LIMIT_EXCEEDED`（`-504003`）——**这是真实发生过的**。要在云开发控制台 → 云函数 → 把 `aiParse` / `aiDecompose` 的「超时时间」改成 20 秒。这属于**部署配置**，不是代码问题；`miniprogram/docs/部署云函数.md` 第 3 节有排查表。界面上遇到这种情况会把"去改超时时间"直接写给用户看，而不是甩一段英文报错 |
+| 15 | **重复只支持「不重复」与「每周重复」，没有「每天」** | 数据模型里 `repeat` 只有 `none` / `weekly` 两种（`weekly` 是给课程用的），所以"每天中午打卡"这类需求**建不出来**：手动页面的重复选项里没有"每天"，`.ics` 导入时 `FREQ=DAILY` 也会被明确当成"不支持"并给出警告（见 `utils/ics.js`，这是**有意**的取舍，不是漏了）。要在数据模型里加"每天"，牵动的是周视图渲染、占用统计、结课判定、`.ics` 双向与 AI 提示词一整条链，属于后续计划而不是这次赶出来的东西 |
 
 ---
 

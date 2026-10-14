@@ -547,6 +547,64 @@ function run() {
         '如实说明是"没能读到"，而不是假装支持/不支持：' + show(ctx.p9.data.visionHint));
       eq(ctx.p9.data.courses.length, 1, '任务列表照常可用（读配置失败不影响主流程）');
       return null;
+    })
+
+    // -----------------------------------------------------------------------
+    // 22. 平台级调用失败（云函数 3 秒超时）→ 必须翻译成人话
+    // -----------------------------------------------------------------------
+    // 真机现场（用户截图）：输入「我要每天中午13:10-13:20都进行学习打卡」，界面上直接
+    // 甩出一大段英文 —— `cloud.callFunction:fail Error: errCode: -504003 | errMsg:
+    // Invoking task timed out after 3 seconds … FUNCTIONS_TIME_LIMIT_EXCEEDED (trace: …)`。
+    // 那段字对用户等于零信息：他不知道 -504003 是什么，更不知道唯一能做的动作是
+    // **去控制台把云函数的超时时间调大**（默认只有 3 秒，而模型回复通常要 3~15 秒）。
+    // 这一节钉住这次翻译，以及"后端自己写的人话一个字都不许动"这条老约定。
+    .then(function () {
+      block('ai 页 —— 云函数 3 秒超时：翻译成"把超时时间改成 20 秒"，原话保留在句尾');
+      var T2 = registered.__test;
+      isTrue(!!T2 && typeof T2.explainAiFailure === 'function', '页面导出了 explainAiFailure（测的就是在用的那份）');
+      var timeoutErr = 'cloud.callFunction:fail Error: errCode: -504003 | errMsg: '
+        + 'Invoking task timed out after 3 seconds 更多错误信息请访问：'
+        + 'https://docs.cloudbase.net/error-code/basic/FUNCTIONS_TIME_LIMIT_EXCEEDED (trace: 22:49:2)';
+
+      var said = T2.explainAiFailure(timeoutErr, 'aiParse');
+      isTrue(said.indexOf('超时时间') > -1, '说清了要改的是「超时时间」：' + show(said.slice(0, 60)));
+      isTrue(said.indexOf('aiParse') > -1, '指名道姓说了改哪一个云函数（aiParse）');
+      isTrue(said.indexOf('20 秒') > -1, '给出具体数值（20 秒）');
+      isTrue(said.indexOf('FUNCTIONS_TIME_LIMIT_EXCEEDED') > -1,
+        '**原始报错保留在句尾**（译错方向时还能照着原话排查）');
+      isFalse(said.indexOf('cloud.callFunction:fail') === 0, '不再是一上来就甩平台原话');
+
+      isTrue(T2.explainAiFailure(timeoutErr, 'aiDecompose').indexOf('aiDecompose') > -1,
+        '换一个云函数调用 → 文案里跟着换名字（用户才知道去改哪个）');
+      isTrue(T2.explainAiFailure('cloud.callFunction:fail function not found', 'aiParse')
+        .indexOf('还没部署') > -1, '函数没部署 → 指到"右键上传并部署"');
+
+      // 【回归】后端自己写的人话必须原样透传（本页原有约定，不许被这层翻译吃掉）
+      eq(T2.explainAiFailure('AI 服务暂不可用', 'aiParse'), 'AI 服务暂不可用', '**后端的人话原样透传**');
+      eq(T2.explainAiFailure('网络异常', 'tasks'), '网络异常', '普通错误文案原样透传');
+      eq(T2.explainAiFailure('', 'aiParse'), '操作失败，请稍后重试', '空错误 → 一句兜底，不显示空白');
+      eq(T2.explainAiFailure(null, 'aiParse'), '操作失败，请稍后重试', 'null → 同样兜底');
+
+      // 端到端：真的让 aiParse 调用失败，看**页面上**显示什么
+      reset();
+      cloudHandler = function () { return Promise.reject({ errMsg: timeoutErr }); };
+      ctx.p10 = newPage();
+      ctx.p10.onLoad({});
+      return settle();
+    })
+    .then(function () {
+      ctx.p10.setData({ inputText: '我要每天中午13:10-13:20都进行学习打卡' });
+      ctx.p10.onParse();
+      return settle();
+    })
+    .then(function () {
+      var said = ctx.p10.data.parseError;
+      isTrue(said.indexOf('超时时间') > -1,
+        '**页面上显示的是"去把云函数的超时时间改成 20 秒"**，而不是那段英文：' + show(said.slice(0, 100)));
+      isTrue(said.indexOf('FUNCTIONS_TIME_LIMIT_EXCEEDED') > -1, '原始报错在界面上仍然看得到（排查要用）');
+      eq(ctx.p10.data.parsing, false, 'loading 要收敛（不能一直转圈）');
+      eq(ctx.p10.data.parsed, null, '没有解析结果就是没有，不许编一份出来');
+      return null;
     });
 }
 

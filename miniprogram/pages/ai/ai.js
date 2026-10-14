@@ -282,8 +282,8 @@ Page({
 
     api.aiParse(text).then(function (res) {
       if (!res.ok) {
-        // 【原样显示后端的 error】，不加工
-        self.setData({ parsing: false, parseError: res.error });
+        // 【后端那句 error 原样显示；平台级失败（超时/没部署）翻译成人话】见 explainAiFailure
+        self.setData({ parsing: false, parseError: explainAiFailure(res.error, 'aiParse') });
         return;
       }
 
@@ -366,7 +366,7 @@ Page({
     this.setData({ submitting: true, tip: '', tipType: '' });
     api.importParsedTasks(list).then(function (res) {
       if (!res.ok) {
-        self.setData({ submitting: false, tip: res.error, tipType: 'warn' });
+        self.setData({ submitting: false, tip: explainAiFailure(res.error, 'tasks'), tipType: 'warn' });
         return;
       }
       var data = res.data || {};
@@ -647,7 +647,7 @@ Page({
       period_times: global.periodTimes || null   // 用户已校准的作息（可空）
     }).then(function (res) {
       if (!res.ok) {
-        self.finishVision({ error: res.error });
+        self.finishVision({ error: explainAiFailure(res.error, 'aiParse') });
         return;
       }
       var data = res.data || {};
@@ -655,7 +655,7 @@ Page({
     }).catch(function (err) {
       // api.js 约定"永不 reject"，这条纯属兜底：任何意外都不能让页面卡在 loading 里
       console.error('[ai] 识图调用出现未预期异常：', err);
-      self.finishVision({ error: '识别失败：' + errorTextOf(err) });
+      self.finishVision({ error: '识别失败：' + explainAiFailure(errorTextOf(err), 'aiParse') });
     });
   },
 
@@ -791,7 +791,7 @@ Page({
 
     api.importReplace(list).then(function (res) {
       if (!res.ok) {
-        self.setData({ submitting: false, tip: '替换失败：' + res.error, tipType: 'warn' });
+        self.setData({ submitting: false, tip: '替换失败：' + explainAiFailure(res.error, 'tasks'), tipType: 'warn' });
         return;
       }
       // 平铺形状：{ ok, removed, inserted, skipped, duplicates, errors, partial }
@@ -882,7 +882,7 @@ Page({
 
     api.listTasks().then(function (res) {
       if (!res.ok) {
-        self.setData({ picking: false, decomposeError: res.error });
+        self.setData({ picking: false, decomposeError: explainAiFailure(res.error, 'tasks') });
         return;
       }
 
@@ -1011,8 +1011,8 @@ Page({
     var deadline = this.data.pickedDeadline || this.data.pickedDate;
     api.aiDecompose({ title: this.data.pickedTitle, date: deadline }).then(function (res) {
       if (!res.ok) {
-        // 同样原样显示后端的错误文案
-        self.setData({ decomposing: false, decomposeError: res.error });
+        // 后端自己写的人话原样显示；平台级的超时/未部署由 explainAiFailure 翻译
+        self.setData({ decomposing: false, decomposeError: explainAiFailure(res.error, 'aiDecompose') });
         return;
       }
       var data = res.data || {};
@@ -1113,7 +1113,9 @@ Page({
     isCourseTask: isCourseTask,
     mergePeriodTimes: mergePeriodTimes,
     mimeFromBase64: mimeFromBase64,
-    mimeFromPath: mimeFromPath
+    mimeFromPath: mimeFromPath,
+    // 平台级调用失败（超时 / 函数没部署）的人话翻译
+    explainAiFailure: explainAiFailure
   }
 });
 
@@ -1358,6 +1360,52 @@ function mimeFromPath(path) {
 function errorTextOf(err) {
   if (!err) return '未知原因';
   return String(err.message || err.errMsg || err);
+}
+
+/**
+ * **平台级调用失败** → 人话（注意：这不是后端自己写的那句 error，别搞混）。
+ *
+ * ===========================================================================
+ * 【为什么需要它】真机截图：用户输入「我要每天中午13:10-13:20都进行学习打卡」，
+ * 界面上直接甩出一大段英文 —— `cloud.callFunction:fail Error: errCode: -504003 |
+ * errMsg: Invoking task timed out after 3 seconds 更多错误信息请访问：
+ * https://docs.cloudbase.net/error-code/basic/FUNCTIONS_TIME_LIMIT_EXCEEDED (trace: …)`
+ * ===========================================================================
+ * 这句话对用户等于零信息：他不知道 -504003 是什么，更不知道唯一能做的动作是
+ * **把云函数的超时时间调大**。根因是平台默认的超时只有 3 秒，而模型回复通常要 3~15 秒
+ * （云函数内部本来就准备了 15 秒 / 识图 45 秒，根本没机会用上就被掐了）。
+ *
+ * 【为什么不像 me.js 那样翻译"未知 action"】那一类是我们自己的服务端文案，原样显示即可；
+ * 这里要处理的是**调用层**的失败（超时、函数没部署），它压根不是给人看的。
+ * 所以只认这两种平台签名，其余**一律原样返回** —— 后端写的「AI 服务暂不可用」这类
+ * 人话必须一个字都不动（这是本页原有的约定，改它属于越权）。
+ *
+ * 【原话必须保留在句尾】翻译最容易犯的错是把线索丢掉：以后真出别的问题时，
+ * 没有原始报错就没法排查。
+ *
+ * @param {string} errorText 调用失败时拿到的错误文案
+ * @param {string} fnName 这次调用的是哪个云函数（文案里要指名道姓，用户才知道去改哪一个）
+ * @returns {string} 给用户看的一句话
+ */
+function explainAiFailure(errorText, fnName) {
+  var raw = String(errorText === undefined || errorText === null ? '' : errorText).trim();
+  if (!raw) return '操作失败，请稍后重试';
+  var fn = String(fnName || '').trim() || 'aiParse';
+
+  // ① 被平台的超时时间掐断（云函数默认只有 3 秒）
+  if (/FUNCTIONS_TIME_LIMIT_EXCEEDED|Invoking task timed out|-504003|timed out after \d+ seconds/i.test(raw)) {
+    return 'AI 云函数还没跑完就被平台掐断了：微信云函数的超时时间默认只有 3 秒，'
+      + '而模型回复通常要 3~15 秒。请在云开发控制台 → 云函数 → `' + fn + '` → 配置 → '
+      + '把「超时时间」改成 20 秒（另一个 AI 云函数 `aiDecompose` 也一并改），然后再试一次。'
+      + '（平台原话：' + raw + '）';
+  }
+  // ② 云函数根本没部署到这个云环境
+  if (/FUNCTION_NOT_FOUND|function not found|FunctionName parameter could not be found/i.test(raw)) {
+    return '云函数 `' + fn + '` 还没部署到你的云环境：在微信开发者工具里右键 `cloudfunctions/' + fn
+      + '` → 「上传并部署：云端安装依赖」，然后重试。（平台原话：' + raw + '）';
+  }
+  // ③ 其余原样返回（后端自己写的 error 本来就是给人看的人话）
+  return raw;
 }
 
 /** 中文优先级 → 标签样式类（复用 app.wxss 里的 .tag-high/.tag-mid/.tag-low） */
