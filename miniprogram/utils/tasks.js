@@ -51,6 +51,8 @@ var PRIORITY_LABELS = periods.PRIORITY_LABELS;    // { high:'高', mid:'中', lo
 
 var REPEAT_NONE = periods.REPEAT_NONE;            // 'none'
 var REPEAT_WEEKLY = periods.REPEAT_WEEKLY;        // 'weekly'
+var REPEAT_DAILY = periods.REPEAT_DAILY;          // 'daily'（打卡 / 习惯；含周末）
+var ALL_REPEATS = periods.ALL_REPEATS;            // ['none','weekly','daily']（校验报错时列全）
 
 var PARITY_ALL = periods.PARITY_ALL;              // 'all'
 var PARITY_ODD = periods.PARITY_ODD;              // 'odd'
@@ -207,18 +209,20 @@ function minutesOfTime(hhmm) {
 // 二、三种状态：待办 / 已完成 / 已结课
 // ---------------------------------------------------------------------------
 
-/** 归一化"重复方式"：认不出来按不重复（与 normalize.js 一致） */
+/**
+ * 归一化"重复方式"：认不出来按不重复。
+ *
+ * 【为什么直接委托给 periods】这里曾经自己写了一份 `text === 'weekly' ? weekly : none`。
+ * 加"每天"时只改了 periods，这一份漏了 —— 结果界面能选每天、云端也能存，
+ * **本地归一化却把它抹成单次**（保存完变成"不重复"）。判据只能有一份。
+ */
 function normalizeRepeat(value) {
-  var text = toStr(value).toLowerCase();
-  return text === REPEAT_WEEKLY ? REPEAT_WEEKLY : REPEAT_NONE;
+  return periods.normalizeRepeat(value);
 }
 
-/** 归一化"单双周"：认不出来按每周 */
+/** 归一化"单双周"：认不出来按每周（同上：直接委托，不抄第二份） */
 function normalizeParity(value) {
-  var text = toStr(value).toLowerCase();
-  if (text === PARITY_ODD) return PARITY_ODD;
-  if (text === PARITY_EVEN) return PARITY_EVEN;
-  return PARITY_ALL;
+  return periods.normalizeParity(value);
 }
 
 /** 这条任务是否被**手动**标记完成（done 为真） */
@@ -499,11 +503,13 @@ function normalizeTask(raw, options) {
   var weekStart = null;
   var weekEnd = null;
   var parity = PARITY_ALL;
-  if (repeat === REPEAT_WEEKLY) {
+  // 【每周与每天共用周次这一段】两种重复都要"第几周到第几周"，区别只在"哪天算数"
+  // （见 periods.taskOccursOn）；单双周只对每周重复有意义。
+  if (repeat === REPEAT_WEEKLY || repeat === REPEAT_DAILY) {
     weekStart = normalizeWeek(raw.week_start, MIN_WEEK);
     weekEnd = normalizeWeek(raw.week_end, DEFAULT_WEEK_END);
     if (weekEnd < weekStart) weekEnd = weekStart;
-    parity = normalizeParity(raw.week_parity);
+    if (repeat === REPEAT_WEEKLY) parity = normalizeParity(raw.week_parity);
   }
 
   // --- 白名单外的键一律拒绝（含 _id / _openid / created_at / updated_at） ---
@@ -600,8 +606,8 @@ function pickPatch(patch) {
     }
     if (key === 'repeat') {
       var repeat = toStr(value).toLowerCase();
-      if (repeat !== REPEAT_NONE && repeat !== REPEAT_WEEKLY) {
-        errors.push('repeat 只能是 ' + REPEAT_NONE + ' / ' + REPEAT_WEEKLY);
+      if (repeat !== REPEAT_NONE && repeat !== REPEAT_WEEKLY && repeat !== REPEAT_DAILY) {
+        errors.push('repeat 只能是 ' + ALL_REPEATS.join(' / '));
       } else clean.repeat = repeat;
       return;
     }
@@ -627,15 +633,17 @@ function pickPatch(patch) {
     rejected.push(key); // 理论上到不了这里，保险起见
   });
 
-  // repeat 改成 none 时顺手清空周次；改成 weekly 时补默认周次（与云端一致）
+  // repeat 改成 none 时顺手清空周次；改成 weekly / daily 时补默认周次（与云端一致）
   if (clean.repeat === REPEAT_NONE) {
     clean.week_start = null;
     clean.week_end = null;
     clean.week_parity = PARITY_ALL;
-  } else if (clean.repeat === REPEAT_WEEKLY) {
+  } else if (clean.repeat === REPEAT_WEEKLY || clean.repeat === REPEAT_DAILY) {
     if (clean.week_start === undefined || clean.week_start === null) clean.week_start = MIN_WEEK;
     if (clean.week_end === undefined || clean.week_end === null) clean.week_end = DEFAULT_WEEK_END;
     if (clean.week_end < clean.week_start) clean.week_end = clean.week_start;
+    // 单双周只对每周重复有意义：改成每天时归 all，免得留下"每天、但只在单周"这种脏状态
+    if (clean.repeat === REPEAT_DAILY) clean.week_parity = PARITY_ALL;
   }
 
   return { patch: clean, errors: errors, rejected: rejected };

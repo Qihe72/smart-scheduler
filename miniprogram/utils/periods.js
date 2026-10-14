@@ -51,7 +51,14 @@ var PRIORITY_ORDER = { high: 0, mid: 1, low: 2 };
 
 var REPEAT_NONE = 'none';
 var REPEAT_WEEKLY = 'weekly';
-var ALL_REPEATS = [REPEAT_NONE, REPEAT_WEEKLY];
+/**
+ * 每天重复（打卡 / 习惯类）。
+ *
+ * 【含周末】"每天"就是周一到周日**七天都算**，不区分工作日 —— 用户提需求时特意说了
+ * "每周末也都要有这个日程"。想只要工作日属于另一种重复方式（`weekdays`），现在不做。
+ */
+var REPEAT_DAILY = 'daily';
+var ALL_REPEATS = [REPEAT_NONE, REPEAT_WEEKLY, REPEAT_DAILY];
 var REPEAT_LABELS = { none: '不重复', weekly: '每周重复（课程）' };
 
 var PARITY_ALL = 'all';
@@ -686,9 +693,10 @@ function parseWeekSpec(text) {
 
 /** 归一化"重复方式"：认不出来按不重复处理（与 normalize.js 的容错一致）。 */
 function normalizeRepeat(value) {
-  return String(value === null || value === undefined ? '' : value).trim().toLowerCase() === REPEAT_WEEKLY
-    ? REPEAT_WEEKLY
-    : REPEAT_NONE;
+  var text = String(value === null || value === undefined ? '' : value).trim().toLowerCase();
+  if (text === REPEAT_WEEKLY) return REPEAT_WEEKLY;
+  if (text === REPEAT_DAILY) return REPEAT_DAILY;
+  return REPEAT_NONE;
 }
 
 /** 归一化"单双周"：认不出来按每周处理。 */
@@ -712,15 +720,20 @@ function daySerial(dateStr) {
 }
 
 /**
- * 这门课在这一天到底上不上？对应 Python 版 schedule_manager 里的 occurs_on()。
+ * 这条任务在这一天到底发生不发生？对应 Python 版 schedule_manager 里的 occurs_on()。
+ *
+ * **这是全项目唯一的"哪天算数"判据**：周视图把它逐列调用（week.js 的 taskOnDate）、
+ * 占用与空闲统计也调用它（planner.js:511 的注释就写着"让每个页面自己先筛一遍容易长出
+ * 第二套口径"）。所以加一种重复方式只需要改这一处，两边不会各算一套。
  *
  * 判断顺序（任一步不满足就返回 false）：
- *   1. 不是每周重复 → 只有 date 与 dateStr 是同一天才成立；
- *   2. 星期几要和锚点日期的星期几一致；
- *   3. 不能早于锚点日期（第一次上课之前当然没有课）；
- *   4. 算不出周次（学期开始日期没设置 / 在开学之前）→ **宁可显示也不漏课**，返回 true；
- *   5. 周次必须落在 [week_start, week_end] 内；
- *   6. 单双周要匹配（单周课只在奇数周上）。
+ *   1. 不是重复类 → 只有 date 与 dateStr 是同一天才成立；
+ *   2. **重复类（每周 / 每天）都要有锚点日期**：它既是"第一次发生的那天"，也是周几的来源；
+ *   3. 不能早于锚点日期（第一次上课 / 第一次打卡之前当然没有）；
+ *   4. **每周重复**要求周几一致；**每天重复不看周几**（周一到周日七天都算，含周末）；
+ *   5. 算不出周次（学期开始日期没设置 / 在开学之前）→ **宁可显示也不漏**，返回 true；
+ *   6. 周次必须落在 [week_start, week_end] 内（**每周与每天共用这一段口径**）；
+ *   7. 单双周只对每周重复有意义（每天重复直接放行）。
  *
  * @param {Object} task 任务对象（云数据库里那一条）
  * @param {string} dateStr 要判断的日期 "YYYY-MM-DD"
@@ -733,32 +746,38 @@ function taskOccursOn(task, dateStr, semesterStart) {
   var day = parseDate(dateStr);
   if (!day) return false;
 
+  var repeat = normalizeRepeat(task.repeat);
+
   // 1. 不重复：只有那一天算数
-  if (normalizeRepeat(task.repeat) !== REPEAT_WEEKLY) {
+  if (repeat === REPEAT_NONE) {
     var anchorOnly = parseDate(task.date);
     return !!anchorOnly && dayIndex(anchorOnly) === dayIndex(day);
   }
 
+  // 2. 重复类必须有锚点日期
   var anchor = parseDate(task.date);
-  if (!anchor) return false; // 每周重复却没有锚点日期 → 无法判断周几，当作不上
+  if (!anchor) return false; // 没有锚点就不知道从哪天开始，当作不发生
 
-  // 2. 周几要一致（date 是这门课第一次上课的那天）
-  if (weekdayOf(anchor) !== weekdayOf(day)) return false;
-
-  // 3. 第一次上课之前没有课
+  // 3. 锚点之前不发生
   if (daySerial(day) < daySerial(anchor)) return false;
 
-  // 4. 周次算不出来（没设开学日期 / 在开学之前）时不过滤，避免整张课表变空
+  // 4. 每周重复要求周几一致；每天重复不看周几
+  if (repeat === REPEAT_WEEKLY && weekdayOf(anchor) !== weekdayOf(day)) return false;
+
+  // 5. 周次算不出来时不过滤，避免整张课表变空
   var weekNo = weekNumberOf(dateStr, semesterStart);
   if (weekNo === null) return true;
 
-  // 5. 周次范围：缺省 start=1、end=20（与 normalize.js 的默认值一致）
+  // 6. 周次范围：缺省 start=1、end=20（与 normalize.js 的默认值一致）
+  //    【每周与每天共用这一段】两种重复只在"哪天算数"上不同，周次口径必须一模一样 ——
+  //    各写一套正是"两个页面给出不同答案"那类 bug 的来源（README 8.2 节）。
   var weekStart = weekWithinTerm(task.week_start);
   var weekEnd = weekWithinTerm(task.week_end);
   if (weekStart !== null && weekNo < weekStart) return false;
   if (weekEnd !== null && weekNo > weekEnd) return false;
 
-  // 6. 单双周
+  // 7. 单双周只对每周重复有意义（"每天，但只在单周"是自相矛盾的需求，不给它开口子）
+  if (repeat === REPEAT_DAILY) return true;
   var parity = normalizeParity(task.week_parity);
   if (parity === PARITY_ALL) return true;
   return weekParity(weekNo) === parity;
@@ -824,7 +843,13 @@ module.exports = {
   PRIORITY_ORDER: PRIORITY_ORDER,
   REPEAT_NONE: REPEAT_NONE,
   REPEAT_WEEKLY: REPEAT_WEEKLY,
+  REPEAT_DAILY: REPEAT_DAILY,
   ALL_REPEATS: ALL_REPEATS,
+  // 【归一化也只留一份】utils/tasks.js 曾经自己抄了一份只认 none/weekly 的 normalizeRepeat，
+  // 加"每天"时漏了它 —— 界面能选、云端能存，**本地归一化却把 daily 抹成单次**，
+  // 表现是"选了每天，保存后变成不重复"。判据只能有一份，所以在这里导出。
+  normalizeRepeat: normalizeRepeat,
+  normalizeParity: normalizeParity,
   REPEAT_LABELS: REPEAT_LABELS,
   PARITY_ALL: PARITY_ALL,
   PARITY_ODD: PARITY_ODD,

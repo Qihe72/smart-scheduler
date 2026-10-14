@@ -672,13 +672,17 @@ function estimateText(minutes) {
   return `≈${text} 小时`;
 }
 
-/** 重复方式的短描述：每周重复的课显示「每周 · 1-16周 · 单周」 */
+/** 重复方式的短描述：每周的课显示「每周 · 1-16周 · 单周」，每天重复显示「每天 · 1-20周」 */
 function repeatText(task) {
-  if (str(task.repeat) !== 'weekly') return '';
+  const repeat = str(task.repeat);
   const start = Number(task.week_start);
   const end = Number(task.week_end);
+  const hasWeeks = Number.isFinite(start) && Number.isFinite(end);
+  // 每天重复（打卡 / 习惯）：不含单双周 —— 它对每天没有意义（见 periods.taskOccursOn）
+  if (repeat === 'daily') return hasWeeks ? `每天 · ${start}-${end}周` : '每天';
+  if (repeat !== 'weekly') return '';
   const parts = ['每周'];
-  if (Number.isFinite(start) && Number.isFinite(end)) parts.push(`${start}-${end}周`);
+  if (hasWeeks) parts.push(`${start}-${end}周`);
   const parity = str(task.week_parity);
   if (parity === 'odd') parts.push('单周');
   else if (parity === 'even') parts.push('双周');

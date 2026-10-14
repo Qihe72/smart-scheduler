@@ -221,7 +221,8 @@
         </picker>
       </view>
 
-      <block wx:if="{{isWeekly}}">
+      <!-- 周次对「每周」和「每天」都有意义（每天 = 第 X ~ Y 周里每天都发生） -->
+      <block wx:if="{{isRepeating}}">
         <view class="field">
           <text class="label">起始周</text>
           <picker
@@ -248,21 +249,24 @@
           </picker>
         </view>
 
-        <view class="field">
-          <text class="label">单双周</text>
-          <picker
-            class="control"
-            mode="selector"
-            range="{{parities}}"
-            range-key="label"
-            value="{{parityIndex}}"
-            bindchange="onParityChange"
-          >
-            <view class="picker-view">{{parities[parityIndex].label}}</view>
-          </picker>
-        </view>
+        <!-- 单双周只对「每周重复」有意义：每天重复时"只在单周打卡"自相矛盾，直接不显示 -->
+        <block wx:if="{{isWeekly}}">
+          <view class="field">
+            <text class="label">单双周</text>
+            <picker
+              class="control"
+              mode="selector"
+              range="{{parities}}"
+              range-key="label"
+              value="{{parityIndex}}"
+              bindchange="onParityChange"
+            >
+              <view class="picker-view">{{parities[parityIndex].label}}</view>
+            </picker>
+          </view>
+        </block>
 
-        <view class="hint-line">这门课会上 {{weekRangeText}}；周视图按这个范围显示。</view>
+        <view class="hint-line">{{repeatHintText}}</view>
       </block>
     </view>
 

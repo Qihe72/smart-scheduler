@@ -470,12 +470,52 @@ H.block('七、空输入 / 烂输入：一律走 warnings，绝不抛异常（im
   H.eq(noFreq.events[0].dates.length, 1, '没有 FREQ → 只当一次');
   H.isTrue(noFreq.warnings.join('|').indexOf('没有 FREQ') !== -1, '没有 FREQ 有说明');
 
-  // 不支持的 FREQ（本项目只做 WEEKLY）
+  // FREQ=DAILY：**现在支持**（每天重复 / 打卡）。
+  //   刻意**不展开成 N 条**：一天的数据 + repeat='daily' 就够表达"每天"，
+  //   展开成 30 条任务既浪费又会出现"删一条还剩 29 条"的尴尬。
   var daily = ics.parseIcs(cal(vevent({
     summary: '每天', start: 'DTSTART:20260907T080000', end: 'DTEND:20260907T084500', rrule: 'FREQ=DAILY;COUNT=3',
   })));
-  H.eq(daily.events[0].dates.length, 1, 'FREQ=DAILY 不支持 → 当单次');
-  H.isTrue(daily.warnings.join('|').indexOf('FREQ=DAILY') !== -1, '不支持的 FREQ 有说明');
+  H.eq(daily.events[0].dates.length, 1, '**FREQ=DAILY 只展开出一天**（"每天"由 repeat 表达）');
+  H.eq(daily.events[0].repeat, 'daily', '事件被标成 daily');
+  H.isFalse(daily.warnings.join('|').indexOf('不支持') !== -1,
+    '**不再报"不支持"**（它已经是支持的了）: ' + daily.warnings.join(' | '));
+  var dailyTasks = ics.toTasks(daily.events, { semesterStart: '2026-09-07' });
+  H.eq(dailyTasks.length, 1, 'FREQ=DAILY → **一条任务**（不是 3 条）');
+  H.eq(dailyTasks[0].repeat, 'daily', "落库的 repeat = 'daily'");
+  H.eq(dailyTasks[0].date, '2026-09-07', '锚点 = 第一次发生的那天');
+  H.eq(dailyTasks[0].week_start, 1, '起始周 1');
+  H.eq(dailyTasks[0].week_end, 20, '没给 UNTIL → 默认整学期 20 周');
+  H.eq(dailyTasks[0].week_parity, 'all', '单双周一律 all（每天不参与单双周）');
+
+  // UNTIL 给了就用它算结束周。**注意 UNTIL 是 UTC**（本文件开头就写着"否则会少算一周"）：
+  //   学期起点 09-07（周一）→ 第 1 周 09-07~09-13、第 2 周 09-14~09-20、第 3 周 09-21~09-27。
+  //   UNTIL=20260927T000000Z → 北京时间 09-27 08:00 → 落在第 3 周。
+  var dailyUntil = ics.parseIcs(cal(vevent({
+    summary: '打卡到第三周', start: 'DTSTART:20260907T080000', end: 'DTEND:20260907T084500',
+    rrule: 'FREQ=DAILY;UNTIL=20260927T000000Z',
+  })));
+  var dailyUntilTasks = ics.toTasks(dailyUntil.events, { semesterStart: '2026-09-07' });
+  H.eq(dailyUntilTasks[0].repeat, 'daily', 'UNTIL 版也是每天');
+  H.eq(dailyUntilTasks[0].week_end, 3, 'UNTIL 落在第 3 周（09-21~09-27）→ 结束周 3');
+
+  // 时区边界（与"每周"那组同一条口径）：UNTIL=20260927T160000Z 换算成北京时间是 09-28 00:00，
+  // 已经跨进第 4 周 —— 少算 8 小时就会把它算成第 3 周，那正是这条断言要挡的。
+  var untilCross = ics.parseIcs(cal(vevent({
+    summary: '跨周边界', start: 'DTSTART:20260907T080000', end: 'DTEND:20260907T084500',
+    rrule: 'FREQ=DAILY;UNTIL=20260927T160000Z',
+  })));
+  H.eq(ics.toTasks(untilCross.events, { semesterStart: '2026-09-07' })[0].week_end, 4,
+    '**UNTIL 按 UTC→北京时间换算**（09-27 16:00Z = 09-28 00:00 北京 → 第 4 周）');
+
+  // 仍然不支持的是别的 FREQ：如实报出来，不静默
+  var monthly = ics.parseIcs(cal(vevent({
+    summary: '每月', start: 'DTSTART:20260907T080000', end: 'DTEND:20260907T084500', rrule: 'FREQ=MONTHLY;COUNT=3',
+  })));
+  H.isTrue(monthly.warnings.join('|').indexOf('FREQ=MONTHLY') !== -1,
+    'MONTHLY 仍然如实说"不支持"（只支持 WEEKLY / DAILY）');
+  H.eq(ics.toTasks(monthly.events, { semesterStart: '2026-09-07' })[0].repeat, 'none',
+    '不支持的 FREQ → 当单次（不瞎猜）');
 
   // 零长度 / 结束早于开始：Python 原样带出来，这里也照做（别自作聪明改数据）
   var zeroLen = ics.toTasks(ics.parseIcs(cal(vevent({

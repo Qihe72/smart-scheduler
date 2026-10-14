@@ -29,7 +29,7 @@ const TYPES = ['event', 'ddl', 'subtask'];
 const PRIORITIES = ['high', 'mid', 'low'];
 
 /** 重复方式 */
-const REPEATS = ['none', 'weekly'];
+const REPEATS = ['none', 'weekly', 'daily'];
 
 /** 单双周 */
 const PARITIES = ['all', 'odd', 'even'];
@@ -325,7 +325,9 @@ function normalizeTask(raw, options) {
   let parity = toStr(raw.week_parity).toLowerCase();
   if (PARITIES.indexOf(parity) === -1) parity = 'all';
 
-  if (repeat === 'weekly') {
+  // 【每周与每天共用周次这一段】两种重复都要"第几周到第几周"，区别只在"哪天算数"
+  // （前端 periods.taskOccursOn 是同一套判据）；单双周只对每周重复有意义。
+  if (repeat === 'weekly' || repeat === 'daily') {
     weekStart = safeInt(raw.week_start, 1);
     if (!Number.isFinite(weekStart)) weekStart = 1;
     weekStart = Math.min(Math.max(weekStart, MIN_WEEK), MAX_WEEK);
@@ -334,6 +336,7 @@ function normalizeTask(raw, options) {
     if (!Number.isFinite(weekEnd)) weekEnd = 20;
     weekEnd = Math.min(Math.max(weekEnd, MIN_WEEK), MAX_WEEK);
     if (weekEnd < weekStart) weekEnd = weekStart;
+    if (repeat === 'daily') parity = 'all';
   } else {
     // 不重复的任务不需要周次信息，存 null 保持数据干净
     parity = 'all';
@@ -491,15 +494,17 @@ function pickPatch(patch, options) {
     rejected.push(key);
   });
 
-  // repeat 改成 none 时，顺手把周次清空；改成 weekly 时补默认周次
+  // repeat 改成 none 时，顺手把周次清空；改成 weekly / daily 时补默认周次
   if (clean.repeat === 'none') {
     clean.week_start = null;
     clean.week_end = null;
     clean.week_parity = 'all';
-  } else if (clean.repeat === 'weekly') {
+  } else if (clean.repeat === 'weekly' || clean.repeat === 'daily') {
     if (clean.week_start === undefined || clean.week_start === null) clean.week_start = MIN_WEEK;
     if (clean.week_end === undefined || clean.week_end === null) clean.week_end = 20;
     if (clean.week_end < clean.week_start) clean.week_end = clean.week_start;
+    // 每天重复不参与单双周（"每天，但只在单周"自相矛盾）
+    if (clean.repeat === 'daily') clean.week_parity = 'all';
   }
 
   if (Object.keys(clean).length) clean.updated_at = now;

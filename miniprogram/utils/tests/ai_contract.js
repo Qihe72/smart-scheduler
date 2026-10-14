@@ -273,8 +273,9 @@ function contractOfSuccess() {
       '返回对象顶层字段与 aiParse 契约一致（ok/events/deadlines/needs_clarification/clarification_question/tasks）');
     eq(d.ok, true, 'data.ok 为 true（前端可直接用 res.data.ok 判断）');
     eq(d.events.length, 1, 'events 有 1 条');
-    eq(Object.keys(d.events[0]).sort().join(','), 'date,end_time,priority,start_time,title,type',
-      'events 条目字段：title/date/start_time/end_time/type/priority');
+    eq(Object.keys(d.events[0]).sort().join(','), 'date,end_time,priority,repeat,start_time,title,type',
+      'events 条目字段：title/date/start_time/end_time/type/priority/repeat'
+      + '（repeat 是为了"每天"新加的，少了它落库时会被抹成单次）');
     eq(d.events[0].type, '日程', 'events 的 type 是中文「日程」（后端原样返回）');
     eq(d.events[0].start_time, '15:00', 'events 的 start_time 是 HH:MM');
     eq(d.deadlines.length, 1, 'deadlines 有 1 条');
@@ -328,6 +329,80 @@ function contractOfSuccess() {
     // 还原，别把补丁留给别的测试
     aiParseFn.postJson = realParsePost;
     aiDecomposeFn.postJson = realDecomposePost;
+    restoreEnv(savedEnv);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 三·五、模型说了"每天" → 一路传到落库的任务里（这条链最容易在映射层被抹平）
+// ---------------------------------------------------------------------------
+/**
+ * 真机现场：用户输入「我要每天中午13:10-13:20都进行学习打卡」。早先这条链有两处会把
+ * 重复方式吃掉：`normalizeParseResult` 的 events 里**根本没有 repeat 字段**，
+ * 而 `toTaskList` 又写死 `repeat: 'none'` —— 结果是"AI 识别出来了，但存进去变成单次"。
+ * 这一节从"模型返回"一路断言到"能落库的 tasks[]"，确保 daily 不再中途蒸发。
+ */
+function contractOfDailyRepeat() {
+  block('AI 契约 —— 模型说「每天」：events 与 tasks[] 都必须是 daily');
+
+  var savedParsePost = aiParseFn.postJson;
+  var savedEnv = rememberEnv();
+  setFakeKey('ZHIPU_API_KEY', 'test-key-not-used');
+
+  /** 造一个 DeepSeek 风格的响应（contractOfSuccess 里那份在它自己的作用域内，这里要自带一份） */
+  function fakeCompletion(jsonText) {
+    return Promise.resolve({
+      status: 200,
+      text: JSON.stringify({ choices: [{ message: { content: jsonText } }] })
+    });
+  }
+
+  aiParseFn.postJson = function () {
+    return fakeCompletion(JSON.stringify({
+      events: [
+        // ① 每天（用户原话里的形态）
+        { title: '学习打卡', date: '2026-10-15', start_time: '12:30', end_time: '12:40',
+          type: '日程', priority: '中', repeat: 'daily' },
+        // ② 每周三（模型按规则 9 应当输出 weekly）
+        { title: '周三开会', date: '2026-10-21', start_time: '15:00', end_time: '16:00',
+          type: '日程', priority: '中', repeat: 'weekly' },
+        // ③ 模型偶尔会用中文回值 —— 也要认
+        { title: '每天背单词', date: '2026-10-15', start_time: '07:30', end_time: '07:50',
+          type: '日程', priority: '中', repeat: '每天' },
+        // ④ 表达不了的重复（"工作日"）：**不许瞎猜成 daily**，落成 none
+        { title: '工作日晨跑', date: '2026-10-16', start_time: '06:30', end_time: '07:00',
+          type: '日程', priority: '中', repeat: '工作日' },
+        // ⑤ 模型没给 repeat → none
+        { title: '临时开会', date: '2026-10-17', start_time: '10:00', end_time: '11:00',
+          type: '日程', priority: '中' }
+      ],
+      deadlines: [],
+      needs_clarification: false,
+      clarification_question: ''
+    }));
+  };
+
+  reset();
+  return api.aiParse('我要每天中午12:30到12:40学习打卡').then(function (res) {
+    eq(res.ok, true, 'aiParse 成功');
+    var ev = res.data.events;
+    eq(ev.length, 5, 'events 5 条');
+    eq(ev[0].repeat, 'daily', '**模型说 daily → events 里就是 daily**（不再被抹掉）');
+    eq(ev[1].repeat, 'weekly', '每周三 → weekly');
+    eq(ev[2].repeat, 'daily', '中文「每天」也认（模型有时直接回中文）');
+    eq(ev[3].repeat, 'none',
+      '**「工作日」这种表达不了的 → none**（宁可当单次，也不静默变成一种用户没要的重复）');
+    eq(ev[4].repeat, 'none', '模型没给 repeat → 默认 none');
+
+    var tasks = res.data.tasks;
+    eq(tasks.length, 5, 'tasks[] 5 条（能直接交给 bulk_add）');
+    eq(tasks.map(function (t) { return t.repeat; }).join(','), 'daily,weekly,daily,none,none',
+      '**落库的 tasks[].repeat 与 events 一一对应**（这条链的中段就是以前吃掉 daily 的地方）');
+    eq(tasks[0].week_start, null, '周次留空：默认值由 tasks 云函数的 normalize 补（单一来源，不在这里造第二套）');
+    eq(tasks[0].week_parity, 'all', '单双周一律 all');
+    eq(tasks[0].type, 'event', 'type 仍是内部常量 event');
+  }).then(function () {
+    aiParseFn.postJson = savedParsePost;
     restoreEnv(savedEnv);
   });
 }
@@ -975,6 +1050,7 @@ var done = (function () {
     })
     .then(contractOfErrors)
     .then(contractOfSuccess)
+    .then(contractOfDailyRepeat)
     .then(contractOfBrokenCloud)
     .then(function () {
       contractOfPureFunctions();

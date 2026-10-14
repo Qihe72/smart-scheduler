@@ -1557,6 +1557,109 @@ function run() {
   eq(T.buildGrid(perDayOf({}), null, WEEK_MONDAY).rows.length, DEFAULT_ROWS,
     '默认作息不插合成行（它不是这所学校的作息；默认第 4~5 节之间空着 140 分钟也不插）');
 
+  // -------------------------------------------------------------------------
+  // 用例：每天重复（含周末）
+  //   用户需求原话："我要每天中午进行学习打卡，我需要能够设置这个日程，
+  //   而且每周末也都要有这个日程"。这一组钉三件事：
+  //     ① 「哪天算数」的判据（periods.taskOccursOn）——周一到周日七天都算、含周末，
+  //        起始日之前不算，周次范围对它同样有效，单双周对它无效；
+  //     ② 渲染：七列都画出这张卡（含周六、周日两列）；
+  //     ③ 统计：七天的「空闲 N 节」都要跟着减 —— 渲染与统计**同一判据**。
+  //        （这正是本文件存在的理由：当年就是"画了卡却没算占用"活了一个版本。）
+  // -------------------------------------------------------------------------
+  block('每天重复 —— 周一到周日七天都算（含周末），渲染与空闲统计同一判据');
+  var P = require('../periods.js');
+  var DAILY = {
+    _id: 'daily1', title: '学习打卡', type: 'event', date: '2026-09-07',   // 锚点 = 周一
+    start_time: '12:30', end_time: '12:40', priority: 'mid',
+    repeat: 'daily', week_start: 1, week_end: 20, week_parity: 'all',
+    periods: '', location: ''
+  };
+  var WEEK_DAYS = ['2026-09-07', '2026-09-08', '2026-09-09', '2026-09-10',
+    '2026-09-11', '2026-09-12', '2026-09-13'];   // 周一 ~ 周日
+
+  function occurFlags(task) {
+    return WEEK_DAYS.map(function (d) {
+      return P.taskOccursOn(task, d, WEEK_MONDAY) ? '1' : '0';
+    }).join('');
+  }
+
+  eq(occurFlags(DAILY), '1111111', '**一周七天每天都算**（第 6、7 位是周六 09-12 与周日 09-13）');
+  isTrue(P.taskOccursOn(DAILY, '2026-09-12', WEEK_MONDAY),
+    '**周六也算**（用户特意要求"每周末也都要有这个日程"）');
+  isTrue(P.taskOccursOn(DAILY, '2026-09-13', WEEK_MONDAY), '周日也算');
+  isFalse(P.taskOccursOn(DAILY, '2026-09-06', WEEK_MONDAY), '锚点（第一次打卡那天 09-07）之前不发生');
+  isTrue(P.taskOccursOn(DAILY, '2026-10-05', WEEK_MONDAY), '锚点之后很久的那天照样算（读的是周次，不是日期相等）');
+
+  // 没设开学日期（算不出周次）时宁可显示也不漏 —— 与每周重复同一条取舍
+  isTrue(P.taskOccursOn(DAILY, '2026-09-12', ''),
+    '没有开学日期时照样显示（宁可多显示，也不把整张表清空）');
+
+  // 周次范围对每天同样有效（"第 3 周才开始每天打卡"）
+  var dailyFromWeek3 = Object.assign({}, DAILY, { week_start: 3 });
+  isFalse(P.taskOccursOn(dailyFromWeek3, '2026-09-07', WEEK_MONDAY), '第 3 周才开始 → 第 1 周不出现');
+  isFalse(P.taskOccursOn(dailyFromWeek3, '2026-09-18', WEEK_MONDAY), '第 2 周（09-18 周五）也不出现');
+  isTrue(P.taskOccursOn(dailyFromWeek3, '2026-09-21', WEEK_MONDAY), '第 3 周的周一（09-21）出现');
+  isTrue(P.taskOccursOn(dailyFromWeek3, '2026-09-27', WEEK_MONDAY), '第 3 周的周日（09-27）也出现（含周末）');
+
+  var dailyToWeek2 = Object.assign({}, DAILY, { week_end: 2 });
+  isTrue(P.taskOccursOn(dailyToWeek2, '2026-09-20', WEEK_MONDAY), '第 2 周最后一天（周日 09-20）还算');
+  isFalse(P.taskOccursOn(dailyToWeek2, '2026-09-21', WEEK_MONDAY), '第 3 周起不再出现');
+
+  // 单双周对每天没有意义（数据里就算留着 odd 也只当"每周都算"）
+  eq(occurFlags(Object.assign({}, DAILY, { week_parity: 'odd' })), '1111111',
+    '**单双周不影响每天**（"每天、但只在单周"自相矛盾，判据里直接忽略它）');
+
+  // 缺锚点 → 不发生（不瞎猜一个起始日）
+  isFalse(P.taskOccursOn({ repeat: 'daily' }, '2026-09-07', WEEK_MONDAY),
+    '缺 date → 不发生（没有起点就不猜）');
+  isFalse(P.taskOccursOn({ repeat: 'daily', date: '2026-02-30' }, '2026-09-07', WEEK_MONDAY),
+    '锚点日期非法 → 不发生');
+
+  // 【回归】每周重复的语义没被带坏
+  var weeklyMon = {
+    _id: 'w1', title: '周一课', type: 'event', date: '2026-09-07', repeat: 'weekly',
+    week_start: 1, week_end: 20, week_parity: 'all'
+  };
+  isTrue(P.taskOccursOn(weeklyMon, '2026-09-14', WEEK_MONDAY), '每周重复：下一个周一算');
+  isFalse(P.taskOccursOn(weeklyMon, '2026-09-15', WEEK_MONDAY),
+    '**每周重复不会跑到周二去**（只有每天才那样）');
+
+  // --- 渲染：七列都画出来 ---
+  var dailyPerDay = {};
+  var d;
+  for (d = 0; d < 7; d += 1) dailyPerDay[d] = [DAILY];
+  var builtDaily = T.buildGrid(perDayOf(dailyPerDay), null, WEEK_MONDAY);
+  var drawnDays = 0;
+  for (d = 0; d < 7; d += 1) {
+    var hit = builtDaily.days[d].cells.some(function (cell) {
+      return (cell.tasks || []).some(function (t) { return t.title === '学习打卡'; });
+    });
+    if (hit) drawnDays += 1;
+  }
+  eq(drawnDays, 7, '**七列都画出了这张卡**（含周六、周日两列）');
+
+  // --- 统计：不变式（空闲 = 可计行数 − 渲染出来的占用节数），七天逐列成立 ---
+  var invariantBad = [];
+  for (d = 0; d < 7; d += 1) {
+    var expectFree = countableRows(builtDaily.rows)
+      - occupiedPeriodsFromRender(builtDaily.days, builtDaily.rows, d);
+    if (builtDaily.freeCounts[d] !== expectFree) {
+      invariantBad.push('第' + (d + 1) + '列 ' + builtDaily.freeCounts[d] + '≠' + expectFree);
+    }
+  }
+  eq(invariantBad.join(' | '), '', '**七天逐列满足"空闲 = 行数 − 占用"**（渲染与统计没有各算一套）');
+
+  // --- 统计：一个具体数字（放在第 1 节里，七天都该是 13 − 1 = 12）---
+  var DAILY_FIRST = Object.assign({}, DAILY, { start_time: '08:30', end_time: '08:40' });
+  var perDayFirst = {};
+  for (d = 0; d < 7; d += 1) perDayFirst[d] = [DAILY_FIRST];
+  var builtDailyFirst = T.buildGrid(perDayOf(perDayFirst), null, WEEK_MONDAY);
+  eq(builtDailyFirst.freeCounts.join(','), '12,12,12,12,12,12,12',
+    '第 1 节打卡 → **七天都是空闲 12**（占用真的被算进去了）');
+  isFalse(builtDailyFirst.freeCounts.indexOf(DEFAULT_ROWS) !== -1,
+    '反面对照：不能有哪一天还是 13（那就是"画了卡却没算占用"，正是本文件一开始要防的 bug）');
+
   // 最后才跑异步那组，并把它的 Promise 交出去（run() 的调用方会等它）
   return testOnShow();
 }

@@ -97,6 +97,8 @@ var ALL_PRIORITIES = [PRIORITY_HIGH, PRIORITY_MID, PRIORITY_LOW];
 // 重复方式（config.py:669-670）
 var REPEAT_NONE = 'none';
 var REPEAT_WEEKLY = 'weekly';
+/** 每天重复（打卡 / 习惯）。.ics 里对应 RRULE:FREQ=DAILY */
+var REPEAT_DAILY = 'daily';
 // 单双周（config.py:678-686）
 var PARITY_ALL = 'all';
 var PARITY_ODD = 'odd';
@@ -710,14 +712,17 @@ function finishVEvent(records, current, tzOffsets, warnings) {
   records.push(current);
 }
 
-/** RRULE 里 Python 会静默降级处理的几种情况，都如实报出来。 */
+/** RRULE 里本项目会降级处理的几种情况，都如实报出来。 */
 function checkRrule(rule, warnings, lineNo, raw) {
   if (!rule.FREQ) {
     pushWarning(warnings, '第 ' + lineNo + ' 行：RRULE「' + raw + '」没有 FREQ，按单次日程处理');
     return;
   }
-  if (str(rule.FREQ).toUpperCase() !== 'WEEKLY') {
-    pushWarning(warnings, '第 ' + lineNo + ' 行：RRULE 的 FREQ=' + str(rule.FREQ).toUpperCase() + ' 不支持（只支持 WEEKLY），按单次日程处理');
+  // FREQ=WEEKLY（课程）与 FREQ=DAILY（打卡 / 习惯）都支持；
+  // 其余（MONTHLY / YEARLY / 带 BYDAY 的复杂规则）按单次处理并说清楚。
+  var freq = str(rule.FREQ).toUpperCase();
+  if (freq !== 'WEEKLY' && freq !== 'DAILY') {
+    pushWarning(warnings, '第 ' + lineNo + ' 行：RRULE 的 FREQ=' + freq + ' 不支持（只支持 WEEKLY / DAILY），按单次日程处理');
   }
   if (rule.UNTIL && !parseIcsDateTime(rule.UNTIL, {}, null)) {
     pushWarning(warnings, '第 ' + lineNo + ' 行：RRULE 的 UNTIL「' + str(rule.UNTIL) + '」无法解析，这个结束时间被忽略（次数可能变多）');
@@ -935,7 +940,8 @@ function publicVEvent(record, tzOffsets) {
     startTime: momentHHMM(record.start),
     endTime: record.end ? momentHHMM(record.end) : '',
     allDay: !!record.allDay,
-    repeat: info.freq === 'WEEKLY' ? REPEAT_WEEKLY : REPEAT_NONE,
+    repeat: info.freq === 'WEEKLY' ? REPEAT_WEEKLY
+      : (info.freq === 'DAILY' ? REPEAT_DAILY : REPEAT_NONE),
     weekStart: null,
     weekEnd: null,
     weekParity: PARITY_ALL,
@@ -1086,6 +1092,16 @@ function parseIcs(text, options) {
     }
     var info = rruleInfo(item.rrule, tzOffsets);
     var cls = classifyDates(dates, semesterStart);
+    // 【FREQ=DAILY 覆盖"按日期推断"的结论】每天重复的事件只展开出一天（"每天"由 repeat 表达，
+    // 刻意不展开成 N 条），而 classifyDates 看一天的数据只会判成"单次" —— 所以这里必须
+    // 用 RRULE 的事实覆盖它。周次范围：有 UNTIL 就用它算，否则默认整学期。
+    if (info.freq === 'DAILY') {
+      var dailyStart = weekNumberOf(dates[0], semesterStart);
+      var dailyEnd = isValidDay(info.until) ? weekNumberOf(str(info.until).trim(), semesterStart) : null;
+      if (dailyStart === null || dailyStart < 1) dailyStart = 1;
+      if (dailyEnd === null || dailyEnd < dailyStart) dailyEnd = WEEKS_PER_TERM;
+      cls = { repeat: REPEAT_DAILY, weekStart: dailyStart, weekEnd: dailyEnd, weekParity: PARITY_ALL };
+    }
 
     events.push({
       line: item.line,
@@ -1123,6 +1139,8 @@ function parseIcs(text, options) {
         pushWarning(warnings, '「' + item.title + '」的周次算到第 ' + cls.weekEnd + ' 周，超过云函数的上限 '
           + MAX_WEEK + ' 周，入库后会被截断到第 ' + MAX_WEEK + ' 周');
       }
+    } else if (cls.repeat === REPEAT_DAILY) {
+      notes.push(item.title + '：每天重复（含周末），第 ' + cls.weekStart + '-' + cls.weekEnd + ' 周');
     } else if (dates.length > 1) {
       notes.push(item.title + '：' + dates.length + ' 次时间不规律，按单次日程导入');
     }
@@ -1219,6 +1237,17 @@ function datesOf(event, semesterStart) {
  *     没写周次时按云函数的默认值 1~20 周。
  */
 function classifyForTask(event, dates, semesterStart) {
+  // 【每天重复必须排在"按日期推断"前面】FREQ=DAILY 的事件只展开出**一天**
+  // （"每天"由 repeat 表达，不需要展开成 30 条任务），如果先走下面那句
+  // "按真实日期重算"，一天的数据会被 classifyDates 判成单次日程 —— "每天"就丢了。
+  if (str(event.repeat).trim().toLowerCase() === REPEAT_DAILY) {
+    var dStart = weekNumberOf(str(dates[0]), semesterStart);
+    var dEnd = isValidDay(event.until) ? weekNumberOf(str(event.until).trim(), semesterStart) : null;
+    if (dStart === null || dStart < 1) dStart = 1;
+    if (dEnd === null || dEnd < dStart) dEnd = WEEKS_PER_TERM;
+    return { repeat: REPEAT_DAILY, weekStart: dStart, weekEnd: dEnd, weekParity: PARITY_ALL };
+  }
+
   if (Array.isArray(event.dates) && event.dates.length) return classifyDates(dates, semesterStart);
 
   if (str(event.repeat).trim().toLowerCase() === REPEAT_WEEKLY) {
@@ -1327,10 +1356,11 @@ function toTasks(events, options) {
     };
 
     var cls = classifyForTask(event, dates, semesterStart);
-    if (cls.repeat === REPEAT_WEEKLY) {
+    // 每周（课程）与每天（打卡）都是"一条任务 + 重复规则"，不是一天一条
+    if (cls.repeat === REPEAT_WEEKLY || cls.repeat === REPEAT_DAILY) {
       tasks.push(Object.assign({}, base, {
         date: dates[0],
-        repeat: REPEAT_WEEKLY,
+        repeat: cls.repeat,
         week_start: cls.weekStart,
         week_end: cls.weekEnd,
         week_parity: cls.weekParity,
@@ -1389,6 +1419,7 @@ module.exports = {
   PRIORITY_LOW: PRIORITY_LOW,
   REPEAT_NONE: REPEAT_NONE,
   REPEAT_WEEKLY: REPEAT_WEEKLY,
+  REPEAT_DAILY: REPEAT_DAILY,
   PARITY_ALL: PARITY_ALL,
   PARITY_ODD: PARITY_ODD,
   PARITY_EVEN: PARITY_EVEN,

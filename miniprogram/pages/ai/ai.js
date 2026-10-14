@@ -908,7 +908,7 @@ Page({
           timeText: tasksUtil.timeText(task),
           priority: String(task.priority || 'mid'),
           priorityLabel: tasksUtil.PRIORITY_LABELS[task.priority] || '中',
-          repeatLabel: task.repeat === 'weekly' ? '每周' : '',
+          repeatLabel: task.repeat === 'weekly' ? '每周' : (task.repeat === 'daily' ? '每天' : ''),
           state: state,
           blockedReason: blocked
         };
@@ -1153,6 +1153,8 @@ function buildParseItems(data) {
       timeText: timeRangeText(item && item.start_time, item && item.end_time),
       // 课程（每周重复 + 节次）多给一行更贴切的说明：'每周 第3-5节 · 1-16周'
       courseText: courseLine(item),
+      // 重复方式：让用户一眼看出"这条会天天出现"，与落库的 repeat 同一来源
+      repeatLabel: (item && item.repeat === 'daily') ? '每天' : ((item && item.repeat === 'weekly') ? '每周' : ''),
       typeLabel: '日程',
       priority: String((item && item.priority) || '中'),
       priorityLabel: String((item && item.priority) || '中'),

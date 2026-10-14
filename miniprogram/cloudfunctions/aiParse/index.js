@@ -695,6 +695,23 @@ function estimateMinOf(item) {
 }
 
 /**
+ * 模型给的"重复方式" → 本项目的白名单值。
+ *
+ * 【为什么必须过白名单】模型偶尔会把"工作日""每两周"糊成 daily/weekly。宁可落成单次
+ * （用户看得见、能自己改），也不要静默变成一种他没要的重复 —— 那比不识别更糟。
+ * 中文值也认（模型有时直接回"每天"）。
+ *
+ * @param {*} value 模型返回的 repeat
+ * @returns {'none'|'daily'|'weekly'}
+ */
+function normalizeRepeatValue(value) {
+  const text = toStr(value).toLowerCase();
+  if (text === 'daily' || text === '每天' || text === '每日' || text === '天天') return 'daily';
+  if (text === 'weekly' || text === '每周') return 'weekly';
+  return 'none';
+}
+
+/**
  * 把模型返回的对象补齐成固定结构（缺字段 / 类型不对都不炸）。
  * @returns {{events: Array, deadlines: Array, needs_clarification: boolean, clarification_question: string}}
  */
@@ -713,6 +730,9 @@ function normalizeParseResult(data) {
         end_time: toStr(item.end_time),
         type: toStr(item.type) || '日程',
         priority: toStr(item.priority) || '中',
+        // 【必须原样带过去】早先这里没有 repeat，于是"每天打卡"在落库时被抹成单次
+        // （toTaskList 那时写死 repeat:'none'）—— 用户看到的是"识别出来了但没生效"。
+        repeat: normalizeRepeatValue(item.repeat),
       });
     });
   }
@@ -768,7 +788,9 @@ function toTaskList(parseResult, parentId) {
       priority: lookupLabel(PRIORITY_CN_TO_CONST, item.priority, 'mid'),
       done: false,
       parent_id: parentId === undefined ? null : parentId,
-      repeat: 'none',
+      // 【重复方式照搬模型给的（已过白名单）】周次留空由 tasks 云函数的 normalize 补默认值
+      // （1~20 周），单一来源在那边，这里不自己造一套。
+      repeat: normalizeRepeatValue(item.repeat),
       week_start: null,
       week_end: null,
       week_parity: 'all',
@@ -906,7 +928,7 @@ ${buildExamples(base)}
 只输出一个 JSON 对象，不要输出解释、不要用 Markdown 代码块、不要添加额外字段。结构必须完全如下：
 {
   "events": [
-    {"title": "字符串", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM", "type": "日程", "priority": "中"}
+    {"title": "字符串", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM", "type": "日程", "priority": "中", "repeat": "none"}
   ],
   "deadlines": [
     {"title": "字符串", "date": "YYYY-MM-DD", "end_time": "HH:MM", "type": "DDL", "priority": "高"}
@@ -925,7 +947,16 @@ ${buildExamples(base)}
 5. 所有 date 必须是绝对的 YYYY-MM-DD（月份日期补零，如 2026-10-05），禁止输出"明天""这周五""10月15号"这类写法。
 6. 一句话里可能包含多件事（例如"明天三点开会，周五前交报告"），请全部解析出来，不要漏。
 7. 只有标题、缺少必要时间信息（例如只说"开会"而没说什么时候）时，把 needs_clarification 设为 true，并在 clarification_question 里用一句简短中文追问；这时 events 和 deadlines 可以为空数组。
-8. 如果输入与日程完全无关，返回空的 events、deadlines，needs_clarification 设为 false。`;
+8. 如果输入与日程完全无关，返回空的 events、deadlines，needs_clarification 设为 false。
+9. events 里的 repeat 只能取三个值，**严格按用户原话判断，不要自己推测**：
+   * "none"：一次性安排（没提重复时的默认值）。
+   * "daily"：用户说了"每天 / 每日 / 天天 / 每天都"这类天天都发生的安排
+     （例如"我要每天中午12:30到12:40学习打卡"）。这时 date 填**第一次发生的那天**（通常是今天或用户指定的起始日），
+     start_time / end_time 照常填。
+   * "weekly"：用户说了固定星期几的重复（例如"每周三下午三点开会"）。这时 date 填**最近的那个周三**。
+10. 表达不了的重复**不要硬套**：用户说"工作日""每隔一天""每两周""每月"时，
+    不要把它当成 daily 或 weekly；按单次安排输出，并把 needs_clarification 设为 true，
+    在 clarification_question 里说明目前支持"每天"与"每周X"，问他想建成哪一种。`;
 }
 
 // ---------------------------------------------------------------------------

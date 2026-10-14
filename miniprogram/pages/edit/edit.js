@@ -68,6 +68,7 @@ const PRIORITIES = [
 const REPEATS = [
   { value: 'none', label: '不重复' },
   { value: 'weekly', label: '每周重复（课程）' },
+  { value: 'daily', label: '每天重复（打卡 / 习惯）' },
 ];
 
 /** 单双周 */
@@ -140,6 +141,9 @@ Page({
     isDdl: false,
     isSubtask: false,
     isWeekly: false,
+    isDaily: false,
+    isRepeating: false,
+    repeatHintText: '',
     customDuration: false,   // 是否用数字输入框填耗时（预设里没有的值）
     customDurationText: '',
 
@@ -525,6 +529,11 @@ Page({
     const form = this.data.form;
     const isDdl = form.type === 'ddl';
     const isWeekly = form.repeat === 'weekly';
+    // 【每天重复】"每天"是含周末的七天都算（见 utils/periods.js 的 REPEAT_DAILY）。
+    // 周次对它同样有意义（"第 1 ~ 20 周每天"），所以"起始周 / 结束周"照常显示；
+    // 单双周只对每周重复有意义，对每天不显示（"每天，但只在单周"自相矛盾）。
+    const isDaily = form.repeat === 'daily';
+    const isRepeating = isWeekly || isDaily;
     const estimate = Number(form.estimate_min) || 0;
 
     let parentText = '（不选）';
@@ -541,8 +550,14 @@ Page({
       isDdl,
       isSubtask: form.type === 'subtask',
       isWeekly,
+      isDaily,
+      isRepeating,
       parentText,
       weekRangeText: `第 ${form.week_start} ~ ${form.week_end} 周`,
+      // 【两种重复各一句人话】每天那句要说清楚三件事：含周末、从哪天开始、周视图会在七列都显示
+      repeatHintText: isDaily
+        ? `每天（含周六周日）从 ${str(form.date) || '选定的日期'} 开始，在第 ${form.week_start} ~ ${form.week_end} 周里每天出现；周视图里它会在周一到周日七列上都显示。`
+        : `这门课会上 ${`第 ${form.week_start} ~ ${form.week_end} 周`}；周视图按这个范围显示。`,
       estimateText: estimate > 0 ? estimateLabel(estimate) : '未填写',
     });
     this.refreshBusy();
@@ -839,7 +854,12 @@ function buildPayload(form) {
   const isDdl = form.type === 'ddl';
   const startTime = str(form.start_time);
   const endTime = str(form.end_time);
-  const isWeekly = form.repeat === 'weekly';
+  // 三种重复：none / weekly（课程）/ daily（打卡 · 习惯）
+  const repeat = form.repeat === 'weekly' ? 'weekly' : (form.repeat === 'daily' ? 'daily' : 'none');
+  // 【周次对每周与每天都有意义】"第几周到第几周"两种重复都要提交；
+  // 单双周只给每周（每天重复时一律 all，与 utils/tasks.js 的补丁清理同一口径）。
+  const repeating = repeat !== 'none';
+  const isWeekly = repeat === 'weekly';
 
   const task = {
     type: form.type,
@@ -851,9 +871,9 @@ function buildPayload(form) {
     location: str(form.location),
     priority: form.priority,
     estimate_min: Number(form.estimate_min) > 0 ? Math.round(Number(form.estimate_min)) : 0,
-    repeat: isWeekly ? 'weekly' : 'none',
-    week_start: isWeekly ? toWeek(form.week_start, 1) : null,
-    week_end: isWeekly ? toWeek(form.week_end, 20) : null,
+    repeat: repeat,
+    week_start: repeating ? toWeek(form.week_start, 1) : null,
+    week_end: repeating ? toWeek(form.week_end, 20) : null,
     week_parity: isWeekly ? (str(form.week_parity) || 'all') : 'all',
   };
 

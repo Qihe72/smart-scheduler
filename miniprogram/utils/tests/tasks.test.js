@@ -322,6 +322,34 @@ var fixWeeks = TK.normalizeTask({
 eq(fixWeeks.task.week_start, 8, 'week_start 保留 8');
 eq(fixWeeks.task.week_end, 8, 'week_end 3 < 8 → 取齐成 8');
 
+// ---------------------------------------------------------------------------
+// 每天重复（打卡 / 习惯）：与每周共用"周次"这一段，单双周一律 all
+// ---------------------------------------------------------------------------
+// 用户需求原话："我要每天中午进行学习打卡…而且每周末也都要有这个日程"。
+// 这一节只管**落库的字段形状**；"哪天算数"（含周末）在 periods.taskOccursOn 里，
+// 由 week_free.test.js 那组断言钉住。
+block('tasks.normalizeTask —— 每天重复：补默认周次，单双周归 all');
+var dailyTask = TK.normalizeTask({
+  title: '学习打卡', type: 'event', date: '2026-09-07', start_time: '12:30', end_time: '12:40',
+  repeat: 'daily'
+}, { today: '2026-09-07' });
+eq(dailyTask.errors.length, 0, '每天重复是合法输入（不报错）');
+eq(dailyTask.task.repeat, 'daily', "repeat 'daily' 原样保留");
+eq(dailyTask.task.week_start, 1, '每天重复补默认起始周 1（"第 1~20 周每天"）');
+eq(dailyTask.task.week_end, 20, '每天重复补默认结束周 20');
+eq(dailyTask.task.week_parity, 'all', '每天重复的单双周归 all');
+
+var dailyParity = TK.normalizeTask({
+  title: '打卡', date: '2026-09-07', repeat: 'daily',
+  week_start: 3, week_end: 8, week_parity: 'odd'
+}, { today: '2026-09-07' });
+eq(dailyParity.task.week_parity, 'all', '**每天重复不吃单双周**（"只在单周打卡"自相矛盾）');
+eq(dailyParity.task.week_start, 3, '但周次范围照常保留（第 3~8 周每天）');
+eq(dailyParity.task.week_end, 8, '结束周也保留');
+
+eq(TK.normalizeTask({ title: '打卡', date: '2026-09-07', repeat: 'DAILY' }).task.repeat, 'daily',
+  '大写 DAILY 也接受（与云函数同一口径）');
+
 // ===========================================================================
 // 6. pickPatch（编辑页只改一个字段时用）
 // ===========================================================================
@@ -335,6 +363,16 @@ eqJson(TK.pickPatch({ done: false }).patch, { done: false }, '只改 done 时 pa
 var patchRepeat = TK.pickPatch({ repeat: 'none' });
 eq(patchRepeat.patch.week_start, null, "repeat 改成 none → 顺手清空 week_start");
 eq(patchRepeat.patch.week_parity, 'all', '并把 parity 归 all');
+// 改成每天 / 每周：补默认周次，且每天那条的单双周归 all
+var patchDaily = TK.pickPatch({ repeat: 'daily' });
+eq(patchDaily.patch.repeat, 'daily', '补丁：repeat 可以是 daily');
+eq(patchDaily.patch.week_start, 1, '补丁：改成每天 → 补默认起始周 1');
+eq(patchDaily.patch.week_end, 20, '补丁：改成每天 → 补默认结束周 20');
+eq(patchDaily.patch.week_parity, 'all', '补丁：改成每天 → 单双周归 all');
+eq(TK.pickPatch({ repeat: 'daily', week_parity: 'odd' }).patch.week_parity, 'all',
+  '补丁：每天 + 单周 → 仍然归 all（不留下脏状态）');
+eq(TK.pickPatch({ repeat: 'weekly' }).patch.week_start, 1, '（回归）改成每周同样补默认周次');
+eq(TK.pickPatch({ repeat: 'monthly' }).errors.length, 1, '非法 repeat 仍然报错（白名单没放松）');
 eq(TK.pickPatch({ title: '  ' }).errors.length, 1, 'patch 里 title 为空 → 报错');
 eq(TK.pickPatch({ type: 'xxx' }).errors.length, 1, '非法 type → 报错（不静默吞掉）');
 eqJson(TK.pickPatch(null).errors, ['patch 必须是对象'], 'null patch → 明确报错');

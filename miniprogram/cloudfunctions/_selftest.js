@@ -237,6 +237,31 @@ testCase('2.6 周次 / 单双周 / repeat 容错', () => {
   eq(noRepeat.task.week_start, null, '不重复的任务不存周次');
   eq(noRepeat.task.week_end, null, '不重复的任务不存周次');
   eq(noRepeat.task.week_parity, 'all', '不重复的任务单双周归 all');
+
+  // 【每天重复（打卡 / 习惯）】与每周共用"周次"这一段：补默认 1~20 周，单双周一律 all。
+  // 判据（哪天算数）在前端 periods.taskOccursOn 里，这里只管落库的字段形状 ——
+  // 云端这一处要是漏了，用户存下来的"每天"会被静默抹成单次（那正是这次要修的病）。
+  const daily = N.normalizeTask({ title: '学习打卡', type: 'event', repeat: 'DAILY' });
+  eq(daily.task.repeat, 'daily', '大写 DAILY 接受（打卡 / 习惯）');
+  eq(daily.task.week_start, 1, '每天重复补默认起始周 1');
+  eq(daily.task.week_end, 20, '每天重复补默认结束周 20');
+  eq(daily.task.week_parity, 'all', '每天重复的单双周归 all');
+
+  const dailyOdd = N.normalizeTask({
+    title: '打卡', repeat: 'daily', week_parity: 'odd', week_start: 3, week_end: 8,
+  });
+  eq(dailyOdd.task.week_parity, 'all', '**每天重复不吃单双周**（"只在单周打卡"自相矛盾）');
+  eq(dailyOdd.task.week_start, 3, '但周次范围照常保留（"第 3~8 周每天"）');
+  eq(dailyOdd.task.week_end, 8, '结束周也保留');
+
+  const dailyPatch = N.pickPatch({ repeat: 'daily' }, { now: 'T' });
+  eq(dailyPatch.patch.repeat, 'daily', '补丁：repeat 可以是 daily');
+  eq(dailyPatch.patch.week_start, 1, '补丁：改成每天时补默认起始周');
+  eq(dailyPatch.patch.week_end, 20, '补丁：改成每天时补默认结束周');
+  eq(dailyPatch.patch.week_parity, 'all', '补丁：改成每天时单双周归 all');
+
+  const dailyPatchParity = N.pickPatch({ repeat: 'daily', week_parity: 'odd' }, { now: 'T' });
+  eq(dailyPatchParity.patch.week_parity, 'all', '补丁：每天 + 单周 → 仍然归 all');
 });
 
 testCase('2.7 parent_id / periods / location / done 容错', () => {
