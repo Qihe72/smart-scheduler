@@ -552,6 +552,50 @@ function run() {
     // 那是**未捕获异常**，会把整个测试入口带崩（不是本文件的失败，是所有人的失败）。
     // 所以这里等它先烧完，再交还全局。别顺手删掉这一句。
     return new Promise(function (resolve) { setTimeout(resolve, 700); });
+  }).then(function () {
+    // -------------------------------------------------------------------------
+    // 10. buildPayload —— "表单 → 交给云函数的那份数据"（真正决定存下去什么）
+    // -------------------------------------------------------------------------
+    // 这一层以前只在别处的注释里被提到过，没有断言直接盯着它。加"每天重复"时最典型的
+    // 漏法就是这里少写一个分支：界面上选了"每天"，存下去却变成"不重复" ——
+    // 而 utils/tasks.js 与云端那两层的测试**都不会红**（它们收到的输入已经错了）。
+    block('编辑页提交载荷 —— buildPayload：不重复 / 每周 / 每天三种都要对');
+    var T = registered.__test;
+    isTrue(!!T && typeof T.buildPayload === 'function', '页面通过 __test 暴露了 buildPayload');
+    eq(T.REPEATS.map(function (r) { return r.value; }).join(','), 'none,weekly,daily',
+      '编辑页的重复选项有且只有这三种（顺序也钉住，picker 下标与它一一对应）');
+
+    function formOf(over) {
+      return Object.assign(T.emptyForm(), {
+        title: '学习打卡', type: 'event', date: '2026-09-07',
+        start_time: '12:30', end_time: '12:40', priority: 'mid',
+        week_start: 1, week_end: 20, week_parity: 'all'
+      }, over || {});
+    }
+
+    var noneForm = T.buildPayload(formOf({ repeat: 'none' })).task;
+    eq(noneForm.repeat, 'none', '不重复 → none');
+    eq(noneForm.week_start, null, '不重复 → 不带周次（让云端存 null，数据干净）');
+    eq(noneForm.week_parity, 'all', '不重复 → 单双周 all');
+
+    var weeklyForm = T.buildPayload(formOf({
+      repeat: 'weekly', week_start: 3, week_end: 16, week_parity: 'odd'
+    })).task;
+    eq(weeklyForm.repeat, 'weekly', '每周 → weekly');
+    eq(weeklyForm.week_start, 3, '每周 → 起始周照传');
+    eq(weeklyForm.week_end, 16, '每周 → 结束周照传');
+    eq(weeklyForm.week_parity, 'odd', '每周 → 单双周照传');
+
+    var dailyForm = T.buildPayload(formOf({ repeat: 'daily', week_start: 2, week_end: 18 })).task;
+    eq(dailyForm.repeat, 'daily', '**每天 → daily**（少写这个分支就会静默存成"不重复"）');
+    eq(dailyForm.week_start, 2, '每天 → 周次范围照传（"第 2~18 周每天"）');
+    eq(dailyForm.week_end, 18, '每天 → 结束周照传');
+    eq(dailyForm.week_parity, 'all', '**每天 → 单双周一律 all**');
+    eq(T.buildPayload(formOf({ repeat: 'daily', week_parity: 'odd' })).task.week_parity, 'all',
+      '每天 + 单周 → 仍然 all（与 utils/tasks.js 的补丁清理同一口径）');
+    eq(dailyForm.start_time, '12:30', '每天的时间照传');
+    eq(dailyForm.date, '2026-09-07', 'date 就是"第一次发生的那天"（每天由 repeat 表达）');
+    return null;
   });
 }
 

@@ -825,6 +825,21 @@ Page({
     });
   },
 
+  /**
+   * 【仅测试用】把页面内部用到的纯函数挂出来（utils/tests/edit_busy.test.js）。
+   *
+   * 为什么必须有 `buildPayload`：它是"表单 → 交给云函数的那份数据"的唯一出口，
+   * 也就是**真正决定存下去什么**的那一层。早先它只在别的测试的注释里被提到过，
+   * 没有一条断言直接盯着它 —— 加"每天重复"时正是这一层最容易漏掉一个分支
+   * （漏了就会静默存成"不重复"）。小程序框架只会调用它认识的生命周期与事件方法，
+   * 这个下划线开头的键永远不会被触发。
+   */
+  __test: {
+    buildPayload: buildPayload,
+    REPEATS: REPEATS,
+    emptyForm: emptyForm,
+  },
+
   /** 当前任务有几个直接子任务 */
   countChildren() {
     const id = str(this.data.taskId);
