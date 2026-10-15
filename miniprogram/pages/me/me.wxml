@@ -465,6 +465,34 @@
           >{{importing ? '正在解析…' : '选择 .ics 文件'}}</view>
         </view>
 
+        <!-- ================= 从教务系统导入（复制粘贴） ================= -->
+        <!--
+          【为什么是"复制粘贴"】深大 ehall 的课表页一跳就跳去统一身份认证；小程序又既不能
+          请求非自有域名、个人主体也不能用 web-view、云函数更没有用户的 Cookie。
+          所以让用户在自己浏览器里登录，把**内容**粘进来 —— 凭据全程不经过我们。
+          这一段只在解析器可用时显示（与 .ics 那条路同一套保护）。
+        -->
+        <block wx:if="{{icsAvailable}}">
+          <view class="sub-title">从教务系统导入（不需要密码）</view>
+          <view class="btn-row">
+            <view
+              class="wide-btn {{importing ? 'btn-disabled' : ''}}"
+              hover-class="wide-btn-hover"
+              bindtap="onImportFromTimetable"
+            >{{importing ? '正在解析…' : '从剪贴板导入课表'}}</view>
+          </view>
+          <view class="note">
+            教务系统里<text class="note-strong">先登录</text>，然后二选一：
+            ① 课表页按 <text class="note-strong">Ctrl+A、Ctrl+C</text> 复制；
+            ② 或按 <text class="note-strong">Ctrl+S</text> 把网页另存成文件、发到微信任意聊天里选文件导入。
+            复制好回到这里点上面的按钮即可（学号密码不会被读取，也不会上传）。
+          </view>
+          <view class="note">
+            认不出来时会直接告诉你改用<text class="note-strong">「拍照识别课表」</text>，
+            不会静默导入一堆空课程。
+          </view>
+        </block>
+
         <!-- 解析结果 -->
         <block wx:if="{{pickedFileName}}">
           <view class="row">

@@ -497,6 +497,18 @@ chain = chain.then(function () {
   // **复制失败必须如实说**（谎报成功的话，用户粘出空白会以为作者给的号是错的）。
   var meContact = loadTest('me_contact.test.js');
   return waitFor(meContact);
+}).then(function () {
+  // 教务系统课表导入（utils/timetable.js）。它是纯函数模块、不需要全局桩，
+  // 但断言写在 Promise 里，所以放这条链上等它跑完再汇总（否则会打印"假绿"）。
+  // 样本是**真的**：作者从深大 ehall 另存的网页里截的结构（见该文件头）。
+  var timetable = loadTest('timetable.test.js');
+  return waitFor(timetable);
+}).then(function () {
+  // 我的页 · 「从教务系统导入」这个入口（装全局桩，所以也在这条串行链里）。
+  // 它钉的是页面侧最容易出问题的三件事：空/读不到剪贴板要说清"先去复制"、
+  // 认不出要指向「拍照识别课表」、没设学期开始日期**不许猜日期**。
+  var meTimetable = loadTest('me_timetable.test.js');
+  return waitFor(meTimetable);
 });
 
 // ---------------------------------------------------------------------------

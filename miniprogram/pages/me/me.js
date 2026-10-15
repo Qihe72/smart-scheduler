@@ -50,6 +50,26 @@ function icsReady() {
   return !!(ics && typeof ics.parseIcs === 'function' && typeof ics.toTasks === 'function');
 }
 
+// ---------------------------------------------------------------------------
+// utils/timetable.js 是「从教务系统导入」用的解析器（同样按可选依赖处理）
+// ---------------------------------------------------------------------------
+let timetable = null;
+let timetableLoadError = '';
+try {
+  // eslint-disable-next-line global-require
+  timetable = require('../../utils/timetable.js');
+} catch (err) {
+  timetable = null;
+  timetableLoadError = (err && err.message) || String(err);
+}
+
+/** 课表解析器可用吗（模块在 + 两个函数都导出了） */
+function timetableReady() {
+  return !!(timetable
+    && typeof timetable.parseTimetable === 'function'
+    && typeof timetable.toTasks === 'function');
+}
+
 /** 一次最多导入多少条（与云函数 MAX_BULK_INPUT = 200 对齐，超了云函数会直接报错） */
 const MAX_IMPORT = 200;
 
@@ -2240,6 +2260,107 @@ Page({
         if (msg && msg.indexOf('cancel') !== -1) return;
         wx.showToast({ title: `选择文件失败：${msg || '未知原因'}`, icon: 'none' });
       },
+    });
+  },
+
+  /**
+   * 「从教务系统导入」：读剪贴板 → 解析课表 → 预览（同样**不写库**）。
+   *
+   * ===========================================================================
+   * 【为什么是"复制粘贴"，而不是"填个网址"】
+   * ===========================================================================
+   * 2026-10-15 实测：深大 ehall 的课表页（`jwapp/sys/wdkb/...`）**一跳就跳去
+   * authserver.szu.edu.cn**（学校统一身份认证）—— 没有用户浏览器里的登录态，谁都取不到它。
+   * 而小程序这一侧三条路都封死：`wx.request` 只认自己拥有并能上传校验文件的合法域名；
+   * 个人主体不能用 `web-view`；云函数能出网但没有用户的 Cookie。
+   * 所以让用户**在自己浏览器里登录**，把**内容**粘进来 —— 全程不碰学号密码。
+   *
+   * 能认两种输入（自动识别，见 utils/timetable.js）：
+   *   ① 课表页 Ctrl+S 另存的网页（最稳：格子上带着 data-week 与节次）；
+   *   ② 直接 Ctrl+A / Ctrl+C 复制的文本（明细行本身就把周次/星期/节次/地点说全了）。
+   *
+   * 【为什么必须有学期开始日期】课程要落到具体日期（weekly 靠 date 定"周几"）。
+   * 与其猜一个，不如让用户先设好上面那个字段 —— 全项目只认这一个来源。
+   */
+  onImportFromTimetable() {
+    if (this.data.importing || this.data.submitting) return;
+
+    if (!timetableReady()) {
+      const text = `课表解析模块不可用（utils/timetable.js 缺失${timetableLoadError ? `：${timetableLoadError}` : ''}）`;
+      this.setData({ importResultText: text });
+      toastText('课表解析模块不可用');
+      return;
+    }
+
+    const semesterStart = str(this.data.semesterStart)
+      || str(((getApp() || {}).globalData || {}).semesterStart);
+    if (!semesterStart) {
+      // 不猜日期：设好学期开始日期再来（课程要靠它算"第 1 周的那一天"）
+      const text = '请先设置上面的「学期开始日期」，再点这个按钮 —— 课程要靠它算出具体日期。';
+      this.setData({ importResultText: text });
+      wx.showToast({ title: '请先设置学期开始日期', icon: 'none' });
+      return;
+    }
+
+    this.setData({ importing: true, importResultText: '', warnings: [], previewItems: [], pendingTasks: [] });
+
+    const fail = (text, toast) => {
+      this.setData({ importing: false, importResultText: text });
+      if (toast) toastText(toast);
+    };
+
+    wx.getClipboardData({
+      success: (res) => {
+        const text = str(res && res.data);
+        if (!text.trim()) {
+          fail('剪贴板是空的：先在课表页按 Ctrl+A、Ctrl+C 复制，再回来点这个按钮。', '剪贴板是空的');
+          return;
+        }
+
+        const parsed = timetable.parseTimetable(text);
+        const warnings = parsed.warnings.slice();
+        if (!parsed.courses.length) {
+          fail('没从剪贴板里认出课表：' + (warnings[0] || '这段内容不像是课表页')
+            + '。也可以在课表页截图，用上面的「拍照识别课表」。', '没认出课表，可改用截图识别');
+          return;
+        }
+
+        const built = timetable.toTasks(parsed, { semesterStart: semesterStart, warnings: warnings });
+        const tasks = built.tasks;
+        if (!tasks.length) {
+          fail('这些内容还变不成课程：' + (warnings[0] || '没有可导入的条目'), '没有可导入的课程');
+          return;
+        }
+
+        const preview = tasks.slice(0, 8).map((task) => ({
+          title: str(task.title) || '(无标题)',
+          dateText: formatDateCn(task.date),
+          whenText: whenTextOf(task),
+          typeLabel: TYPE_LABELS[str(task.type)] || '日程',
+        }));
+
+        this.pendingTasks = tasks;
+        // 这条路的课程时间由**用户自己的节次作息**决定，网页里没有上下课时刻可校准
+        this.pendingPeriodTimes = null;
+
+        this.setData({
+          // 【必须显式收掉 importing】成功这条路也要收：漏了它界面会永远停在"正在解析…"
+          // （真被测试抓到过一次：三条断言因此变红）
+          importing: false,
+          pickedFileName: `剪贴板（${parsed.format === 'ehall-html' ? '保存的网页' : '复制的文本'}）`,
+          parsedCount: parsed.courses.length,
+          taskCount: tasks.length,
+          warnings: warnings,
+          previewItems: preview,
+          previewMore: Math.max(tasks.length - preview.length, 0),
+          pendingTasks: [],
+          calibratedPeriodCount: 0,
+          calibratedText: '',
+          importResultText: `从剪贴板认出 ${parsed.courses.length} 门课，可导入 ${tasks.length} 条`
+            + '（课程的上课时刻按你自己的节次作息显示）',
+        });
+      },
+      fail: (err) => fail(`读剪贴板失败：${describeError(err)}`, '读剪贴板失败'),
     });
   },
 
