@@ -491,6 +491,12 @@ chain = chain.then(function () {
   // 写日历的口径与微信提醒完全一致（缺 end_time 的 DDL 两边都不处理）。
   var subscribeTest = loadTest('subscribe.test.js');
   return waitFor(subscribeTest);
+}).then(function () {
+  // 我的页 · 联系与反馈（装全局桩，所以也在这条串行链里）。
+  // 这一份钉住：联系方式只有一份（me.js 的 CONTACTS）、三个入口复制的就是它、
+  // **复制失败必须如实说**（谎报成功的话，用户粘出空白会以为作者给的号是错的）。
+  var meContact = loadTest('me_contact.test.js');
+  return waitFor(meContact);
 });
 
 // ---------------------------------------------------------------------------
@@ -499,5 +505,5 @@ chain = chain.then(function () {
 chain.then(function () {
   console.log('\n已加载的测试文件：' + loaded.join(', '));
   if (skipped.length) console.log('未包含（文件不存在）：' + skipped.join(', '));
-  H.report('periods + planner + tasks + AI 契约 + AI 页入口 + 课表页空闲统计 + 我的页导入 + 订阅少点几次');
+  H.report('periods + planner + tasks + AI 契约 + AI 页入口 + 课表页空闲统计 + 我的页导入 + 订阅少点几次 + 联系与反馈');
 });

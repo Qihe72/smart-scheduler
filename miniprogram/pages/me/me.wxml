@@ -567,6 +567,46 @@
       </view>
     </view>
 
+    <!-- ================= 六点五、联系与反馈 ================= -->
+    <!--
+      【这一张卡解决什么】用的人要能找到作者：提问题、报 bug、给修改建议。
+      三条动作**全是"复制"** —— 小程序里没有 mailto:，也不能直接跳去加好友，
+      剪贴板是唯一既可靠又不需要任何权限的方式（与上面「导出备份」同一个理由）。
+      显示的值来自 me.js 的 CONTACTS（只有那一份），改号只需改那一处。
+    -->
+    <view class="card">
+      <view class="card-title">联系与反馈</view>
+      <view class="card-sub">用着不顺手、发现 bug、想要新功能，都可以直接找我。</view>
+
+      <view class="row">
+        <text class="row-label">微信号</text>
+        <view class="row-right">
+          <text class="row-value-plain">{{contactWechat}}</text>
+          <view class="mini-btn" data-kind="wechat" bindtap="onCopyContact">复制</view>
+        </view>
+      </view>
+      <view class="row">
+        <text class="row-label">邮箱</text>
+        <view class="row-right">
+          <text class="row-value-plain">{{contactEmail}}</text>
+          <view class="mini-btn" data-kind="email" bindtap="onCopyContact">复制</view>
+        </view>
+      </view>
+
+      <view class="btn-row">
+        <view class="wide-btn" hover-class="wide-btn-hover" bindtap="onCopyFeedbackTemplate">复制反馈模板</view>
+      </view>
+      <view class="note">
+        提问题时带上<text class="note-strong">手机型号、微信版本、点过哪几步</text>会好定位很多 ——
+        点上面的按钮会复制一段带这些空位的模板，填完发我就行。
+      </view>
+      <view class="note">
+        想实际体验：小程序现在是<text class="note-strong">体验版</text>，
+        微信限制只有「体验成员」能打开 —— 把微信号发我，我加你进名单就行。
+      </view>
+      <view class="note" wx:if="{{contactResultText}}">{{contactResultText}}</view>
+    </view>
+
     <!-- ================= 七、数据说明 ================= -->
     <view class="card">
       <view class="card-title">你的数据在哪里</view>

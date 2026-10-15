@@ -224,6 +224,50 @@ const LEAD_TEXTS = FALLBACK_LEAD_OPTIONS.map((minutes) => `提前 ${describeLead
 /** toast 标题太长会被截断，所以页面自己先截（与 api.js 的口径一致） */
 const MAX_TOAST_CHARS = 30;
 
+// ---------------------------------------------------------------------------
+// 联系与反馈
+// ---------------------------------------------------------------------------
+/**
+ * 联系方式。**只有这一份**：页面的 data 与"复制"都从这里取，改一处就够。
+ *
+ * 【改这里之后记得同步 README 的「联系与反馈」一节】那份是给 GitHub 访客看的，
+ * 与小程序里显示的应当是同一组号。
+ */
+const CONTACTS = {
+  wechat: '19333181312',
+  email: '839933831@qq.com',
+};
+
+/** 取联系方式；认不出的 kind 一律给微信号（页面上只有这两种） */
+function contactOf(kind) {
+  return str(kind) === 'email' ? CONTACTS.email : CONTACTS.wechat;
+}
+
+/**
+ * 反馈模板：把"定位问题真正需要的"信息列成空位。
+ *
+ * 【为什么值得单独做一个按钮】用户报一句"它坏了"几乎没法定位；而这个项目里最费时的
+ * 恰恰是复现（真机、机型、微信版本、点了几步才出问题）。把这几项列成空位，用户填两行
+ * 就够我查了 —— 空着也比只写一句描述强。
+ */
+const FEEDBACK_TEMPLATE = [
+  '【问题 / 建议】',
+  '（一句话说清：哪里不对，或者你想要什么）',
+  '',
+  '【复现步骤】',
+  '1. ',
+  '2. ',
+  '',
+  '【期望结果】',
+  '',
+  '【实际结果】',
+  '',
+  '【我的环境】',
+  '手机型号：',
+  '微信版本：',
+  '操作路径（在小程序里点了哪几个页面 / 按钮）：',
+].join('\n');
+
 /** 「我的」页不硬编码模板 ID，一律从 status 取（见本文件 loadRemindStatus 的注释） */
 const EMPTY_REMIND_STATUS = {
   template_id: '',
@@ -785,6 +829,11 @@ Page({
     version: '1.0.0',
     cloudFunctionName: 'tasks',
     appName: '青年时间管理助手',
+
+    // --- 联系与反馈（值取自 CONTACTS，不在这里再抄一遍） ---
+    contactWechat: CONTACTS.wechat,
+    contactEmail: CONTACTS.email,
+    contactResultText: '',      // 「已复制…」/「复制失败…」如实写在这里
   },
 
   onLoad() {
@@ -2545,6 +2594,55 @@ Page({
     });
   },
 
+  // -------------------------------------------------------------------------
+  // 联系与反馈（用户提问题 / 给修改建议的入口）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 复制联系方式。`dataset.kind` 区分「微信号 / 邮箱」。
+   *
+   * 【为什么只做"复制"】小程序里既没有 `mailto:`，也不能直接跳去加微信好友 ——
+   * 剪贴板是唯一既可靠又不需要任何权限的动作（与「导出备份」同一个理由）。
+   * 所以这里的目标不是"一键联系"，而是"一键拿到联系方式，剩下的交给微信/邮箱"。
+   */
+  onCopyContact(event) {
+    const dataset = (event && event.currentTarget && event.currentTarget.dataset) || {};
+    const kind = str(dataset.kind) === 'email' ? 'email' : 'wechat';
+    this.copyToClipboard(contactOf(kind), kind === 'email' ? '邮箱' : '微信号');
+  },
+
+  /** 复制一段"反馈模板"：把最需要的信息列成空位，用户填完发过来就行 */
+  onCopyFeedbackTemplate() {
+    this.copyToClipboard(FEEDBACK_TEMPLATE, '反馈模板');
+  },
+
+  /**
+   * 复制文本 + 如实反馈结果（三个入口共用）。
+   *
+   * 【失败绝不能静默】用户点了"复制"，就得知道到底复制上没有 —— 复制成功却没有提示，
+   * 他会以为按钮坏了；复制失败却提示成功，他会粘出一片空白然后以为我给的号是错的。
+   */
+  copyToClipboard(text, label) {
+    const value = str(text);
+    if (!value) {
+      this.setData({ contactResultText: `没有可复制的${label}` });
+      toastText(`没有可复制的${label}`);
+      return;
+    }
+    wx.setClipboardData({
+      data: text,
+      success: () => {
+        this.setData({ contactResultText: `已复制${label}：${value.split('\n')[0]}` });
+        toastText(`已复制${label}`);
+      },
+      fail: (err) => {
+        const detail = describeError(err);
+        this.setData({ contactResultText: `复制${label}失败：${detail}。可以长按上面的文字手动复制。` });
+        toastText(`复制失败：${detail}`);
+      },
+    });
+  },
+
   /**
    * 只给纯 node 单测用的探针（utils/tests/remind_page.test.js）。
    *
@@ -2589,6 +2687,10 @@ Page({
     keyProviderHint: keyProviderHint,
     MAX_MODEL_CHARS: MAX_MODEL_CHARS,
     AI_DEFAULT_MODEL: AI_DEFAULT_MODEL,
+    // 联系与反馈（utils/tests/me_contact.test.js 从**页面对象**上取这三个）
+    CONTACTS: CONTACTS,
+    contactOf: contactOf,
+    FEEDBACK_TEMPLATE: FEEDBACK_TEMPLATE,
   },
 });
 
@@ -3016,5 +3118,9 @@ module.exports = {
     keyProviderHint: keyProviderHint,
     MAX_MODEL_CHARS: MAX_MODEL_CHARS,
     AI_DEFAULT_MODEL: AI_DEFAULT_MODEL,
+    // 联系与反馈（utils/tests/me_contact.test.js 用）
+    CONTACTS: CONTACTS,
+    contactOf: contactOf,
+    FEEDBACK_TEMPLATE: FEEDBACK_TEMPLATE,
   },
 };
