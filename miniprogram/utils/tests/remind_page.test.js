@@ -252,6 +252,26 @@ function serveRemind(options) {
   served.acked = [];
   served.configs = [];
   served.tasks = Array.isArray(o.tasks) ? o.tasks : [];
+  // 【三点七新增】扫描（action:'scan'）的桩：记下每次调用，返回一份可配的 summary。
+  // 默认"扫到 1 人、什么都没发、没有跳过" —— 最安静的那一侧，不给旧用例添噪音。
+  served.scans = [];
+  served.scanFails = !!o.scanFails;
+  served.scanResult = o.scanResult === undefined
+    ? {
+      scanned: 1,
+      sent: 0,
+      skipped: 0,
+      failed: 0,
+      quota_refunded: 0,
+      downgraded: 0,
+      errors: [],
+      warnings: [],
+      skipped_reasons: {},
+      details: [],
+      lead_min: Number(o.leadMin) || 60,
+      now: '2026-10-21T19:40:00+08:00',
+    }
+    : o.scanResult;
   cloudCalls = [];
   subscribed = [];   // 每个场景自己数"弹了几次授权窗"
 
@@ -343,6 +363,20 @@ function serveRemind(options) {
         truncated: [],
         warnings: [],
       });
+    }
+
+    // 【三点七新增】扫描：与云函数 actionScan 同一个入口（定时触发器也走它）
+    if (action === 'scan') {
+      served.scans.push(data || {});
+      if (served.scanFails) return Promise.resolve({ ok: false, error: '服务异常：数据库不可用' });
+      var summary = served.scanResult || {};
+      var out = {};
+      Object.keys(summary).forEach(function (key) { out[key] = summary[key]; });
+      out.ok = true;
+      var sentCount = Math.max(0, Math.floor(Number(summary.sent) || 0));
+      // 与云函数一致：真的发出去才扣额度（配置类失败会退回，桩不模拟那层）
+      if (sentCount > 0) served.quota = Math.max(0, served.quota - sentCount);
+      return Promise.resolve(out);
     }
 
     return Promise.resolve({ ok: false, error: 'unexpected action: ' + action });
@@ -1347,6 +1381,219 @@ function run() {
     isTrue(subSrc.indexOf('addPhoneCalendar') > -1, '写系统日历走 wx.addPhoneCalendar');
     isTrue(subSrc.indexOf("toStr(task.type) !== 'ddl'") > -1,
       '写日历那条路只认 ddl（与云函数 dueInstantOf 同一判据）');
+
+    // ⑨ 三点七：把"扫描"这件事做进页面 —— 不靠触发器、不靠日志也能自查
+    //    （定时触发器在云端没建起来时，"提醒不响"原本在界面上完全看不出来）
+    isTrue(meSrc.indexOf("action: 'scan'") > -1,
+      '前端能调 action:scan（与定时触发器同一个入口，见 remindScan 的说明）');
+    isTrue(meSrc.indexOf('maybeLazyScan') > -1, '进页面会顺手扫一次（触发器没建时的兜底）');
+    isTrue(meSrc.indexOf('LAZY_SCAN_GAP_MS') > -1, '顺手扫描有节流常量（不许每次打开都打服务端）');
+    isTrue(meSrc.indexOf('SCAN_REASON_TEXT') > -1, '跳过原因码有中文翻译表（no_due_instant 之类不能直接给人看）');
+    isTrue(meWxml.indexOf('bindtap="onRemindSelfCheck"') > -1,
+      '**「检查一次」按钮真的接在页面上了**（onRemindSelfCheck）');
+    isTrue(meWxml.indexOf('{{remindSelfCheckText}}') > -1, '自查结果行渲染出来了');
+    isFalse(/remindScan\(\)\.then\([^;]*silent/.test(meSrc), '（确认下面这条不是空转）');
+    isTrue(/remindScan\(\)\.then\(/.test(meSrc), '扫描调用是通过 remindScan() 发的');
+    return null;
+  })
+
+  // =====================================================================
+  // 16. 三点七 · 「检查一次」：扫描返回值 → 人话（纯函数）
+  // =====================================================================
+  .then(function () {
+    block('me 页 · 检查一次 —— 扫描结果必须翻译成"为什么没收到提醒"');
+    var T = me.__test;
+    isTrue(!!T && typeof T.selfCheckText === 'function',
+      '取到 selfCheckText（拿不到的话下面几条全是空转）');
+
+    // ① 一个用户都没扫到 —— 这是"开关其实没打开"，与"没有到期事项"完全不是一回事
+    var t1 = T.selfCheckText({ scanned: 0, sent: 0, skipped: 0, failed: 0 });
+    isTrue(t1.indexOf('扫描了 0 个用户') > -1, '扫到 0 人要如实说 0 个用户：' + show(t1));
+    isTrue(t1.indexOf('开关') > -1,
+      '**并且指出根因是开关没打开**（不能写成"没有需要提醒的事项"——那会把用户带偏）：' + show(t1));
+
+    // ② 真发出去了
+    var t2 = T.selfCheckText({ scanned: 1, sent: 2, skipped: 0, failed: 0 });
+    isTrue(t2.indexOf('刚发出 2 条') > -1, '发出去几条要说清：' + show(t2));
+    isTrue(t2.indexOf('服务通知') > -1, '并告诉他去微信「服务通知」看：' + show(t2));
+
+    // ③ 发送失败：原始错误码要原样带上（不翻译成猜的语义），并说明不白扣额度
+    var t3 = T.selfCheckText({
+      scanned: 1, sent: 0, skipped: 0, failed: 1,
+      errors: ['用户 ab 处理失败：47003 thing2 长度不合法'],
+    });
+    isTrue(t3.indexOf('发送失败') > -1, '失败要说"发送失败"：' + show(t3));
+    isTrue(t3.indexOf('47003 thing2 长度不合法') > -1,
+      '**服务端原话原样带上**（换成自己的说法就查不下去了）：' + show(t3));
+    isTrue(t3.indexOf('额度') > -1, '并说清配置类失败会退额度：' + show(t3));
+
+    // ④ 全被跳过：原因码要翻译成人话
+    var t4 = T.selfCheckText({
+      scanned: 1, sent: 0, skipped: 2, failed: 0,
+      skipped_reasons: { no_due_instant: 2 },
+    });
+    isTrue(t4.indexOf('截止没填时刻 2 条') > -1,
+      '**跳过原因翻译成人话**（这正是用户最常踩的那条）：' + show(t4));
+
+    var t5 = T.selfCheckText({
+      scanned: 1, sent: 0, skipped: 2, failed: 0,
+      skipped_reasons: { too_early: 1, mystery_reason: 1 },
+    });
+    isTrue(t5.indexOf('还没到提前量窗口 1 条') > -1, '常见原因有中文说法：' + show(t5));
+    isTrue(t5.indexOf('mystery_reason 1 条') > -1,
+      '**认不出的原因码原样带上**（不吞掉、也不编一个说法）：' + show(t5));
+
+    // ⑤ 什么都没发生
+    var t6 = T.selfCheckText({ scanned: 1, sent: 0, skipped: 0, failed: 0, lead_min: 60 });
+    isTrue(t6.indexOf('没有找到需要提醒的事项') > -1, '没事情也要给结论：' + show(t6));
+    isTrue(t6.indexOf('提前量 60 分钟') > -1,
+      '并带上当前提前量（"太早了"是最常见的误会）：' + show(t6));
+    return null;
+  })
+
+  // =====================================================================
+  // 17. 点「检查一次」：真的发 scan，结果落在卡片上
+  // =====================================================================
+  .then(function () {
+    block('me 页 · 检查一次 —— 点一下就替服务端扫一遍');
+    storageMap = {};
+    serveRemind({
+      enabled: true,
+      quota: 3,
+      scanResult: {
+        scanned: 1, sent: 0, skipped: 1, failed: 0,
+        skipped_reasons: { no_due_instant: 1 },
+        errors: [], warnings: [], details: [], lead_min: 60,
+      },
+    });
+    ctx.check1 = newPage(me);
+    toasts = [];
+    ctx.check1.onLoad();
+    return settle(12);
+  })
+  .then(function () {
+    var p = ctx.check1;
+    eq(callsOf('scan').length, 1, '进页面顺手扫了一次（三点七的懒扫描）');
+    eq(p.data.remindSelfCheckText, '', '**什么都没发出去 → 不打扰用户**（不写结果行）');
+
+    toasts = [];
+    p.onRemindSelfCheck();
+    return settle(16);
+  })
+  .then(function () {
+    var p = ctx.check1;
+    eq(callsOf('scan').length, 2, '点「检查一次」再扫一次');
+    isTrue(p.data.remindSelfCheckText.indexOf('截止没填时刻 1 条') > -1,
+      '**结果行说出了真正的原因**：' + show(p.data.remindSelfCheckText));
+    eq(p.data.remindSelfCheckType, 'warn', '没发出东西 → warn 样式（不是成功绿）');
+    eq(lastToast(), '检查完成，结果见下方',
+      'toast 只说"做完了"，结论在卡片上：' + show(toastsText()));
+
+    // 真发出去一条：口径换成"补发了几条"，并且额度要重读
+    storageMap = { remind_scan_at: Date.now() };   // 压掉懒扫描，只留按钮这一下
+    serveRemind({
+      enabled: true,
+      quota: 3,
+      scanResult: {
+        scanned: 1, sent: 1, skipped: 0, failed: 0,
+        skipped_reasons: {}, errors: [], warnings: [], details: [], lead_min: 60,
+      },
+    });
+    ctx.check2 = newPage(me);
+    toasts = [];
+    ctx.check2.onLoad();
+    return settle(12);
+  })
+  .then(function () {
+    var p = ctx.check2;
+    eq(callsOf('scan').length, 0, '（节流生效：进页面这次没扫）');
+    // 跨 .then 一律挂 ctx：每个 .then 是独立函数作用域，var 传不过去（这里踩过一次）
+    ctx.statusBefore = callsOf('status').length;
+    toasts = [];
+    p.onRemindSelfCheck();
+    return settle(16);
+  })
+  .then(function () {
+    var p = ctx.check2;
+    isTrue(p.data.remindSelfCheckText.indexOf('刚发出 1 条') > -1,
+      '发出去了就说发出去了：' + show(p.data.remindSelfCheckText));
+    eq(p.data.remindSelfCheckType, 'ok', '这种情况用 ok 样式');
+    eq(lastToast(), '补发了 1 条提醒', 'toast 报条数：' + show(toastsText()));
+    isTrue(callsOf('status').length >= ctx.statusBefore + 1,
+      '**收尾必须重读状态**（额度变了，卡片上的数字不能是旧的）');
+    eq(p.data.remindQuota, 2, '额度按"真发出去 1 条"更新了');
+
+    // 扫描自己失败：如实说，不许假装"检查完了没问题"
+    storageMap = { remind_scan_at: Date.now() };
+    serveRemind({ enabled: true, quota: 3, scanFails: true });
+    ctx.check3 = newPage(me);
+    ctx.check3.onLoad();
+    return settle(12);
+  })
+  .then(function () {
+    toasts = [];
+    ctx.check3.onRemindSelfCheck();
+    return settle(16);
+  })
+  .then(function () {
+    var p = ctx.check3;
+    isTrue(p.data.remindSelfCheckText.indexOf('检查失败') > -1,
+      '失败要写"检查失败"：' + show(p.data.remindSelfCheckText));
+    isTrue(p.data.remindSelfCheckText.indexOf('数据库不可用') > -1,
+      '并带上服务端原话：' + show(p.data.remindSelfCheckText));
+    eq(p.data.remindSelfCheckType, 'warn', 'warn 样式');
+    return null;
+  })
+
+  // =====================================================================
+  // 18. 懒扫描的三道闸：节流 / 没开提醒 / 存储不可用
+  // =====================================================================
+  .then(function () {
+    block('me 页 · 懒扫描 —— 10 分钟一次；没开提醒不扫；读不到节流记录也不扫');
+    storageMap = {};
+    serveRemind({ enabled: true, quota: 2 });
+    toasts = [];
+    ctx.lazy1 = newPage(me);
+    ctx.lazy1.onLoad();
+    return settle(12);
+  })
+  .then(function () {
+    eq(callsOf('scan').length, 1, '开了提醒 → 进页面扫一次');
+    eq(toasts.filter(function (t) { return t.indexOf('提醒') > -1; }).length, 0,
+      '**什么都没发出去 → 一声不吭**（不该冒"补发了 0 条"）：' + show(toastsText()));
+    isTrue(Number(storageMap['remind_scan_at']) > 0, '记下了这次扫描的时间（节流用）');
+
+    cloudCalls = [];
+    ctx.lazy1.loadAll();
+    return settle(12);
+  })
+  .then(function () {
+    eq(callsOf('scan').length, 0,
+      '**10 分钟内再进页面不重复扫**（否则每次打开都打服务端，额度也扛不住）');
+
+    // 没开提醒：一次都不扫（扫了也发不出去）
+    storageMap = {};
+    serveRemind({ enabled: false, quota: 0 });
+    ctx.lazy2 = newPage(me);
+    ctx.lazy2.onLoad();
+    return settle(12);
+  })
+  .then(function () {
+    eq(callsOf('scan').length, 0, '**没开提醒就不扫**');
+
+    // 存储不可用：fail-closed —— 读不到就"不知道上次什么时候扫的"，此时不许扫
+    storageMap = {};
+    serveRemind({ enabled: true, quota: 2 });
+    ctx.savedGetStorage = global.wx.getStorageSync;
+    global.wx.getStorageSync = function () { throw new Error('storage broken'); };
+    ctx.lazy3 = newPage(me);
+    ctx.lazy3.onLoad();
+    return settle(12);
+  })
+  .then(function () {
+    eq(callsOf('scan').length, 0,
+      '**读不到节流记录就不扫**（宁可少扫一次，也不能让"每次打开都扫"悄悄没有上限）');
+    global.wx.getStorageSync = ctx.savedGetStorage;   // 把桩还回去，不影响后续用例
     return null;
   });
 }

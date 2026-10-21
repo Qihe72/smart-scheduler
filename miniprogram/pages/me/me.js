@@ -235,6 +235,28 @@ const REMIND_DOC = 'docs/到期提醒.md';
 /** 服务端放模板 ID 的那个环境变量名（只在"判断服务端那句话是不是在讲模板"时用） */
 const REMIND_TEMPLATE_ENV = 'REMIND_TEMPLATE_ID';
 
+/**
+ * 「顺手扫一次」的节流键与间隔（见 maybeLazyScan）。
+ *
+ * 【为什么页面要自己扫一次】真实提醒只有一个入口：云函数的**定时触发器**。
+ * 触发器在云端没建起来（部署时它不跟着走，得单独上传/新建），整条链就永远不动 ——
+ * 而"发一条测试提醒"是绕过扫描直接下发的，掩盖了这个洞。
+ * 让用户打开本页时替服务端扫一次，就把"闹钟"交给了打开动作：不必依赖控制台里那个开关。
+ * 而 10 分钟一次的节流保证它不会变成刷子（额度真发出去才扣，但请求本身也该省）。
+ */
+const LAZY_SCAN_KEY = 'remind_scan_at';
+const LAZY_SCAN_GAP_MS = 10 * 60 * 1000;
+
+/** 扫描"跳过"的原因码 → 人话（原因码来自云函数 planReminders，见 cloudfunctions/remind/index.js） */
+const SCAN_REASON_TEXT = {
+  no_due_instant: '截止没填时刻',
+  too_early: '还没到提前量窗口',
+  too_late: '已经过了提醒点（错过的不补发）',
+  already_sent: '这条已经提醒过',
+  no_quota: '可提醒次数是 0',
+  over_scan_limit: '这一轮条数超过上限',
+};
+
 /** 云函数没给 lead_options 时的兜底档位（与 remind 云函数的 LEAD_MIN_OPTIONS 同一份值） */
 const FALLBACK_LEAD_OPTIONS = [15, 30, 60, 120, 1440];
 
@@ -470,6 +492,17 @@ function remindConfig(patch) {
 /** 立刻发一条测试提醒（默认不消耗额度，返回值里有 quota_consumed） */
 function remindTest() {
   return remindCall({ action: 'test' });
+}
+
+/**
+ * 跑一次**扫描**（`action:'scan'`，与定时触发器同一个入口）。
+ *
+ * 【为什么前端调它不越权】scan 是全局动作，但它**没有收件人参数**：它遍历的是
+ * "自己开了提醒"的用户，扫到谁给谁发 —— 前端没法用它给指定的某个人发消息
+ * （云函数 handleAction 里也写明了这一点）。所以这里调它只是"替服务端按一下扫描"。
+ */
+function remindScan() {
+  return remindCall({ action: 'scan' });
 }
 
 // ---------------------------------------------------------------------------
@@ -810,6 +843,10 @@ Page({
     remindCalBusy: false,       // 正在写手机系统日历
     remindCalText: '',          // 写日历的结果：成功几条 + 其余几条为什么没写
 
+    // --- 三点七、"检查一次"（替服务端跑一遍扫描，把"为什么不提醒"写成人话） ---
+    remindSelfCheckText: '',    // 自查结果行
+    remindSelfCheckType: '',    // '' | 'ok' | 'warn'
+
     // --- 四、导入课表 ---
     icsAvailable: true,         // 解析器是否可用
     icsUnavailableText: '',
@@ -917,7 +954,10 @@ Page({
     this.refreshImportCounts();
     // 到期提醒的状态也是独立一条链：它读不到不该把"学期设置 / 作息表"变成错误态。
     // 【silent】进页面顺手读一次，失败不弹 toast（见文件头第四条）。
-    this.loadRemindStatus({ silent: true });
+    // 【读完再顺手扫一次】见 maybeLazyScan 的说明：触发器没建时，这是提醒唯一会动起来的机会。
+    this.loadRemindStatus({ silent: true }).then(() => {
+      this.maybeLazyScan();
+    });
     return api.getSettings().then((result) => {
       // api.js 失败时 resolve {ok:false,error}（不 reject），必须显式判 ok，
       // 否则会把"没读到设置"显示成"还没设置过"，把人误导到错误方向。
@@ -2172,6 +2212,96 @@ Page({
     });
   },
 
+  /**
+   * 「检查一次」：当场替服务端跑一遍扫描，把结果说成人话。
+   *
+   * 【为什么这个按钮比「发一条测试提醒」有用】测试按钮走的是 `action:'test'` ——
+   * 它绕过了扫描、直接下发，所以它"能响"完全不代表真实提醒能响。真正决定
+   * "为什么没收到"的是扫描：它要按用户逐条判断（有没有填时刻、到没到窗口、
+   * 是不是已经发过、还有没有额度），而**跳过的原因只在返回值里**，界面上原本看不到。
+   * 这个按钮就把那份返回值摆出来 —— 不用去控制台翻日志，也不用等定时器。
+   */
+  onRemindSelfCheck() {
+    if (this.data.remindBusy || this.data.remindLoading) return;
+    if (this.data.remindConfigError) {
+      this.promptRemindConfig();
+      return;
+    }
+
+    this.setData({ remindBusy: true, remindSelfCheckText: '', remindSelfCheckType: '' });
+    remindScan().then((result) => {
+      if (!result || result.ok !== true || !result.data || result.data.ok !== true) {
+        throw new Error(describeError(result));
+      }
+      const data = result.data;
+      const sent = Math.max(0, Math.floor(Number(data.sent) || 0));
+      this.setData({
+        remindBusy: false,
+        remindSelfCheckText: selfCheckText(data),
+        remindSelfCheckType: sent > 0 ? 'ok' : 'warn',
+      });
+      toastText(sent > 0 ? `补发了 ${sent} 条提醒` : '检查完成，结果见下方');
+      // 扫描可能真的发出去几条（额度会变），收尾必须重读状态，否则卡片上的数字是旧的
+      return this.loadRemindStatus({ silent: true });
+    }).catch((err) => {
+      this.setData({
+        remindBusy: false,
+        remindSelfCheckText: `检查失败：${describeError(err)}`,
+        remindSelfCheckType: 'warn',
+      });
+      toastText(`检查失败：${describeError(err)}`);
+    });
+  },
+
+  /**
+   * 打开本页时顺手扫一次（10 分钟最多一次，全程静默）。
+   *
+   * 【只在这几种情况下才不动手】状态没读到 / 没开提醒 / 模板没配 —— 这三种情况
+   * 扫了也发不出去，不如不打扰服务端。
+   * 【失败一律不吭声】它的定位是"尽力补一次"，用户没点任何按钮，失败提示只会变成噪音；
+   * 想知道为什么没发，用户会去点「检查一次」，那里会如实说话。
+   * @returns {void}
+   */
+  maybeLazyScan() {
+    if (this.data.remindReadFailed || this.data.remindConfigError) return;
+    if (this.data.remindEnabled !== true) return;
+    if (this.remindScanBusy) return;
+
+    // 节流：读不到上次时间（存储不可用）时**不扫** —— 宁可少扫一次，
+    // 也不能让"每次打开都扫一遍"这种没有上限的行为悄悄成立。
+    let last = 0;
+    try {
+      last = Number(wx.getStorageSync(LAZY_SCAN_KEY)) || 0;
+    } catch (err) {
+      return;
+    }
+    const now = Date.now();
+    if (last > 0 && now - last < LAZY_SCAN_GAP_MS) return;
+    try {
+      wx.setStorageSync(LAZY_SCAN_KEY, now);
+    } catch (err) {
+      return;
+    }
+
+    this.remindScanBusy = true;
+    remindScan().then((result) => {
+      this.remindScanBusy = false;
+      if (!result || result.ok !== true || !result.data || result.data.ok !== true) return;
+      const data = result.data;
+      const sent = Math.max(0, Math.floor(Number(data.sent) || 0));
+      // 只有"真的发出去了"才打扰用户：什么都没发就不该弹任何东西
+      if (sent > 0) {
+        this.setData({ remindSelfCheckText: selfCheckText(data), remindSelfCheckType: 'ok' });
+        toastText(`补发了 ${sent} 条到期提醒`);
+        return this.loadRemindStatus({ silent: true });
+      }
+      return undefined;
+    }).catch((err) => {
+      this.remindScanBusy = false;
+      console.warn('[me] 顺手扫描失败：', (err && err.message) || err);
+    });
+  },
+
   // =========================================================================
   // 四、导入课表（.ics）
   // =========================================================================
@@ -2785,6 +2915,12 @@ Page({
     roundResultText: roundResultText,
     noCalendarText: noCalendarText,
     calendarSummaryText: calendarSummaryText,
+    // 三点七 · 「检查一次」：扫描返回值 → 人话（utils/tests/remind_page.test.js 用）
+    selfCheckText: selfCheckText,
+    scanReasonText: scanReasonText,
+    SCAN_REASON_TEXT: SCAN_REASON_TEXT,
+    LAZY_SCAN_KEY: LAZY_SCAN_KEY,
+    LAZY_SCAN_GAP_MS: LAZY_SCAN_GAP_MS,
     REMIND_FUNCTION: REMIND_FUNCTION,
     REMIND_DOC: REMIND_DOC,
     REMIND_NO_TEMPLATE_TIP: REMIND_NO_TEMPLATE_TIP,
@@ -3196,6 +3332,63 @@ function calendarSummaryText(summary, built, leadText) {
 }
 
 /**
+ * 把扫描返回值里的"跳过原因"摊成人话：`{no_quota: 2, too_early: 1}` → 「可提醒次数是 0 2 条、还没到提前量窗口 1 条」
+ *
+ * 【为什么原因码要翻译】用户看的是"为什么没收到提醒"，不是 "no_due_instant"。
+ * 认不出的原因码**原样带上**（不吞掉、也不编一个说法），这样出问题时能照着去搜代码。
+ */
+function scanReasonText(reasons) {
+  const map = reasons && typeof reasons === 'object' ? reasons : {};
+  const parts = [];
+  Object.keys(map).forEach((key) => {
+    const n = Math.max(0, Math.floor(Number(map[key]) || 0));
+    if (n <= 0) return;
+    parts.push(`${SCAN_REASON_TEXT[key] || key} ${n} 条`);
+  });
+  return parts.length ? parts.join('、') : '原因不明';
+}
+
+/**
+ * 「检查一次」的结果行：一次扫描之后，到底发生了什么。
+ *
+ * 四种必须说得出区别的情况（用户除了这一行看不到别的）：
+ *   ① 一个用户都没扫到 → 开关没开（不是"没有到期事项"，这两件事完全不一样）
+ *   ② 发送失败         → 失败几条 + 首个错误原话（失败不占额度）
+ *   ③ 真发出去了       → 发了几条，让他去「服务通知」看
+ *   ④ 一条都没发       → 跳过几条、**为什么跳**；没有可跳的就说"没有需要提醒的事项"
+ *
+ * @param {object} data 云函数 scan 的返回值（scanned/sent/skipped/failed/errors/skipped_reasons/lead_min）
+ * @returns {string}
+ */
+function selfCheckText(data) {
+  const d = data || {};
+  const scanned = Math.max(0, Math.floor(Number(d.scanned) || 0));
+  const sent = Math.max(0, Math.floor(Number(d.sent) || 0));
+  const skipped = Math.max(0, Math.floor(Number(d.skipped) || 0));
+  const failed = Math.max(0, Math.floor(Number(d.failed) || 0));
+  const leadMin = Number(d.lead_min);
+
+  if (scanned === 0) {
+    return '扫描了 0 个用户：你的「到期提醒」开关其实没真正打开（服务端那行设置里没有"已开启"）。'
+      + '先点上面的「开启并授权 +1 次」，再回来点这个按钮。';
+  }
+  if (failed > 0) {
+    const first = (Array.isArray(d.errors) && d.errors.length) ? `；第一个错误：${String(d.errors[0])}` : '';
+    return `扫描 ${scanned} 人，有 ${failed} 条发送失败${first}。`
+      + '配置类的失败会自动把额度退回去，所以不用怕白扣。';
+  }
+  if (sent > 0) {
+    return `扫描 ${scanned} 人，刚发出 ${sent} 条提醒 —— 去微信「服务通知」里看，没收到就看手机通知有没有被系统拦。`;
+  }
+  if (skipped > 0) {
+    return `扫描 ${scanned} 人，有 ${skipped} 条该提醒的都被跳过了：${scanReasonText(d.skipped_reasons)}。`;
+  }
+  const lead = Number.isFinite(leadMin) && leadMin > 0 ? `（当前提前量 ${leadMin} 分钟）` : '';
+  return `扫描 ${scanned} 人，没有找到需要提醒的事项${lead}：要么最近的截止还早，`
+    + '要么那条截止只填了日期、没填时刻 —— 没填时刻的不会瞎猜一个时间。';
+}
+
+/**
  * 到期提醒那几个纯函数也导出一份给单测（utils/tests/remind_page.test.js）。
  *
  * 【为什么页面文件也写 module.exports】小程序运行时会 `require` 页面文件、调用它里面的
@@ -3216,6 +3409,12 @@ module.exports = {
     roundResultText: roundResultText,
     noCalendarText: noCalendarText,
     calendarSummaryText: calendarSummaryText,
+    // 三点七 · 「检查一次」：扫描返回值 → 人话（utils/tests/remind_page.test.js 用）
+    selfCheckText: selfCheckText,
+    scanReasonText: scanReasonText,
+    SCAN_REASON_TEXT: SCAN_REASON_TEXT,
+    LAZY_SCAN_KEY: LAZY_SCAN_KEY,
+    LAZY_SCAN_GAP_MS: LAZY_SCAN_GAP_MS,
     REMIND_FUNCTION: REMIND_FUNCTION,
     REMIND_DOC: REMIND_DOC,
     REMIND_NO_TEMPLATE_TIP: REMIND_NO_TEMPLATE_TIP,

@@ -398,6 +398,29 @@
         wx:if="{{remindCalText}}"
       >{{remindCalText}}</view>
 
+      <!-- ===================================================================
+           三点七、检查一次（替服务端跑一遍扫描，把"为什么不提醒"说成人话）
+           【为什么要这个按钮】真实提醒只有"定时扫描"这一个入口，而它断掉的时候
+           界面上一点痕迹都没有（测试按钮绕过扫描，照样能响）。这个按钮把扫描的
+           返回值摆到用户眼前：扫到几条、发了没有、跳过是为什么。
+           =================================================================== -->
+      <view class="btn-row">
+        <view
+          class="wide-btn {{(remindBusy || remindLoading) ? 'btn-disabled' : ''}}"
+          hover-class="wide-btn-hover"
+          bindtap="onRemindSelfCheck"
+        >检查一次：现在为什么不提醒</view>
+      </view>
+      <view class="note">
+        它会当场替服务端跑一遍「扫描」，把结果原样翻译成人话：
+        <text class="note-strong">不需要等定时器，也不用去控制台看日志。</text>
+        只有真的发出提醒才消耗可提醒次数。
+      </view>
+      <view
+        class="result-line {{remindSelfCheckType === 'warn' ? 'result-line-warn' : ''}}"
+        wx:if="{{remindSelfCheckText}}"
+      >{{remindSelfCheckText}}</view>
+
       <!-- 结果行：成功 / 失败 / 拒绝 / 未消耗额度，都如实写在这里 -->
       <view
         class="result-line {{remindResultType === 'warn' ? 'result-line-warn' : ''}}"
