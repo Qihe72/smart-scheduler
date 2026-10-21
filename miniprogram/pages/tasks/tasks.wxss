@@ -320,6 +320,14 @@ page {
   border-radius: 20rpx;
 }
 
+/* 「缺时刻·不会提醒」：与「即将到期」同一版式，换成琥珀色。
+   它不是"快到期"那种紧迫，而是"这条其实永远不会提醒你"的事实说明 ——
+   用红色会和上面那条抢同一个语义。 */
+.meta-notime {
+  color: #8a5a12;
+  background: #fdf1d8;
+}
+
 .line-extra {
   display: flex;
   align-items: center;

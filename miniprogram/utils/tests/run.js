@@ -509,6 +509,12 @@ chain = chain.then(function () {
   // 认不出要指向「拍照识别课表」、没设学期开始日期**不许猜日期**。
   var meTimetable = loadTest('me_timetable.test.js');
   return waitFor(meTimetable);
+}).then(function () {
+  // 「缺时刻·不会提醒」：列表标记（pages/tasks）× 编辑页拦截（pages/edit）两侧对齐。
+  // 它只管一件事，但这件事值钱：用户在列表里能看见"这条其实收不到提醒"，
+  // 点进去一键补 23:59 —— 两个页面各改一半的话，用户照样会漏。
+  var ddlTime = loadTest('ddl_time.test.js');
+  return waitFor(ddlTime);
 });
 
 // ---------------------------------------------------------------------------

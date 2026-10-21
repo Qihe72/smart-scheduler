@@ -81,6 +81,16 @@ const PARITIES = [
 /** 预计耗时预设（分钟）；0 = 不填 */
 const DURATIONS = [0, 15, 30, 45, 60, 90, 120, 180, 240];
 
+/**
+ * 「缺时刻的截止」一键补的那个时刻。
+ *
+ * 【为什么是 23:59 而不是 00:00】截止的语义是"这一天结束之前要交"，
+ * 23:59 是这一天里最晚的那个时刻，比 00:00（＝当天刚开始）更贴近用户的意思。
+ * 云函数那边**不会**替你猜这个值（见 dueInstantOf 的 no-time 分支），
+ * 所以这里必须把选择摆到明面上：要么你点它、要么你留空。
+ */
+const FILL_TIME = '23:59';
+
 /** 周次范围 1 ~ 30（与云函数 normalize.js 的 MIN_WEEK / MAX_WEEK 一致） */
 const WEEKS = (() => {
   const list = [];
@@ -748,6 +758,56 @@ Page({
       return;
     }
 
+    // 【缺时刻的截止 = 永远不会提醒】微信那条提醒通道要求 type=ddl 且**有具体时刻**，
+    // 没时刻的会被扫描直接跳过（cloudfunctions/remind 的 dueInstantOf 刻意不猜 23:59）。
+    // 于是"设了截止"和"收得到提醒"是两件事，而界面上原本完全看不出来 —— 存之前问一句。
+    if (needsTimePrompt(form)) {
+      this.confirmMissingTime();
+      return;
+    }
+
+    this.doSave();
+  },
+
+  /**
+   * 保存前的"缺时刻"确认：一键补 23:59，或者照原样存。
+   *
+   * 【为什么不直接拦住】有人就是只想记个日期（"这周之内"），拦住会把正当用法堵死。
+   * 所以只提醒、给出更省事的那条路，决定权留给用户。
+   * 【弹不出来也要能存】showModal 的 fail 分支照样往下走 —— 弹窗失败不该让人没法保存。
+   */
+  confirmMissingTime() {
+    wx.showModal({
+      title: '这条截止没有时刻',
+      content: '没填具体时刻的截止，微信提醒会跳过它（不会替你猜 23:59）。'
+        + '点「自动填」补上当天 23:59，点「原样存」就这样保存。',
+      confirmText: '自动填',
+      cancelText: '原样存',
+      success: (res) => {
+        if (res && res.confirm) this.fillDeadline2359();
+        this.doSave();
+      },
+      fail: () => {
+        this.doSave();
+      },
+    });
+  },
+
+  /** 把截止时刻补成当天 23:59（表单里能直接看见，不是偷偷改） */
+  fillDeadline2359() {
+    this.setData({ 'form.end_time': FILL_TIME, endPicker: FILL_TIME });
+    wx.showToast({ title: `已填 ${FILL_TIME}`, icon: 'none' });
+  },
+
+  /** 页面上那个「设为当天 23:59」的小链接 */
+  onFill2359() {
+    this.fillDeadline2359();
+  },
+
+  /** 真正的提交（新增 / 编辑两条路），由 onSave 在确认之后调用 */
+  doSave() {
+    if (this.data.saving) return;
+    const form = this.data.form;
     const built = buildPayload(form);
     const next = built.task;
     this.setData({ saving: true });
@@ -838,6 +898,9 @@ Page({
     buildPayload: buildPayload,
     REPEATS: REPEATS,
     emptyForm: emptyForm,
+    // 三点八 · 缺时刻的截止：保存前问一句 + 一键补 23:59（utils/tests/edit_busy.test.js 用）
+    needsTimePrompt: needsTimePrompt,
+    FILL_TIME: FILL_TIME,
   },
 
   /** 当前任务有几个直接子任务 */
@@ -851,6 +914,26 @@ Page({
 // ---------------------------------------------------------------------------
 // 纯函数
 // ---------------------------------------------------------------------------
+
+/**
+ * 保存前要不要问一句「这条截止没有时刻」。
+ *
+ * 只认「截止 + 完全没有时刻」这一种情况：
+ *   * 日程 / 子任务本来就不走到期提醒，不该被这句话打搅；
+ *   * 截止的语义是"只有一个时刻"（buildPayload 会把 start_time 迁到 end_time），
+ *     所以两个都空才算缺 —— 只要有一个就够了，不必重复问。
+ *
+ * 与云函数 dueInstantOf 的判据同一条线：type==='ddl' 且 end_time 是合法 H:MM。
+ * 那边缺时刻就跳过（不猜 23:59），这边就在存的当下把这句话告诉用户。
+ *
+ * @param {object} form 编辑页的 form
+ * @returns {boolean}
+ */
+function needsTimePrompt(form) {
+  const f = form || {};
+  if (str(f.type) !== 'ddl') return false;
+  return !str(f.end_time) && !str(f.start_time);
+}
 
 /**
  * 表单 → 提交给云函数的任务对象。

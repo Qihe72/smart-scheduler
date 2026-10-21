@@ -523,6 +523,8 @@ Page({
     TASK_REMIND_WINDOW_MS: TASK_REMIND_WINDOW_MS,
     TASK_REMIND_GRACE_MS: TASK_REMIND_GRACE_MS,
     BEIJING_OFFSET_MS: BEIJING_OFFSET_MS,
+    // 三点八 · 「缺时刻·不会提醒」标记（utils/tests/ddl_time.test.js 用）
+    viewTask: viewTask,
   },
 });
 
@@ -586,6 +588,11 @@ function viewTask(task, titleById, today, semesterStart) {
     // --- 24 小时内到期（由 loadTasks 用 computeDueSoonIds 统一填） ---
     // 默认 false：没有截止时刻 / 已经完成 / 还早 / 过期太久，都是 false（判据见文件上方注释）
     isSoon: false,
+    // --- 缺时刻的截止：微信那条提醒通道会直接跳过它 ---
+    // 判据与云函数 dueInstantOf 同一口径：截止要看 end_time（ddl 只有这一个时刻）。
+    // 只标"未完成 + 截止 + 有日期 + 一个时刻都没填"，因为只有这一批是真的永远收不到提醒；
+    // 连日期都没有的另有「未定日期」显示（那是另一个问题，不该混成一个标签）。
+    needsTime: type === 'ddl' && !!date && !start && !end && task.done !== true,
     // --- AI 拆解入口 ---
     canDecompose: decompose.ok,
     decomposeBlockedText: decompose.reason,

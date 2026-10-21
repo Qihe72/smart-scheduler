@@ -596,6 +596,124 @@ function run() {
     eq(dailyForm.start_time, '12:30', '每天的时间照传');
     eq(dailyForm.date, '2026-09-07', 'date 就是"第一次发生的那天"（每天由 repeat 表达）');
     return null;
+  }).then(function () {
+    // -------------------------------------------------------------------------
+    // 11. 缺时刻的截止 —— 什么该问、什么不该问
+    // -------------------------------------------------------------------------
+    // 真实事故（2026-10-21）：用户 27 条"该提醒"的截止里有 25 条是"截止没填时刻"，
+    // 被规划器按设计跳过（云函数 dueInstantOf 刻意不替用户猜 23:59）。
+    // 界面上原本一点都看不出来 —— 他以为"设了截止"就等于"会有提醒"。
+    // 所以两处补：列表打「缺时刻·不会提醒」标 + 存之前问一句。
+    block('缺时刻的截止 —— 判据（哪一批会永远收不到提醒）');
+    var T2 = registered.__test;
+    isTrue(!!T2 && typeof T2.needsTimePrompt === 'function', '页面通过 __test 暴露了 needsTimePrompt');
+    eq(T2.FILL_TIME, '23:59', '补的时刻钉住是 23:59（不是 00:00 —— 截止是"这一天结束前"）');
+    isTrue(T2.needsTimePrompt({ type: 'ddl', date: DAY, start_time: '', end_time: '' }) === true,
+      '截止 + 日期 + 一个时刻都没有 → 要问（这种一定收不到提醒）');
+    isFalse(T2.needsTimePrompt({ type: 'ddl', date: DAY, start_time: '', end_time: '18:00' }) === true,
+      '有 end_time → 不问（dueInstantOf 认的就是它）');
+    isFalse(T2.needsTimePrompt({ type: 'ddl', date: DAY, start_time: '18:00', end_time: '' }) === true,
+      '只有 start_time 的老数据 → 不问（buildPayload 会把它迁移到 end_time，提醒收得到）');
+    isFalse(T2.needsTimePrompt({ type: 'event', date: DAY }) === true,
+      '日程不进到期提醒（提醒只认 ddl）→ 不该被问');
+    isFalse(T2.needsTimePrompt({ type: 'subtask', date: DAY }) === true, '子任务不问');
+    isFalse(T2.needsTimePrompt(null) === true, 'null 不炸');
+    return null;
+  }).then(function () {
+    // 页面级：先把 p7 备好（新增一条没有时刻的截止），下一段再按三种回答各存一次
+    block('缺时刻的截止 —— 保存时真的会问，三种回答都要能存下去');
+    serve({ tasks: [], settings: { semester_start: DAY, period_times: null } });
+    ctx.p7 = newPage();
+    // 【别让那个 600ms 回列表的定时器活到 restoreGlobals 之后】本文件末尾专门写过这个坑；
+    // 这一段在末尾那次等待之后，所以直接把跳转换成空函数。
+    ctx.p7.backToList = function () {};
+    ctx.p7.onLoad({});
+    return settle();
+  }).then(function () {
+    var page = ctx.p7;
+    ctx.modals = [];
+    ctx.answer = { confirm: true, cancel: false };
+    global.wx.showModal = function (options) {
+      ctx.modals.push(options);
+      if (options && typeof options.success === 'function') options.success(ctx.answer);
+    };
+    var modals = ctx.modals;
+
+    page.onTypeChange({ detail: { value: 1 } });                     // 下标 1 = 截止
+    page.onTitleInput({ detail: { value: '交实验报告' } });
+    page.onDateChange({ detail: { value: DAY } });
+    eq(page.data.form.type, 'ddl', '类型切到了截止');
+    eq(page.data.form.end_time, '', '先确认：时刻确实是空的');
+
+    // ---- ① 点「自动填」→ 表单里出现 23:59，存下去的也是 23:59 ----
+    page.onSave();
+    eq(modals.length, 1, '缺时刻 → 保存会被拦下来问一句（不是默默存掉）');
+    eq(modals[0].confirmText, '自动填', '按钮一：自动填');
+    eq(modals[0].cancelText, '原样存', '按钮二：原样存（不拦死正当用法）');
+    isTrue(String(modals[0].content).indexOf('23:59') > -1, '弹窗里写清了会补成 23:59');
+    isTrue(String(modals[0].content).indexOf('提醒') > -1, '也写清了后果：不填就没有提醒');
+    eq(page.data.form.end_time, '23:59', '**确认之后表单里真的出现了 23:59**（不是偷偷改）');
+    return settle();
+  }).then(function () {
+    var page = ctx.p7;
+    eq(served.saved.length, 1, '确认完才真的发起保存');
+    eq(served.saved[0].end_time, '23:59', '**交给云函数的那份数据里也是 23:59**（这才是提醒能响的前提）');
+    eq(served.saved[0].type, 'ddl', '类型照旧是截止');
+    return null;
+  }).then(function () {
+    // ---- ② 点「原样存」→ 不补时刻，照样存下去 ----
+    var page = ctx.p7;
+    ctx.answer = { confirm: false, cancel: true };
+    // ①把表单里的时刻填成 23:59 了，这里先清回去（测的是"原样存"，不是同一个表单连存两次）
+    page.setData({ saving: false, 'form.end_time': '' });
+    page.onDateChange({ detail: { value: DAY } });
+    page.onSave();
+    return settle().then(function () {
+      eq(ctx.modals.length, 2, '第二条缺时刻的截止照样会问');
+      eq(served.saved.length, 2, '"原样存"也照存（没有把人拦死）');
+      eq(served.saved[1].end_time, '', '存下去的就是空的（尊重"我只想记个日期"）');
+      return null;
+    });
+  }).then(function () {
+    // ---- ③ 弹窗自己失败（比如被别的东西挡住）→ 也必须能存 ----
+    var page = ctx.p7;
+    global.wx.showModal = function (options) {
+      if (options && typeof options.fail === 'function') options.fail({ errMsg: 'showModal:fail' });
+    };
+    page.setData({ saving: false });
+    page.onDateChange({ detail: { value: DAY } });
+    page.onSave();
+    return settle().then(function () {
+      eq(served.saved.length, 3, '**弹窗失败不该让人连保存都做不了**');
+      return null;
+    });
+  }).then(function () {
+    // ---- ④ 已经有时刻的截止 → 一次都别问 ----
+    var page = ctx.p7;
+    var asked = 0;
+    global.wx.showModal = function () { asked += 1; };
+    page.setData({ saving: false, 'form.end_time': '18:00' });
+    page.onDateChange({ detail: { value: DAY } });
+    page.onSave();
+    return settle().then(function () {
+      eq(asked, 0, '有时刻 → 不问（否则每次保存都弹，成了骚扰）');
+      eq(served.saved.length, 4, '直接存掉');
+      eq(served.saved[3].end_time, '18:00', '时刻原样带着');
+      return null;
+    });
+  }).then(function () {
+    // ---- ⑤ 界面上那条提示 + 小链接（静态检查，防止只改了 js 忘了 wxml） ----
+    var fs = require('fs');
+    var wxml = fs.readFileSync(path.join(ROOT, 'pages', 'edit', 'edit.wxml'), 'utf8');
+    var wxss = fs.readFileSync(path.join(ROOT, 'pages', 'edit', 'edit.wxss'), 'utf8');
+    isTrue(wxml.indexOf('onFill2359') > -1, '编辑页有时间提示里的小链接（catchtap="onFill2359"）');
+    isTrue(wxml.indexOf('微信提醒会跳过它') > -1, '提示里直说后果（微信提醒会跳过它）');
+    isTrue(wxml.indexOf('设为当天 23:59') > -1, '小链接文案写着 23:59');
+    isTrue(wxml.indexOf('isDdl && !form.end_time && !form.start_time') > -1,
+      '提示的显示条件与 needsTimePrompt 同一口径（含 start_time，老数据不误报）');
+    isTrue(wxss.indexOf('.hint-warn') > -1 && wxss.indexOf('.hint-link') > -1,
+      '两个新样式类都在（琥珀色 + 可点链接）');
+    return null;
   });
 }
 

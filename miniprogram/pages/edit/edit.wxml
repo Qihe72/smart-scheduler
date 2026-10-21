@@ -117,6 +117,16 @@
       <view class="hint-line" wx:if="{{isDdl}}">截止只记录一个时刻，所以不显示开始时间。</view>
 
       <!--
+        缺时刻的截止：微信提醒会**跳过**它（云函数刻意不替用户猜 23:59）。
+        所以这里把"不填＝不会提醒"和"一键补 23:59"同时摆出来 —— 只提醒、不拦人，
+        真的只想记个日期的人照样可以留空保存（保存时还会再问一次）。
+      -->
+      <view class="hint-line hint-warn" wx:if="{{isDdl && !form.end_time && !form.start_time}}">
+        没填具体时刻的截止，微信提醒会跳过它（不会替你猜 23:59）。
+        <text class="hint-link" catchtap="onFill2359">设为当天 23:59</text>
+      </view>
+
+      <!--
         占用提示：只提醒，不拦人。
         - 红字来自 planner.findConflicts（编辑模式会排除这条任务自己）；
         - 「换到最近的空闲课节」把起止时间换成 planner.suggestFreeSlot 的结果：
