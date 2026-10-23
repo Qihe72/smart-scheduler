@@ -9,15 +9,12 @@
  *   * 删除 → wx.showModal 二次确认，确认文案写明「会一并删除其子任务」→ api.removeTask(id)。
  *   * 点条目 → pages/edit/edit?id=xxx。
  *   * parent_id 不为空的条目显示「↳ 属于：<父标题>」（点那行小字直接跳父任务）。
- *   * 两个 AI 入口：顶部「AI 录入」→ pages/ai/ai；
- *     每条任务上的「拆解」→ pages/ai/ai?mode=decompose&id=xxx
- *     （只对"待办且不是子任务、并且能排出时间"的条目出现，见 decomposeInfo()）。
  *
  * 【为什么不用三态改筛选口径】
  *   列表默认只看「进行中」，这里用的是 `done === true` 算完成 —— 与云函数 list 的
  *   "取全部"口径一致，勾了就消失，行为可预期。
- *   utils/tasks.js 的三态（pending/done/finished）里多一个「已结课」（每周重复的课
- *   上完最后一次），它**只用于**决定要不要给"拆解"入口：已结课的课不需要再拆。
+ *   utils/tasks.js 的三态（pending/done/finished）里还有一个「已结课」（每周重复的课
+ *   上完最后一次）。列表**不**用它改口径：勾了就消失，行为可预期。
  *   如果哪天要让「进行中」也排除已结课，改 applyFilter 一处即可 —— 但现在不动，
  *   免得列表里的课突然"自己不见了"。
  *
@@ -29,19 +26,6 @@
 const api = require('../../utils/api.js');
 
 // ---------------------------------------------------------------------------
-// utils/tasks.js 是另一位同学交付的三态判定模块（taskState）。这里**只**用它来判断
-// "这条还值不值得拆解"，不拿它改列表的筛选口径（见文件头「为什么不用三态改筛选」）。
-// 用 try/catch 包一层：万一它在运行期不可用，页面照样能用，只是拆解入口退化为
-// "按 done + 不是子任务"这套更宽松的判断，不会把整个任务页带崩。
-// ---------------------------------------------------------------------------
-let tasksUtil = null;
-try {
-  // eslint-disable-next-line global-require
-  tasksUtil = require('../../utils/tasks.js');
-} catch (err) {
-  tasksUtil = null;
-  console.warn('[tasks] utils/tasks.js 不可用，拆解入口改用简化判断：', err);
-}
 
 /** 筛选标签：值与 taskFilter 对应 */
 const FILTERS = [
@@ -129,9 +113,7 @@ Page({
     errorText: '',
     busyId: '',              // 正在被勾选/删除的条目 id（防连点）
     todayDate: '',
-    semesterStart: '',       // 学期开始日期，判断"已结课"要用；从 app.globalData 取
-    aiEnabled: true,         // utils/tasks.js 是否可用（不可用时拆解入口按简化判断）
-    decomposeHint: '',       // 一键拆解不可用时的说明文案，空串 = 可以正常用
+    semesterStart: '',       // 学期开始日期（算"已结课"用）；从 app.globalData 取
 
     // --- 24 小时内到期（降级提示，纯前端算，不依赖 remind 云函数） ---
     dueSoonCount: 0,         // 24 小时内到期的截止事项有几条（只数**未完成**的）
@@ -142,11 +124,6 @@ Page({
     // 学期开始日期只影响"每周重复的课结课了没"，取不到也没关系（退化为按 done 判断）
     this.setData({
       semesterStart: readSemesterStart(),
-      aiEnabled: !!tasksUtil,
-      decomposeHint: tasksUtil
-        ? ''
-        : 'AI 拆解需要 utils/tasks.js（三态判定），当前不可用；'
-          + '你仍然可以进 AI 页手动挑一条任务来拆解。',
     });
     this.loadTasks();
   },
@@ -468,7 +445,7 @@ Page({
 
   /**
    * 只给纯 node 单测用的探针（utils/tests/remind_page.test.js）。
-   * 测的是页面真正在用的那份实现（与 pages/ai/ai.js、pages/week/week.js 同一套做法）。
+   * 测的是页面真正在用的那份实现（与 pages/week/week.js 同一套做法）。
    */
   __test: {
     dueInstantOf: dueInstantOf,
@@ -517,8 +494,6 @@ function viewTask(task, titleById, today, semesterStart) {
   // 只有子任务身份才显示父任务那一行：parent_id 有值但类型没跟上时也算，宁可多显示不可漏
   const showParent = !!parentId;
 
-  const decompose = decomposeInfo(task, type, start, end, semesterStart);
-
   return {
     id: str(task._id),
     title,
@@ -547,64 +522,9 @@ function viewTask(task, titleById, today, semesterStart) {
     // 只标"未完成 + 截止 + 有日期 + 一个时刻都没填"，因为只有这一批是真的永远收不到提醒；
     // 连日期都没有的另有「未定日期」显示（那是另一个问题，不该混成一个标签）。
     needsTime: type === 'ddl' && !!date && !start && !end && task.done !== true,
-    // --- AI 拆解入口 ---
-    canDecompose: decompose.ok,
-    decomposeBlockedText: decompose.reason,
   };
 }
 
-/**
- * 这条任务该不该出现「拆解」入口。
- *
- * 规则（与 pages/ai/ai.js 里挑候选的那套保持一致，免得点进去发现它不在列表里）：
- *   * 已完成 / 已结课（三态里的 done、finished）→ 不给拆：事情都过去了，拆出来也没人做；
- *   * 本身就是子任务 → 不给拆：子任务再拆子任务没有意义（服务端也只支持一层父子）；
- *   * 其余（pending）→ 给拆。
- *
- * 另外，ai.js 拆解时要把子任务排在"今天 ~ 截止日"之间，所以它要求任务有合法日期。
- * 这里也照着要求日期，但**放宽一点**：只要任务自己写了日期就放行，日期合法性交给
- * ai.js 去判（它有自己的 isValidDate），避免两边口径不一致时用户点了没反应。
- *
- * @returns {{ok: boolean, reason: string}} ok=false 时 reason 是给用户看的原因
- */
-function decomposeInfo(task, type, startTime, endTime, semesterStart) {
-  if (type === 'subtask') {
-    // 直接不显示按钮，不占用界面（reason 留空 = WXML 不渲染）
-    return { ok: false, reason: '' };
-  }
-
-  const state = taskStateOf(task, semesterStart);
-  if (state === 'done') {
-    return { ok: false, reason: '已完成，无需拆解' };
-  }
-  if (state === 'finished') {
-    return { ok: false, reason: '已结课，无需拆解' };
-  }
-
-  const hasTime = !!(str(startTime) || str(endTime));
-  if (!str(task.date) && !hasTime) {
-    return { ok: false, reason: '先补上日期，AI 才能把子任务排开' };
-  }
-
-  return { ok: true, reason: '' };
-}
-
-/**
- * 三态判定的统一入口：能用 utils/tasks.js 就用它（口径与服务端一致），
- * 用不了就退化成"done 为真算完成，其余算待办"。
- * @returns {string} 'done' | 'finished' | 'pending'
- */
-function taskStateOf(task, semesterStart) {
-  if (tasksUtil && typeof tasksUtil.taskState === 'function') {
-    try {
-      const state = tasksUtil.taskState(task, semesterStart || '', new Date());
-      if (state) return str(state);
-    } catch (err) {
-      // 落到下面的兜底
-    }
-  }
-  return task && task.done === true ? 'done' : 'pending';
-}
 
 /** 统计每条任务有几个直接子任务（删除确认文案要用） */
 function buildChildCounts(items) {
@@ -792,8 +712,8 @@ function todayStr() {
 
 /**
  * 从 app.globalData 读学期开始日期（判断"每周重复的课结课了没"要用）。
- * 读不到就返回空串 —— taskState 在算不出周次时不会把任务判成已结课，
- * 结果是"多显示一个拆解按钮"，比"该有的按钮不见了"安全。
+ * 读不到就返回空串 —— 算不出周次时按"还没结课"处理，只是列表里少一个判断，
+ * 不影响任何显示。
  */
 function readSemesterStart() {
   try {

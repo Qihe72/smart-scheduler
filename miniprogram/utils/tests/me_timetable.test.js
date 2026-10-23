@@ -166,7 +166,7 @@ function run() {
   clipboardFails = false;
 
   // -------------------------------------------------------------------------
-  block('教务导入入口 —— 认不出内容：指向「拍照识别课表」这条退路');
+  block('教务导入入口 —— 认不出内容：说清楚、并给出手动补的退路');
   var pWrong = newPage();
   pWrong.setData({ semesterStart: '2026-08-31' });
   clipboardText = '今天天气不错，随便复制了一段别的东西。';
@@ -175,8 +175,8 @@ function run() {
   eq(pWrong.data.taskCount, 0, '认不出 → 0 条可导入');
   isTrue(pWrong.data.importResultText.indexOf('没从剪贴板里认出课表') > -1,
     '明确说"没认出"：' + show(pWrong.data.importResultText));
-  isTrue(pWrong.data.importResultText.indexOf('拍照识别课表') > -1,
-    '**指向截图识别这条退路**（不把用户堵死）：' + show(pWrong.data.importResultText));
+  isTrue(pWrong.data.importResultText.indexOf('手动添加') > -1,
+    '**给出可执行的退路**（不把用户堵死）：' + show(pWrong.data.importResultText));
   isTrue(lastToast().indexOf('截图') > -1 || lastToast().indexOf('没认出') > -1,
     'toast 也如实说：' + show(toasts));
 
@@ -201,7 +201,7 @@ function run() {
   isTrue(wxml.indexOf('Ctrl+A') > -1, '写明了复制步骤');
   isTrue(wxml.indexOf('学号密码不会被读取') > -1,
     '**写明凭据不会被读取**（这是这条路线的核心卖点，必须让用户看见）');
-  isTrue(wxml.indexOf('拍照识别课表') > -1, '写明认不出时的退路');
+  isTrue(wxml.indexOf('可以手动补上') > -1, '写明认不出时的退路');
 
   restoreGlobals();
   return Promise.resolve();

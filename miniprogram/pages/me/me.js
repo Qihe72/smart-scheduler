@@ -78,155 +78,6 @@ const TYPE_LABELS = { event: '日程', ddl: '截止', subtask: '子任务' };
 
 /** 学期周次上限（与 normalize.js 的 MAX_WEEK 一致） */
 const MAX_WEEK = 30;
-
-// ---------------------------------------------------------------------------
-// AI 设置
-// ---------------------------------------------------------------------------
-/**
- * 服务商列表：**提交的值直接取自 utils/api.js 的白名单**（api.AI_PROVIDERS）。
- *
- * 【为什么不是本地写死一份】provider 是要发给云函数的**字面量**，api.js 里白名单是
- * `['zhipu', 'deepseek']`（云端 PROVIDERS 表、Python 版 config.py 也都是 zhipu）。
- * 我第一版在本文件里写成了 'glm'，结果 normalizeProvider('glm') 返回 ''、
- * aiConfigSave 直接拒绝 —— 用户点保存 100% 失败，提示还是"请选择服务商"（他明明选了）。
- * 这类"显示名与提交值混用"的错靠 review 很难发现，所以这里**共用同一个来源**：
- * api.js 改了，下拉框跟着改，两者不可能再对不上。
- *
- * label 是给人看的显示名（「智谱 GLM」），value 是给机器看的值（'zhipu'）——
- * 两者本来就该不同，但不能凭记忆写。
- */
-const FALLBACK_PROVIDERS = ['zhipu', 'deepseek'];
-
-/** 显示名映射：key 必须与 api.js 白名单里的值一致（不一致就退化成显示原始值） */
-const AI_PROVIDER_LABELS = {
-  zhipu: {
-    label: '智谱 GLM',
-    hint: '免费档 glm-4.7-flash',
-    keyUrl: 'https://open.bigmodel.cn',
-    keyUrlLabel: '智谱开放平台',
-    keyShape: '智谱的 Key 形如「32 位十六进制.16 位」',
-  },
-  deepseek: {
-    label: 'DeepSeek',
-    // 【模型名以各家官方文档为准】DeepSeek 的 `deepseek-chat` / `deepseek-reasoner`
-    // 自 **2026-07-24 起停止服务**，现在的模型是 `deepseek-flash`（V4.1-Flash）。
-    // 顺带把"这家也能识图"写进 hint —— 用户问过"识图必须换智谱吗"，
-    // 让他一眼就能在这一格看出 DeepSeek 也是原生多模态。
-    hint: '备选，deepseek-flash（V4.1-Flash，原生多模态、自带识图）',
-    keyUrl: 'https://platform.deepseek.com',
-    keyUrlLabel: 'DeepSeek 开放平台',
-    keyShape: 'DeepSeek 的 Key 以 sk- 开头',
-  },
-};
-
-/** 从 api.js 取白名单；取不到时退回 FALLBACK_PROVIDERS，页面不会因此空掉 */
-function providerWhitelist() {
-  const list = api && Array.isArray(api.AI_PROVIDERS) ? api.AI_PROVIDERS : [];
-  const clean = list
-    .map((item) => (typeof item === 'string' ? item.trim() : ''))
-    .filter((item) => !!item);
-  return clean.length ? clean : FALLBACK_PROVIDERS.slice();
-}
-
-/** 下拉框选项：value 来自白名单，label 只是显示名 */
-const AI_PROVIDERS = providerWhitelist().map((value) => {
-  const meta = AI_PROVIDER_LABELS[value] || {};
-  return {
-    value,
-    label: meta.label || value,
-    hint: meta.hint || '',
-    keyUrl: meta.keyUrl || '',
-    keyUrlLabel: meta.keyUrlLabel || value,
-    keyShape: meta.keyShape || '',
-  };
-});
-
-/**
- * 各服务商的默认模型。
- * 【为什么本地还有一份】api.js 的 AI_DEFAULT_MODELS **没有导出**，而页面需要
- * "用户没填时我该提示他会用哪个模型"。这里只用于**展示**；
- * 真正决定用哪个模型的是云函数（用户填了就用用户的，否则用该服务商默认）。
- * 与 api.js 的 AI_DEFAULT_MODELS 必须保持一致（测试里有断言对账）。
- *
- * ⚠️ **模型名会变，以各家官方文档为准**：DeepSeek 的 `deepseek-chat` /
- * `deepseek-reasoner` 自 2026-07-24 起**停止服务**，现在是 `deepseek-flash`。
- * 这一格正是用户抱怨"模型不对"的那一格 —— 显示一个已停服的名字会让他更迷惑。
- */
-const AI_DEFAULT_MODEL = { zhipu: 'glm-4.7-flash', deepseek: 'deepseek-flash' };
-
-/** 模型名长度上限：与 utils/api.js 的 MAX_MODEL_CHARS 一致（那边没导出，这里对账） */
-const MAX_MODEL_CHARS = 60;
-
-/**
- * 从 Key 的**形状**猜它是哪家的（纯本地判断，绝不发请求、绝不联网校验）。
- *
- *   * `sk-` 开头 → 像 DeepSeek；
- *   * `32位十六进制.16位十六进制` → 像智谱（形如 <32 位十六进制>.<16 位字母数字>）。
- *
- * 【为什么这里不写一个"像真的"示例】早先这行写了一个满足该形状的示例串，结果被仓库的
- * 密钥扫描判成"硬编码 API Key"，静态验收直接红。**示例要写成占位符形状**，
- * 否则既误导读者、又让扫描器报警（一条总在响的警报等于没有警报）。
- * 认不出来返回空串 —— **认不出就不提示**，绝不瞎猜（瞎猜会让用户改错服务商）。
- *
- * @param {string} key 用户刚粘贴的 Key
- * @returns {string} 'zhipu' | 'deepseek' | ''
- */
-function detectKeyProvider(key) {
-  const text = str(key);
-  if (!text) return '';
-  if (/^sk-/i.test(text)) return 'deepseek';
-  if (/^[0-9a-f]{32}\.[0-9a-f]{16}$/i.test(text)) return 'zhipu';
-  return '';
-}
-
-/**
- * Key 形状与**当前选中的服务商**是否对不上。
- *
- * 【为什么这条提示很要紧】服务商与 Key 必须来自同一家，否则请求一定失败
- * （服务端会报身份验证失败）。真机上用户就是这么踩的：他粘了 DeepSeek 的 Key，
- * 但下拉框默认停在智谱，于是服务端按 zhipu 解析、界面显示"智谱 + glm-4.7-flash"，
- * 而用户手里明明是 DeepSeek 的 Key —— 他只会觉得"这软件坏了"。
- *
- * 【只提示，不静默切换】服务商是用户的配置，静默改掉比让他自己点一下更糟。
- * 所以这里只返回"该切到哪家"，由用户点按钮确认。
- *
- * @param {string} key 输入框里的 Key
- * @param {string} provider 当前选中的服务商
- * @returns {{detected: string, mismatch: boolean, fixIndex: number, message: string}}
- */
-function keyProviderHint(key, provider) {
-  const detected = detectKeyProvider(key);
-  const current = str(provider);
-  const result = { detected, mismatch: false, fixIndex: -1, message: '' };
-  // 认不出形状、或本来就没有 Key → 不提示
-  if (!detected) return result;
-  // 形状与所选服务商一致 → 不提示
-  if (detected === current) return result;
-
-  const detectedMeta = AI_PROVIDER_LABELS[detected] || {};
-  const currentMeta = AI_PROVIDER_LABELS[current] || {};
-  result.mismatch = true;
-  result.fixIndex = indexOfProvider(detected);
-  result.message = `你填的 Key 看起来是 ${detectedMeta.label || detected} 的`
-    + `（${detectedMeta.keyShape || '形状'}），但上面选的服务商是 `
-    + `${currentMeta.label || current || '(未选)'} —— 两者必须一致，否则会报身份验证失败。`;
-  return result;
-}
-
-/** api.js 里的三个封装是不是已经就绪（没就绪时本区块明确禁用） */
-function aiConfigReady() {
-  return !!(api && typeof api.aiConfigGet === 'function'
-    && typeof api.aiConfigSave === 'function'
-    && typeof api.aiConfigClear === 'function');
-}
-
-// ---------------------------------------------------------------------------
-// 到期提醒（微信订阅消息 / 服务通知）
-// ---------------------------------------------------------------------------
-/**
- * 云函数名：**独立云函数** `remind`，不是 tasks 的一个 action。
- * 契约见 docs/到期提醒.md 第 8 节，云端已冻结，前端照着调即可。
- */
 const REMIND_FUNCTION = 'remind';
 
 /** 提示用户去看配置文档时用的路径（写在文案里，不改文档位置就不会错） */
@@ -778,38 +629,6 @@ Page({
     periodSaveText: '',
     periodSaveFailed: false,
 
-    // --- 三、AI 设置 ---
-    aiAvailable: true,          // api.js 的 aiConfig* 是否就绪
-    aiUnavailableText: '',
-    aiLoading: false,           // 正在读配置
-    aiSaving: false,
-    aiClearing: false,
-    aiProviderIndex: 0,         // 下拉框选中项（只能选，不能填地址）
-    providers: AI_PROVIDERS,
-    aiProviderValue: AI_PROVIDERS[0].value,  // 当前选中的 provider **值**（保存时对它就校验白名单）
-    aiKeyInput: '',             // password 输入框的内容；提交后立刻清空
-    aiKeyPlaceholder: '',
-    aiModel: '',                // **当前生效**的模型名（服务端返回值，只读展示）
-    // --- 模型输入（用户真机抱怨"模型改不了"：以前只有一个只读的"模型：X"，
-    //     后端其实一直支持自选模型，缺的就是这一格） ---
-    aiModelInput: '',           // 用户填的模型名；留空 = 不改（保存时不带 model 字段）
-    aiModelPlaceholder: '留空 = 用该服务商的默认模型',
-    aiModelHint: '',            // 该服务商的默认模型是什么（帮用户决定要不要填）
-    aiModelAliasHint: '',       // 「你填的是宣传名，API 里的名字是 X」——纯提示，不改用户输入
-    // --- Key 形状识别（纯本地，不发请求） ---
-    aiKeyShapeHint: '',         // 形状与服务商不一致时的黄字提醒；一致/认不出时为空
-    aiKeyShapeFixIndex: -1,     // 「切到 X」按钮要切到哪个下标；-1 = 不显示按钮
-    aiKeyShapeFixLabel: '',
-    aiHasKey: false,            // 用户是否填过自己的 Key
-    aiMasked: '',               // 服务端返回的掩码，例如 ****abcd
-    aiStatusText: '',           // 「正在使用你自己填的 Key（****abcd）」等
-    aiStatusType: '',           // '' | 'own' | 'preset' | 'none'
-    aiStatusDetail: '',         // 「服务商：智谱 · 模型：glm-4.7-flash」这一行
-    aiResultText: '',           // 保存/清除的结果提示
-    aiKeyUrl: AI_PROVIDERS[0].keyUrl,
-    aiProviderHint: AI_PROVIDERS[0].hint,
-    aiKeyUrlLabel: AI_PROVIDERS[0].keyUrlLabel || '智谱开放平台',
-    aiDefaultModelText: '',     // 「该服务商的默认模型：glm-4.7-flash」
 
     // --- 三点五、到期提醒（微信订阅消息 / 服务通知，云函数 remind） ---
     remindLoading: true,        // 正在读提醒设置
@@ -896,9 +715,6 @@ Page({
     // 解析器（utils/ics.js）不可用时就如实说明，并把导入按钮换成"暂不可用"，
     // 而不是留一个点了没反应的按钮。
     const ready = icsReady();
-    // AI 设置依赖 utils/api.js 上的三个封装（另一位同学正在加）。没就绪就把这一块
-    // 明确置为"暂不可用"，绝不让 aiConfigGet is not a function 把整页带崩。
-    const aiReady = aiConfigReady();
     // 「替换」依赖云函数的 import_replace（另一位同学在做）。没就绪就把这个选项
     // 明确标出来并禁用，绝不让用户点了确认才发现删不掉。
     const replaceReady = importReplaceReady();
@@ -912,10 +728,6 @@ Page({
       importReplaceHint: replaceReady
         ? ''
         : '「替换已有课表」尚未就绪，当前只能追加。',
-      aiAvailable: aiReady,
-      aiUnavailableText: aiReady
-        ? ''
-        : 'AI 设置功能暂时不可用（接口尚未就绪）；其余功能不受影响。',
     });
     this.loadAll();
   },
@@ -946,8 +758,7 @@ Page({
     this.setData({ loading: true, errorText: '' });
     // 【AI 设置已随 AI 页移出小程序】（个人主体没有「深度合成」类目，审核过不去）。
     // 卡片与入口都删了，这里也就不再读 AI 配置 —— 少一次云端往返，也少一处误导。
-    // 要恢复 AI 功能：把 me.wxml 的「三、AI 设置」卡片加回来，再放开下面这行。
-    // this.loadAiConfig();
+    // AI 配置的读/存/清三个方法也一并删了（见 me.js 里 AI 相关代码的删除记录）。
     // 任务列表也顺手拉一次：用来算"替换会删掉几门课、不碰几条手工任务"，
     // 好让用户在点确认**之前**就看到数字。失败不影响本页（下面各自兜底）。
     this.refreshImportCounts();
@@ -1338,306 +1149,6 @@ Page({
     });
   },
 
-  // =========================================================================
-  // 三、AI 设置（服务商 + 自己的 Key）
-  // =========================================================================
-
-  /**
-   * 读当前 AI 配置。
-   *
-   * 【安全要点】服务端只回 `{provider, model, hasKey, masked}` —— 掩码形如 `****abcd`，
-   * **永远不会有明文**。所以页面 data 里从头到尾不会出现 Key 原文，
-   * 渲染层自然也不可能把它显示出来。
-   */
-  loadAiConfig() {
-    if (!aiConfigReady()) {
-      this.setData({ aiLoading: false });
-      return Promise.resolve();
-    }
-    this.setData({ aiLoading: true });
-    // 【silent: true】这是"进页面顺手读一次"的辅助请求，用户还没做任何操作 ——
-    // 读不到时只在卡片里留一行灰字（下面的 aiResultText），不该弹"网络异常"打扰他。
-    // 走 api.js 导出的核心 call() 并显式传 options：
-    //   * 它是公开接口，明确支持第三个参数 {silent}；
-    //   * `api.aiConfigGet(options)` 现在**也已经会把 options 转发下去**了
-    //     （utils/api.js:663，之前漏传过、我这里是绕过它的直连写法）。
-    //     两种写法行为一致；保留直连是因为它不依赖那个包装的转发细节。
-    // 用户主动点的保存/清除照弹（那是他自己触发的动作，必须给反馈）。
-    const readConfig = typeof api.call === 'function'
-      ? api.call('ai_config_get', null, { silent: true })
-      : api.aiConfigGet();
-    return readConfig.then((result) => {
-      // 与其他路径一致：失败不 reject 而是 {ok:false,error}，必须显式判 ok
-      if (result && result.ok === false) throw new Error(describeError(result));
-      this.applyAiConfig(extractAiConfig(result));
-      this.setData({ aiLoading: false });
-    }).catch((err) => {
-      // 原样显示服务端给的 error，不自己编造"是不是没配 Key / 是不是超时"这类原因
-      this.setData({
-        aiLoading: false,
-        aiResultText: `读取 AI 设置失败：${describeError(err)}`,
-      });
-    });
-  },
-
-  /**
-   * 把服务端返回的 AI 配置写进 data（**只写掩码，不写明文**）。
-   * @param {{provider: string, model: string, hasKey: boolean, masked: string}} config
-   */
-  applyAiConfig(config) {
-    const provider = str(config.provider);
-    const index = Math.max(indexOfProvider(provider), 0);
-    const option = AI_PROVIDERS[index] || AI_PROVIDERS[0];
-    const hasKey = config.hasKey === true;
-    const masked = str(config.masked);
-
-    // 三态文案。**重要**：这里只陈述规则，不陈述页面无法知道的事实 ——
-    // 预置 Key 配在 aiParse / aiDecompose 的环境变量里（微信云开发里每个云函数的环境变量
-    // 各自独立），而本页读的是 tasks 云函数，它根本不知道那边有没有配。
-    // 所以 hasKey=false 时**绝不能说"AI 用不了"** —— 那可能把正在生效的预置 Key 说成不可用。
-    // 真正要区分"到底有没有 Key"的那句话，交给知道答案的一方（aiParse/aiDecompose 的报错）去说。
-    let statusText = '';
-    let statusType = '';
-    if (hasKey) {
-      statusType = 'own';
-      statusText = `正在使用你自己填的 Key（${masked || '****'}）`;
-    } else if (str(config.preset_provider) || config.preset === true) {
-      statusType = 'preset';
-      statusText = '正在使用程序预置的 Key（所有人共用，额度可能有限）';
-    } else {
-      statusType = 'none';
-      // 【不许断言"AI 用不了"】预置 Key 配在 aiParse / aiDecompose 的环境变量里，
-      // tasks 无从得知——这里只陈述"你还没填"，有没有兜底由 AI 云函数报错时去说。
-      statusText = '还没填 Key，AI 用的是程序预置的 Key（如果部署时配了）';
-    }
-
-    // 状态行第二行：把**服务商 + 实际生效的模型**一起写出来。
-    // 真机上用户报"我用的明明是 deepseek，它硬说我用的是智谱大模型"——
-    // 就是因为原来只有「模型：X」，看不出服务商是哪家；而服务商与 Key 必须同源，
-    // 所以这两件事必须能同时看见。
-    const effectiveModel = str(config.model) || AI_DEFAULT_MODEL[option.value] || '';
-    const statusDetail = `服务商：${option.label} · 模型：${effectiveModel || '（未知）'}`;
-
-    this.setData({
-      aiProviderIndex: index,
-      aiProviderValue: option.value,
-      aiProviderHint: option.hint,
-      aiKeyUrl: option.keyUrl,
-      aiKeyUrlLabel: option.keyUrlLabel,
-      aiDefaultModelText: AI_DEFAULT_MODEL[option.value]
-        ? `该服务商的默认模型：${AI_DEFAULT_MODEL[option.value]}`
-        : '',
-      aiModel: effectiveModel,
-      aiStatusDetail: statusDetail,
-      aiHasKey: hasKey,
-      aiMasked: masked,
-      aiStatusText: statusText,
-      aiStatusType: statusType,
-      // 输入框永远留空：要改就重新填一个，绝不回显旧的
-      aiKeyInput: '',
-      aiKeyPlaceholder: hasKey
-        ? `已保存 ${masked || '****'}，留空则不改动`
-        : '粘贴你的 API Key（不会显示出来）',
-      // 模型输入框也留空：留空 = 保持服务端当前生效的模型（保存时不带 model 字段）
-      aiModelInput: '',
-      aiModelAliasHint: '',
-    });
-    // 状态回填后两个输入框都清空了 → 两条提示自然要重算（都会算成"无提示"）
-    this.refreshKeyShapeHint('');
-    this.refreshModelAliasHint('');
-  },
-
-  /**
-   * 重算 Key 形状提示（纯本地，不发任何请求）。
-   * 输入框变化、保存回填、切换服务商都要调它 —— 任何一处漏调，提示就会与界面不同步。
-   * @param {string} key 当前输入框里的 Key（空 = 没有提示）
-   */
-  refreshKeyShapeHint(key) {
-    const hint = keyProviderHint(key, this.data.aiProviderValue);
-    this.setData({
-      aiKeyShapeHint: hint.message,
-      aiKeyShapeFixIndex: hint.fixIndex,
-      aiKeyShapeFixLabel: hint.fixIndex >= 0
-        ? `切到 ${(AI_PROVIDERS[hint.fixIndex] || {}).label || ''}`
-        : '',
-    });
-  },
-
-  /** 换服务商（下拉框，白名单里选） */
-  onAiProviderChange(event) {
-    const index = Number(event.detail && event.detail.value);
-    const safe = Number.isFinite(index) && AI_PROVIDERS[index] ? index : 0;
-    const option = AI_PROVIDERS[safe];
-    this.setData({
-      aiProviderIndex: safe,
-      aiProviderValue: option.value,   // 只写入白名单里的值
-      aiProviderHint: option.hint,
-      aiKeyUrl: option.keyUrl,
-      aiKeyUrlLabel: option.keyUrlLabel,
-      aiDefaultModelText: AI_DEFAULT_MODEL[option.value]
-        ? `该服务商的默认模型：${AI_DEFAULT_MODEL[option.value]}`
-        : '',
-      aiResultText: '',
-    });
-    // 【必须重算】服务商一改，"Key 形状对不对得上"的结论就变了 ——
-    // 例如从 zhipu 切到 deepseek 后，本来那行黄字就该消失。
-    this.refreshKeyShapeHint(this.data.aiKeyInput);
-  },
-
-  /**
-   * 点「切到 DeepSeek / 切到智谱 GLM」按钮。
-   *
-   * 【只改下拉选中项，**不保存、不提交**】服务商是用户的配置，
-   * 静默改掉比让他自己点一下更糟；按钮的作用只是省掉他去点下拉框。
-   * 生效仍然要他按「保存」。
-   */
-  onAiFixProvider() {
-    const index = this.data.aiKeyShapeFixIndex;
-    if (!(index >= 0) || !AI_PROVIDERS[index]) return;
-    this.onAiProviderChange({ detail: { value: index } });
-  },
-
-  /** Key 输入框：只存进 data 供提交用；提交成功后立刻清空 */
-  onAiKeyInput(event) {
-    const value = str(event.detail && event.detail.value);
-    this.setData({ aiKeyInput: value });
-    // 边打字边判断形状（纯本地、零请求）
-    this.refreshKeyShapeHint(value);
-  },
-
-  /** 模型输入框：只存进 data；留空 = 保存时不带 model 字段 */
-  onAiModelInput(event) {
-    const value = str(event.detail && event.detail.value);
-    this.setData({ aiModelInput: value });
-    // 边打字边给"名字写错了"的提示（纯本地、零请求）
-    this.refreshModelAliasHint(value);
-  },
-
-  /**
-   * 模型名写错时的提醒（纯本地，不发请求）。
-   *
-   * 真机反馈：用户填的是 **`deepseek-V4.1-Flash`**（那是 DeepSeek 的**宣传名**），
-   * 而 API 里的模型名是 `deepseek-flash` —— 于是请求失败，
-   * 而报错信息把他误导去查 Key。所以这里把"宣传名 → API 名"的对应关系提示出来。
-   *
-   * 【只提示，绝不自动改用户填的值】静默改写用户的配置比让他自己改一遍更糟：
-   * 他下次看到输入框里的值和自己填的不一样，会怀疑程序在乱动他的东西。
-   *
-   * 【拿不到那个函数就静默跳过】utils/api.js 的 modelAliasAdvice 由另一位同学在加，
-   * 加载顺序上可能还不存在 —— 用 typeof 守卫，缺了就当没有这条提示，绝不报错。
-   *
-   * @param {string} model 当前输入框里的模型名
-   */
-  refreshModelAliasHint(model) {
-    let advice = '';
-    if (typeof api.modelAliasAdvice === 'function') {
-      try {
-        advice = str(api.modelAliasAdvice(str(model)));
-      } catch (err) {
-        // 建议函数自己出错不能连累页面（它只是锦上添花的一条提示）
-        console.warn('[me] modelAliasAdvice 异常，已跳过提示：', err);
-        advice = '';
-      }
-    }
-    this.setData({ aiModelAliasHint: advice });
-  },
-
-  /** 保存：provider 必须是白名单里的值，key 必须非空 */
-  onAiConfigSave() {
-    if (!aiConfigReady() || this.data.aiSaving) return;
-
-    // 提交的是"当前选中项的值"，并对**这个值**再做一次白名单校验。
-    // 不能只信下拉框：数据的来源（data.providers / aiProviderValue）在运行时是可以被改的，
-    // 而这里挡的是"云函数会不会拿一个任意地址去发请求"—— 校验必须落在真正要提交的值上。
-    const provider = str(this.data.aiProviderValue) || (AI_PROVIDERS[this.data.aiProviderIndex] || AI_PROVIDERS[0]).value;
-    if (!isAllowedProvider(provider)) {
-      this.setData({ aiResultText: `服务商不在可选范围内：${provider || '(空)'}` });
-      wx.showToast({ title: '服务商不合法，已阻止提交', icon: 'none' });
-      return;
-    }
-    const apiKey = str(this.data.aiKeyInput);
-    if (!apiKey) {
-      wx.showToast({ title: '请先填写 API Key', icon: 'none' });
-      return;
-    }
-
-    // 模型：留空 → **payload 里不带 model 字段**（不是空串），由云函数用该服务商默认模型；
-    // 填了 → 带 trim 后的值。
-    const modelInput = str(this.data.aiModelInput);
-    if (modelInput.length > MAX_MODEL_CHARS) {
-      // 本地拦下：多半是误粘贴。不发请求，直接给人话（超长服务端也会拒，但白跑一趟网络）
-      this.setData({
-        aiResultText: `模型名过长（${modelInput.length} 字，最多 ${MAX_MODEL_CHARS} 字），`
-          + `请检查是否粘贴错了。`,
-      });
-      toastText('模型名过长，请检查是否粘贴错了');
-      return;
-    }
-
-    const payload = { provider, api_key: apiKey };
-    // 只有确实填了模型才带这个字段 —— 空串会让云函数把模型清成空值
-    if (modelInput) payload.model = modelInput;
-
-    this.setData({ aiSaving: true, aiResultText: '' });
-    api.aiConfigSave(payload).then((result) => {
-      if (result && result.ok === false) throw new Error(describeError(result));
-      // 用服务端返回的掩码回填；**不回显 Key 原文**（data 里也立刻清掉输入）
-      this.applyAiConfig(extractAiConfig(result));
-      this.setData({
-        aiSaving: false,
-        aiResultText: `已保存：${this.data.aiStatusDetail}`
-          + `（Key ${this.data.aiMasked || '****'}）。`,
-      });
-      wx.showToast({ title: '已保存', icon: 'success' });
-    }).catch((err) => {
-      this.setData({
-        aiSaving: false,
-        aiResultText: `保存失败：${describeError(err)}`,
-      });
-      wx.showToast({ title: `保存失败：${describeError(err)}`, icon: 'none' });
-    });
-  },
-
-  /** 清除：二次确认后才清（与删除任务同样的做法） */
-  onAiConfigClear() {
-    if (!aiConfigReady() || this.data.aiClearing) return;
-    if (!this.data.aiHasKey) {
-      wx.showToast({ title: '当前没有你自己填的 Key', icon: 'none' });
-      return;
-    }
-
-    wx.showModal({
-      title: '确认清除',
-      content: '确定清除你自己填的 API Key 吗？清除后会改回使用程序预置的 Key'
-        + '（如果也没有预置，AI 功能将不可用）。此操作不影响你的日程数据。',
-      confirmText: '清除',
-      confirmColor: '#e0553f',
-      success: (res) => {
-        if (!res || !res.confirm) return;
-        this.doClearAiConfig();
-      },
-    });
-  },
-
-  /** 真正执行清除 */
-  doClearAiConfig() {
-    this.setData({ aiClearing: true, aiResultText: '' });
-    api.aiConfigClear().then((result) => {
-      if (result && result.ok === false) throw new Error(describeError(result));
-      this.applyAiConfig(extractAiConfig(result));
-      this.setData({
-        aiClearing: false,
-        aiResultText: '已清除。之后 AI 会使用程序预置的 Key（如果有）。',
-      });
-      wx.showToast({ title: '已清除', icon: 'none' });
-    }).catch((err) => {
-      this.setData({
-        aiClearing: false,
-        aiResultText: `清除失败：${describeError(err)}`,
-      });
-      wx.showToast({ title: `清除失败：${describeError(err)}`, icon: 'none' });
-    });
-  },
 
   // =========================================================================
   // 三点五、到期提醒（微信订阅消息 / 服务通知，云函数 remind）
@@ -2449,7 +1960,7 @@ Page({
         const warnings = parsed.warnings.slice();
         if (!parsed.courses.length) {
           fail('没从剪贴板里认出课表：' + (warnings[0] || '这段内容不像是课表页')
-            + '。也可以在课表页截图，用上面的「拍照识别课表」。', '没认出课表，可改用截图识别');
+            + '。可以把课程名和节次那几行重新复制一次，或者手动添加。', '没认出课表');
           return;
         }
 
@@ -2937,11 +2448,6 @@ Page({
     dropPeriodKey: dropPeriodKey,
     firstTime: firstTime,
     secondTime: secondTime,
-    // AI 设置 · Key 形状与服务商匹配
-    detectKeyProvider: detectKeyProvider,
-    keyProviderHint: keyProviderHint,
-    MAX_MODEL_CHARS: MAX_MODEL_CHARS,
-    AI_DEFAULT_MODEL: AI_DEFAULT_MODEL,
     // 联系与反馈（utils/tests/me_contact.test.js 从**页面对象**上取这三个）
     CONTACTS: CONTACTS,
     contactOf: contactOf,
@@ -3083,27 +2589,6 @@ function extractAiConfig(result) {
     // 界面能直接显示"正在使用预置 Key"；读不到就走上面的"你还没填自己的 Key"。
     preset_provider: str(config.preset_provider) || (config.preset === true ? 'preset' : ''),
   };
-}
-
-/**
- * provider 在白名单里的下标；找不到返回 -1。
- *
- * **只做 trim、不做小写化**，比对是严格相等的：'GLM' / 'Deepseek' 这类大小写变体
- * 一律不认。白名单校验宁可严一点 —— 反正 UI 是下拉框，用户永远只会拿到规范值，
- * 而任何"看着像"的值都可能是有人想塞别的东西（云函数那边也是按规范值存的）。
- * 只 trim 是因为首尾空格纯属手滑，不是另一种服务商。
- */
-function indexOfProvider(value) {
-  const target = str(value);
-  for (let i = 0; i < AI_PROVIDERS.length; i += 1) {
-    if (AI_PROVIDERS[i].value === target) return i;
-  }
-  return -1;
-}
-
-/** 只允许白名单里的服务商（挡住任何"自定义地址"的可能） */
-function isAllowedProvider(value) {
-  return indexOfProvider(value) !== -1;
 }
 
 /** 从 api.listTasks() 的返回值里取任务数组（兼容多种包装层级） */
@@ -3431,11 +2916,6 @@ module.exports = {
     dropPeriodKey: dropPeriodKey,
     firstTime: firstTime,
     secondTime: secondTime,
-    // AI 设置 · Key 形状与服务商匹配（utils/tests/me_ai.test.js 用）
-    detectKeyProvider: detectKeyProvider,
-    keyProviderHint: keyProviderHint,
-    MAX_MODEL_CHARS: MAX_MODEL_CHARS,
-    AI_DEFAULT_MODEL: AI_DEFAULT_MODEL,
     // 联系与反馈（utils/tests/me_contact.test.js 用）
     CONTACTS: CONTACTS,
     contactOf: contactOf,
