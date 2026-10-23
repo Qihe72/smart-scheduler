@@ -70,7 +70,7 @@
           bindtap="onSaveSemester"
         >{{savingSemester ? '保存中…' : '保存开学日期'}}</view>
       </view>
-      <view class="note">保存后云函数会把日期归一化成那一周的周一，课表页会立即按新周次显示。</view>
+      <view class="note">保存后按这一周的周一重新计算。</view>
     </view>
 
     <!-- ================= 二、节次作息（可补录） ================= -->
@@ -130,7 +130,7 @@
       <!-- catchtap 阻止冒泡：点面板本身不该关掉它 -->
       <view class="sheet" catchtap="onNoop">
         <view class="sheet-title">设定「{{periodEditLabel}}」的时间</view>
-        <view class="sheet-sub">填你课表上这一节的实际上课时间，保存后课表页会按它对齐。</view>
+        <view class="sheet-sub">填这一节实际的上课时间，保存后课表按它对齐。</view>
 
         <view class="sheet-row">
           <text class="sheet-label">开始</text>
@@ -360,8 +360,7 @@
       <!-- 平台限制的解释 —— 少了这一行，用户会觉得"怎么又要授权"是 bug -->
       <view class="note">
         <text class="note-strong">一次性订阅：授权一次只能收到一条提醒。</text>
-        这是微信的规则（长期订阅只对特定类目开放，工具类申请不到），所以每点一次「补充授权」只会 +1 次。
-        下面的三条路能让你少点几次，甚至以后不用点。
+        这是微信的规则：工具类小程序申请不到长期订阅。
       </view>
 
       <!-- ===================================================================
@@ -390,8 +389,7 @@
       </view>
       <view class="note">
         <text class="note-strong">这条路不消耗微信提醒次数，也没有条数限制。</text>
-        写进手机自带的日历后由系统闹钟提醒，断网也会响；第一次会问一次「添加到日历」权限，之后不再问。
-        只有填了截止时刻的「截止」事项能写 —— 与微信提醒那条通道的判定完全一致（没填时间的不会瞎猜）。
+        写进手机日历后由系统闹钟提醒，断网也会响。
       </view>
       <view
         class="result-line"
@@ -411,11 +409,6 @@
           bindtap="onRemindSelfCheck"
         >检查一次：现在为什么不提醒</view>
       </view>
-      <view class="note">
-        它会当场替服务端跑一遍「扫描」，把结果原样翻译成人话：
-        <text class="note-strong">不需要等定时器，也不用去控制台看日志。</text>
-        只有真的发出提醒才消耗可提醒次数。
-      </view>
       <view
         class="result-line {{remindSelfCheckType === 'warn' ? 'result-line-warn' : ''}}"
         wx:if="{{remindSelfCheckText}}"
@@ -430,15 +423,8 @@
         需要重试时下拉刷新本页即可。
       </view>
 
-      <view class="note">
-        「发一条测试提醒」需要① 服务端配好了模板、② 你至少授权过一次；
-        它默认<text class="note-strong">不消耗</text>可提醒次数，用来先确认微信能不能收到。
-      </view>
-      <view class="note">
-        收不到提醒？依次看三件事：手机微信的「服务通知」有没有被关掉、
-        模板字段名与微信后台是否一致（见 {{'docs/到期提醒.md'}} 第 7 节）、
-        以及上面「剩余可提醒次数」是不是 0 了。
-      </view>
+      <view class="note">「发一条测试提醒」不消耗可提醒次数，用来先确认微信能不能收到。</view>
+      <view class="note">收不到？先看手机微信的「服务通知」有没有被关掉。</view>
     </view>
 
     <!-- ================= 四、导入课表 ================= -->
@@ -469,13 +455,11 @@
           >{{item.label}}</view>
         </view>
         <view class="note" wx:if="{{importMode === 'replace'}}">
-          替换 = 先清空已有课表再导入新的。
-          <text class="note-strong">只会清掉「每周重复 + 有节次」的课程</text>，
-          也就是 .ics 导入出来的那种；你手工添加的日程、截止与子任务一条都不会删。
+          替换会先清掉 <text class="note-strong">「每周重复 + 有节次」的课程</text>（.ics 导入的那种）；
+          手工添加的日程、截止与子任务不删。
         </view>
         <view class="note" wx:else>
-          追加 = 把这次解析出来的课程直接加进去，已有课表原样保留。
-          如果同一门课导入两次，会出现两份，需要自己删。
+          追加是直接加进去；同一门课导两次会出现两份，需要自己删。
         </view>
         <view class="note" wx:if="{{replaceSummary}}">{{replaceSummary}}</view>
         <view class="note note-warn" wx:if="{{importReplaceHint}}">{{importReplaceHint}}</view>
@@ -556,8 +540,7 @@
               <view class="ghost-btn" hover-class="ghost-btn-hover" bindtap="onCancelImport">取消</view>
             </view>
             <view class="note" wx:if="{{importMode === 'replace'}}">
-              点「替换导入」后会先弹出确认框，写清将删除几门课程、再导入几门；确认前你还能取消。
-              删除与导入由云函数一次完成 —— 不会出现"删完了但没导进去"。
+              点「替换导入」会先弹确认框写清删几门、导几门；确认前可以取消。
             </view>
             <view class="note" wx:else>追加是「新增」，不会覆盖已有任务；一次最多 200 条。</view>
           </block>
@@ -577,7 +560,7 @@
         >{{exporting ? '正在导出…' : '复制备份到剪贴板'}}</view>
       </view>
       <view class="note" wx:if="{{exportHint}}">{{exportHint}}</view>
-      <view class="note">粘贴到备忘录、发给自己或存进电脑即可备份。小程序里没有"下载成文件"的通用做法，剪贴板是最可靠的方式。</view>
+      <view class="note">粘贴到备忘录或发给自己即可备份。</view>
       <view class="code-box" wx:if="{{exportPreview}}">{{exportPreview}}…</view>
     </view>
 
@@ -586,14 +569,14 @@
       <view class="card-title">关于</view>
       <view class="card-sub">{{appName}} · 微信小程序云开发版 · v{{version}}</view>
       <view class="about-line">
-        把「课表 + 截止 + 子任务」放在一处的日程管家：左侧按节次排课表，任务按 DDL 与优先级管理，
-        数据全部存你自己的云环境，不需要任何第三方服务器。
+        把「课表 + 截止 + 子任务」放在一处的日程管家：左侧按节次排课表，
+        任务按 DDL 与优先级管理。
       </view>
 
       <view class="sub-title">第三方资源与致谢</view>
       <view class="third-item">
         <text class="third-name">微信云开发</text>
-        <text class="third-desc">云函数、云数据库与 openid 身份识别；本项目的后端全部由它承载。</text>
+        <text class="third-desc">云函数、云数据库与身份识别。</text>
       </view>
       <view class="third-item">
         <text class="third-name">智谱 GLM（glm-4.7-flash）</text>
@@ -603,7 +586,6 @@
         <text class="third-name">DeepSeek</text>
         <text class="third-desc">备选模型，可在配置里切换。</text>
       </view>
-      <view class="note">以上第三方服务各有其许可与使用条款，本项目仅按公开接口调用，未修改也未再分发其代码。</view>
 
       <view class="row">
         <text class="row-label">云函数</text>

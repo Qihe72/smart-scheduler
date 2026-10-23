@@ -765,8 +765,7 @@ Page({
     periodRows: [],
     periodSourceText: '',       // 「当前使用默认作息（第 1~13 节）」等
     periodOverrideText: '',     // 「其中 3 节是导入课表时校准过的」
-    periodGapHint: '课表里两节之间空得比较久时（例如中午 12:25 到 13:30），'
-      + '会自动显示成一行「午休」；短于 45 分钟的只是课间，不占行。',
+    periodGapHint: '两节之间空得久（≥45 分钟）会自动显示成一行「午休」；更短的只是课间，不占行。',
     // --- 补录弹层（选开始/结束时间） ---
     periodEditVisible: false,
     periodEditIndex: -1,        // 正在编辑的 periodRows 下标；-1 = 没有
@@ -912,12 +911,11 @@ Page({
       importReplaceReady: replaceReady,
       importReplaceHint: replaceReady
         ? ''
-        : '「替换已有课表」需要云函数的 import_replace（尚未就绪），当前只能追加。',
+        : '「替换已有课表」尚未就绪，当前只能追加。',
       aiAvailable: aiReady,
       aiUnavailableText: aiReady
         ? ''
-        : 'AI 设置功能暂不可用（utils/api.js 里的 aiConfig 接口尚未就绪）。'
-          + '其余功能不受影响；接口就绪后本页会自动恢复。',
+        : 'AI 设置功能暂时不可用（接口尚未就绪）；其余功能不受影响。',
     });
     this.loadAll();
   },
@@ -1090,7 +1088,7 @@ Page({
 
     const parts = [];
     if (calibratedCount) {
-      parts.push(`带「已校准」标记的 ${calibratedCount} 节来自导入识别或你手动设定的时间。`);
+      parts.push(`「已校准」= 导入识别或你手动设定的时间（${calibratedCount} 节）。`);
     }
     if (uncalibratedCount) {
       // 【这句话必须说清"错在哪"】用户的原话是"第6节应该是 13:30-14:10，
@@ -1102,8 +1100,7 @@ Page({
     if (periodCount < list.length) {
       // 合成空档行是**有意的**：两节之间空得久（≥45 分钟）就在这里插一行，
       // 与课表页左侧那一行是同一个东西。说一句，免得用户以为列表出错了。
-      parts.push('列表里的「休息 / 午休」空档行是按两节之间的时间空隙自动插的，'
-        + '不是课程，也不用填。');
+      parts.push('「休息 / 午休」是空档行：按时间空隙自动插的，不用填。');
     }
 
     this.setData({
@@ -1914,7 +1911,7 @@ Page({
       this.setData({
         remindSilentAllowed: allowed,
         remindSilentText: allowed
-          ? '已开启自动补充：你在这页每点一次（保存作息、改提前量、写日历…），我都会顺手补 1 次额度，10 分钟最多一次，不用再惦记。'
+          ? '已开启自动补充：在这页点一下就顺手补 1 次额度（10 分钟最多一次）。'
           : '想彻底不用点：下次授权弹窗里勾上「总是保持以上选择，不再询问」，之后我就能自动帮你补额度。'
             + '（这个开关由微信弹窗提供，小程序改不了它，只能请你勾一次。）',
         remindTopUpLabel: maxTimes === 1
@@ -3369,7 +3366,7 @@ function selfCheckText(data) {
   const leadMin = Number(d.lead_min);
 
   if (scanned === 0) {
-    return '扫描了 0 个用户：你的「到期提醒」开关其实没真正打开（服务端那行设置里没有"已开启"）。'
+    return '扫描了 0 个用户：你的「到期提醒」开关其实没真正打开。'
       + '先点上面的「开启并授权 +1 次」，再回来点这个按钮。';
   }
   if (failed > 0) {

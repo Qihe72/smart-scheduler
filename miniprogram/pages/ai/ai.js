@@ -418,7 +418,7 @@ Page({
     var unknownHint = function () {
       return {
         visionState: 'unknown',
-        visionHint: '没能读到 AI 配置，识别前请确认「我的 → AI 设置」里的模型支持识图（拿不准就先识别试试，失败会说清原因）',
+        visionHint: '没能读到 AI 配置，识别前请确认「我的 → AI 设置」里的模型支持识图',
         visionHintLevel: 'muted'
       };
     };

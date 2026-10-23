@@ -137,8 +137,7 @@
           <text class="legend-text">子任务</text>
         </view>
       </view>
-      <text class="footer-tip">午休等空档行、「其他时段」行都不计入「空闲 N 节」</text>
-      <text class="footer-tip">截止不占节次，只标出到期时刻；连堂按实际跨的节数占用</text>
+      <text class="footer-tip">空档行与截止都不计入「空闲 N 节」；连堂按实际跨的节数占用</text>
       <text class="footer-tip">校准过作息后，截止与子任务也会落到对应节次上</text>
     </view>
   </scroll-view>
