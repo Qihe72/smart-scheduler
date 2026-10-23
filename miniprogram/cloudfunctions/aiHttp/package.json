@@ -1,0 +1,10 @@
+{
+  "name": "aiHttp",
+  "version": "1.0.0",
+  "description": "智能日程管家 - H5 网页版的 AI 转发入口（HTTP 触发，只做校验/限流/转发，不含 AI 逻辑）",
+  "main": "index.js",
+  "private": true,
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

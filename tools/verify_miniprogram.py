@@ -23,7 +23,7 @@ DEFAULT_ROOT = os.path.join(os.path.dirname(HERE), "miniprogram")
 
 PAGES = ("week", "tasks", "edit", "ai", "me")
 UTILS = ("periods.js", "planner.js", "tasks.js", "ics.js", "api.js")
-FUNCS = ("tasks", "aiParse", "aiDecompose", "remind")
+FUNCS = ("tasks", "aiParse", "aiDecompose", "remind", "aiHttp")
 
 passed = failed = 0
 
@@ -307,6 +307,11 @@ def main() -> int:
         # 新的要求变成：身份仍只能来自 getWXContext；且不接受前端传入的 baseUrl（否则成 SSRF 转发器）。
         if func == "tasks":
             check("tasks 身份来自 getWXContext", "getWXContext" in src)
+        elif func == "aiHttp":
+            # aiHttp 是给 H5 用的无状态转发层：网页端没有登录态，它也不读任何用户数据，
+            # 所以这里**反过来**要求它不出现 getWXContext —— 哪天有人给它加身份，
+            # 说明它在偷偷按用户读数据，那才是该拦住的事。
+            check("aiHttp 不碰用户身份（H5 没有登录态）", "getWXContext" not in src)
         else:
             check(f"{func} 身份来自 getWXContext（读用户自填 Key 需要）", "getWXContext" in src)
             check(f"{func} 不接受前端传入的 baseUrl（防 SSRF）",

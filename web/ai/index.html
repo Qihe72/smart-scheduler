@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#4F7FFF">
+<title>AI 日程助手 · 网页版</title>
+<style>
+  :root {
+    --brand: #4F7FFF;
+    --brand-dark: #2f5bd7;
+    --bg: #F5F7FA;
+    --card: #FFFFFF;
+    --text: #1f2329;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --ok: #127a3f;
+    --ok-bg: #e8f7ee;
+    --warn: #a45a00;
+    --warn-bg: #fff5e6;
+    --err: #b3261e;
+    --err-bg: #fdeceb;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0;
+    padding: 0 16px calc(28px + env(safe-area-inset-bottom));
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  header { padding: 22px 0 10px; }
+  h1 { margin: 0; font-size: 21px; letter-spacing: .5px; }
+  .sub { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+  .card {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 16px;
+    margin-top: 14px;
+    box-shadow: 0 1px 3px rgba(16, 24, 40, .06);
+  }
+  .card h2 {
+    margin: 0 0 12px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--muted);
+    letter-spacing: .3px;
+  }
+  textarea, input {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 11px 12px;
+    font: inherit;
+    color: inherit;
+    background: #fbfcfe;
+    outline: none;
+  }
+  textarea { min-height: 84px; resize: vertical; }
+  textarea:focus, input:focus { border-color: var(--brand); background: #fff; }
+  .row { display: flex; gap: 10px; margin-top: 12px; }
+  button {
+    font: inherit;
+    border: 0;
+    border-radius: 999px;
+    padding: 11px 18px;
+    background: var(--brand);
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:active { background: var(--brand-dark); }
+  button.ghost {
+    background: #eef2fe;
+    color: var(--brand-dark);
+  }
+  button.ghost:active { background: #dfe7fd; }
+  button:disabled { opacity: .55; cursor: default; }
+  .grow { flex: 1; }
+  .examples { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .chip {
+    font-size: 13px;
+    padding: 6px 11px;
+    border-radius: 999px;
+    background: #f1f3f7;
+    color: var(--muted);
+    border: 0;
+    cursor: pointer;
+    font-weight: 400;
+  }
+  .chip:active { background: #e6e9f0; }
+  .status { margin-top: 12px; font-size: 13px; border-radius: 10px; padding: 10px 12px; display: none; }
+  .status.show { display: block; }
+  .status.info { background: #eef2fe; color: var(--brand-dark); }
+  .status.ok { background: var(--ok-bg); color: var(--ok); }
+  .status.warn { background: var(--warn-bg); color: var(--warn); }
+  .status.err { background: var(--err-bg); color: var(--err); }
+  .result { display: none; }
+  .result.show { display: block; }
+  .group-title {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 14px 0 6px;
+  }
+  .group-title:first-child { margin-top: 0; }
+  ul.items { list-style: none; margin: 0; padding: 0; }
+  ul.items li {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    background: #fbfcfe;
+  }
+  .item-title { font-weight: 600; }
+  .item-meta { color: var(--muted); font-size: 13px; margin-top: 3px; }
+  .tag {
+    display: inline-block;
+    font-size: 12px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: #eef2fe;
+    color: var(--brand-dark);
+    margin-left: 6px;
+    vertical-align: 1px;
+  }
+  .tag.ddl { background: #fdeceb; color: var(--err); }
+  .ask { background: var(--warn-bg); color: var(--warn); border-radius: 10px; padding: 10px 12px; font-size: 14px; }
+  details { margin-top: 14px; }
+  summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+  label.field { display: block; margin-top: 12px; font-size: 13px; color: var(--muted); }
+  label.field input { margin-top: 5px; font-size: 14px; }
+  footer { margin-top: 20px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+  footer p { margin: 6px 0; }
+  code { background: #eef0f4; padding: 1px 5px; border-radius: 5px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>AI 日程助手</h1>
+  <p class="sub">说一句话，自动拆成日程和截止事项。这是网页版 —— 小程序里不提供 AI 功能。</p>
+</header>
+
+<section class="card">
+  <h2>一句话</h2>
+  <textarea id="text" maxlength="500" placeholder="例如：周五下午三点在致腾楼 314 交实验报告；每天中午 13:10 学习打卡"></textarea>
+  <div class="examples">
+    <button class="chip" data-sample="周五下午三点在致腾楼314交实验报告">交实验报告</button>
+    <button class="chip" data-sample="每周二晚上八点到九点半打网球，持续到第16周">每周打网球</button>
+    <button class="chip" data-sample="每天中午13:10-13:20学习打卡">每天打卡</button>
+    <button class="chip" data-sample="10月31日前交光学设计作业，需要先算光路再画图再写报告">带拆解的截止</button>
+  </div>
+  <div class="row">
+    <button id="go" class="grow">解析</button>
+    <button id="clear" class="ghost">清空</button>
+  </div>
+  <div id="status" class="status"></div>
+</section>
+
+<section id="result" class="card result">
+  <h2>解析结果</h2>
+  <div id="ask" class="ask" style="display:none"></div>
+  <div id="groups"></div>
+  <div class="row">
+    <button id="copy" class="ghost grow">复制成文字</button>
+  </div>
+</section>
+
+<details>
+  <summary>连接设置（第一次用要先填）</summary>
+  <label class="field">AI 接口地址
+    <input id="api" type="url" placeholder="https://你的环境.service.tcloudbase.com/ai" autocomplete="off">
+  </label>
+  <label class="field">口令（服务端设了才需要填）
+    <input id="token" type="password" placeholder="可留空" autocomplete="off">
+  </label>
+  <div class="row">
+    <button id="save" class="ghost grow">保存到本机</button>
+  </div>
+</details>
+
+<footer>
+  <p>你的文字会发送到服务端，再由服务端转给第三方 AI（DeepSeek / 智谱）解析，解析结果直接返回，不在服务器保存。API Key 只存在服务端，不会出现在这个页面里。</p>
+  <p>识图（课表截图）需要你的节次作息才能排进课表，请在小程序里用。</p>
+  <p>本页可离线收藏；打不开时先检查上面填的接口地址是否以 <code>https://</code> 开头。</p>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  var STORE_API = 'webai.api';
+  var STORE_TOKEN = 'webai.token';
+
+  var $text = document.getElementById('text');
+  var $go = document.getElementById('go');
+  var $clear = document.getElementById('clear');
+  var $status = document.getElementById('status');
+  var $result = document.getElementById('result');
+  var $groups = document.getElementById('groups');
+  var $ask = document.getElementById('ask');
+  var $copy = document.getElementById('copy');
+  var $api = document.getElementById('api');
+  var $token = document.getElementById('token');
+  var $save = document.getElementById('save');
+
+  var lastText = '';
+  var busy = false;
+
+  function readStore(key) {
+    try { return window.localStorage.getItem(key) || ''; } catch (e) { return ''; }
+  }
+  function writeStore(key, value) {
+    try { window.localStorage.setItem(key, value); } catch (e) { /* 无痕模式写不进去，不致命 */ }
+  }
+
+  $api.value = readStore(STORE_API);
+  $token.value = readStore(STORE_TOKEN);
+
+  $save.addEventListener('click', function () {
+    writeStore(STORE_API, $api.value.trim());
+    writeStore(STORE_TOKEN, $token.value.trim());
+    setStatus('ok', '已保存在这台设备上');
+  });
+
+  function setStatus(kind, message) {
+    $status.className = 'status show ' + kind;
+    $status.textContent = message;
+  }
+  function clearStatus() {
+    $status.className = 'status';
+    $status.textContent = '';
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (chip) {
+    chip.addEventListener('click', function () {
+      $text.value = chip.getAttribute('data-sample') || '';
+      $text.focus();
+    });
+  });
+
+  $clear.addEventListener('click', function () {
+    $text.value = '';
+    $result.className = 'card result';
+    clearStatus();
+    $text.focus();
+  });
+
+  function endpoint() {
+    var url = (readStore(STORE_API) || $api.value || '').trim();
+    if (!url) return '';
+    return url;
+  }
+
+  function post(payload) {
+    var url = endpoint();
+    if (!url) {
+      return Promise.reject(new Error('还没填接口地址：展开下面的「连接设置」，把云函数 HTTP 地址填进去。'));
+    }
+    var headers = { 'Content-Type': 'application/json' };
+    var token = (readStore(STORE_TOKEN) || $token.value || '').trim();
+    if (token) headers['X-Web-AI-Token'] = token;
+
+    return fetch(url, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify(payload)
+    }).then(function (response) {
+      return response.text().then(function (raw) {
+        var data = null;
+        try { data = JSON.parse(raw); } catch (e) { data = null; }
+        if (!data) {
+          throw new Error('接口返回的不是 JSON（HTTP ' + response.status + '）：' + raw.slice(0, 120));
+        }
+        if (data.ok === false) {
+          throw new Error(data.error || '没能解析');
+        }
+        if (response.status >= 400) {
+          throw new Error('接口报错（HTTP ' + response.status + '）');
+        }
+        return data.data || {};
+      });
+    });
+  }
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  }
+
+  function metaOf(item) {
+    var parts = [];
+    if (item.date) parts.push(item.date);
+    if (item.start_time && item.end_time) parts.push(item.start_time + '–' + item.end_time);
+    else if (item.end_time) parts.push(item.end_time + ' 前');
+    else if (item.start_time) parts.push(item.start_time);
+    if (item.repeat === 'weekly') parts.push('每周');
+    if (item.repeat === 'daily') parts.push('每天');
+    if (item.priority) parts.push('优先级 ' + item.priority);
+    return parts.join(' · ');
+  }
+
+  function renderItem(item, isDdl) {
+    var li = el('li');
+    var title = el('span', 'item-title', item.title || '（没起名字）');
+    li.appendChild(title);
+    li.appendChild(el('span', 'tag' + (isDdl ? ' ddl' : ''), isDdl ? '截止' : (item.type || '日程')));
+    var meta = metaOf(item);
+    if (meta) li.appendChild(el('div', 'item-meta', meta));
+    return li;
+  }
+
+  function render(data) {
+    $groups.innerHTML = '';
+    var events = data.events || [];
+    var deadlines = data.deadlines || [];
+    var question = data.needs_clarification && data.clarification_question;
+
+    if (question) {
+      $ask.style.display = 'block';
+      $ask.textContent = question;
+    } else {
+      $ask.style.display = 'none';
+      $ask.textContent = '';
+    }
+
+    if (events.length) {
+      $groups.appendChild(el('div', 'group-title', '日程（' + events.length + '）'));
+      var ul = el('ul', 'items');
+      events.forEach(function (item) { ul.appendChild(renderItem(item, false)); });
+      $groups.appendChild(ul);
+    }
+    if (deadlines.length) {
+      $groups.appendChild(el('div', 'group-title', '截止（' + deadlines.length + '）'));
+      var dl = el('ul', 'items');
+      deadlines.forEach(function (item) { dl.appendChild(renderItem(item, true)); });
+      $groups.appendChild(dl);
+    }
+    if (!events.length && !deadlines.length && !question) {
+      $groups.appendChild(el('div', 'group-title', '这次没有识别出具体事项，换个说法再试一次。'));
+    }
+
+    lastText = toPlainText(data);
+    $result.className = 'card result show';
+  }
+
+  function toPlainText(data) {
+    var lines = [];
+    (data.events || []).forEach(function (item) {
+      lines.push('· ' + (item.title || '') + '（' + metaOf(item) + '）');
+    });
+    (data.deadlines || []).forEach(function (item) {
+      lines.push('! ' + (item.title || '') + '（' + metaOf(item) + '）');
+    });
+    if (data.needs_clarification && data.clarification_question) {
+      lines.push('? ' + data.clarification_question);
+    }
+    return lines.join('\n');
+  }
+
+  $copy.addEventListener('click', function () {
+    if (!lastText) return;
+    var done = function () { setStatus('ok', '已复制，粘到小程序的任务里就行'); };
+    var fallback = function () {
+      setStatus('warn', '复制失败，请长按下面的文字手动复制：\n' + lastText);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(lastText).then(done).catch(fallback);
+      return;
+    }
+    try {
+      var area = document.createElement('textarea');
+      area.value = lastText;
+      document.body.appendChild(area);
+      area.select();
+      var ok = document.execCommand('copy');
+      document.body.removeChild(area);
+      if (ok) done(); else fallback();
+    } catch (e) {
+      fallback();
+    }
+  });
+
+  $go.addEventListener('click', function () {
+    if (busy) return;
+    var text = ($text.value || '').trim();
+    if (!text) {
+      setStatus('warn', '先写一句话，再点解析');
+      $text.focus();
+      return;
+    }
+    busy = true;
+    $go.disabled = true;
+    $go.textContent = '解析中…';
+    setStatus('info', '正在问 AI，通常几秒。');
+
+    post({ action: 'parse', text: text }).then(function (data) {
+      render(data);
+      clearStatus();
+    }).catch(function (error) {
+      setStatus('err', (error && error.message) || '出错了');
+      $result.className = 'card result';
+    }).then(function () {
+      busy = false;
+      $go.disabled = false;
+      $go.textContent = '解析';
+    });
+  });
+})();
+</script>
+</body>
+</html>

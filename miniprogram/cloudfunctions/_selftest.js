@@ -3256,6 +3256,99 @@ testCaseAsync('10.25 scan：REMIND_FIELD_MAP 生效（换模板字段名不改�
 });
 
 // ===========================================================================
+// aiHttp —— 给 H5 网页版用的 HTTP 转发入口
+//   为什么要单独测：它是**唯一一层暴露在公网、谁都能打**的代码（浏览器直接 POST）。
+//   口令、限流、字段校验任何一条漏掉，别人就能拿它白嫖你的 AI 额度；
+//   而它自己必须**不碰用户身份**（H5 没有登录态），只做"校验 + 转发"。
+// ===========================================================================
+const aiHttp = require(path.join(__dirname, 'aiHttp', 'index.js'));
+
+function aiJson(res) {
+  try {
+    return JSON.parse(res.body);
+  } catch (error) {
+    return null;
+  }
+}
+
+testCaseAsync('aiHttp：预检、方法与请求体校验', async () => {
+  const pre = await aiHttp.main({ httpMethod: 'OPTIONS', headers: {} });
+  eq(pre.statusCode, 204, '预检直接 204');
+  eq(pre.headers['Access-Control-Allow-Origin'], '*', '默认允许任意来源（没设 WEB_AI_ORIGIN）');
+  ok(/X-Web-AI-Token/i.test(pre.headers['Access-Control-Allow-Headers'] || ''), '预检放行口令头，否则网页带不上');
+
+  const get = await aiHttp.main({ httpMethod: 'GET', headers: {} });
+  eq(get.statusCode, 405, '只收 POST');
+
+  const noText = await aiHttp.main({ httpMethod: 'POST', headers: {}, body: JSON.stringify({ action: 'parse' }) });
+  eq(noText.statusCode, 400, '缺 text 直接拒');
+
+  const tooLong = await aiHttp.main({ httpMethod: 'POST', headers: {}, body: JSON.stringify({ text: 'x'.repeat(501) }) });
+  eq(tooLong.statusCode, 400, '超 500 字直接拒');
+
+  const unknown = await aiHttp.main({ httpMethod: 'POST', headers: {}, body: JSON.stringify({ text: '一句话', action: 'nope' }) });
+  eq(unknown.statusCode, 400, '不认识的 action 直接拒');
+});
+
+testCaseAsync('aiHttp：口令与限流（公网唯一的两个闸）', async () => {
+  aiHttp.__test.hits.clear();
+  process.env.WEB_AI_TOKEN = 'S';
+  const missing = await aiHttp.main({ httpMethod: 'POST', headers: {}, body: JSON.stringify({ text: '周五交报告' }) });
+  eq(missing.statusCode, 401, '没带口令就 401');
+  const wrong = await aiHttp.main({ httpMethod: 'POST', headers: { 'X-Web-AI-Token': 'x' }, body: JSON.stringify({ text: '周五交报告' }) });
+  eq(wrong.statusCode, 401, '口令不对也 401');
+  delete process.env.WEB_AI_TOKEN;
+
+  aiHttp.__test.hits.clear();
+  process.env.WEB_AI_RPM = '2';
+  aiHttp.__test.setCloud({ callFunction: async () => ({ result: { ok: true, events: [] } }) });
+  let last = null;
+  for (let i = 0; i < 3; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    last = await aiHttp.main({ httpMethod: 'POST', headers: { 'x-forwarded-for': '1.1.1.1' }, body: JSON.stringify({ text: '周五交报告' }) });
+  }
+  eq(last.statusCode, 429, '同一个 IP 超过每分钟上限就 429');
+  delete process.env.WEB_AI_RPM;
+  aiHttp.__test.hits.clear();
+});
+
+testCaseAsync('aiHttp：转发落点与"人话"透传', async () => {
+  aiHttp.__test.hits.clear();
+  const parseCalls = [];
+  aiHttp.__test.setCloud({
+    callFunction: async (options) => {
+      parseCalls.push(options);
+      return { result: { ok: true, events: [{ title: '交报告' }] } };
+    },
+  });
+  const parsed = await aiHttp.main({ httpMethod: 'POST', headers: {}, body: JSON.stringify({ text: '周五下午交报告' }) });
+  eq(aiJson(parsed).ok, true, '内层成功时包成 ok:true');
+  eq(parseCalls[0].name, 'aiParse', '解析转发给 aiParse');
+  eq(parseCalls[0].data.text, '周五下午交报告', '只传 text');
+  eq(Object.keys(parseCalls[0].data), ['text'], '不夹带身份、地址等任何其它字段');
+
+  aiHttp.__test.setCloud({ callFunction: async () => ({ result: { ok: false, error: 'AI 服务暂不可用' } }) });
+  const inner = await aiHttp.main({ httpMethod: 'POST', headers: {}, body: JSON.stringify({ text: '周五交报告' }) });
+  eq(inner.statusCode, 200, '内层失败仍返回 200（网页要能把人话显示出来）');
+  eq(aiJson(inner).error, 'AI 服务暂不可用', '后端写的人话原样透传，不改写');
+
+  const decCalls = [];
+  aiHttp.__test.setCloud({
+    callFunction: async (options) => {
+      decCalls.push(options);
+      return { result: { ok: true, subtasks: [] } };
+    },
+  });
+  await aiHttp.main({ httpMethod: 'POST', headers: {}, body: JSON.stringify({ action: 'decompose', title: '写报告', deadline: '2026-10-31' }) });
+  eq(decCalls[0].name, 'aiDecompose', '拆解转发给 aiDecompose');
+  eq(decCalls[0].data.deadline, '2026-10-31', 'deadline 原样带过去');
+
+  const badDate = await aiHttp.main({ httpMethod: 'POST', headers: {}, body: JSON.stringify({ action: 'decompose', title: '写报告', deadline: '10月31日' }) });
+  eq(badDate.statusCode, 400, '日期形状不对直接拒（不猜）');
+  aiHttp.__test.hits.clear();
+});
+
+// ===========================================================================
 // 汇总
 // ===========================================================================
 (async () => {
