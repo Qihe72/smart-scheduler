@@ -432,9 +432,6 @@ chain = chain.then(function () {
   var aiContract = loadTest('ai_contract.js');
   return waitFor(aiContract);
 }).then(function () {
-  var aiPage = loadTest('ai_page.test.js');
-  return waitFor(aiPage);
-}).then(function () {
   // 课表页的空闲统计（纯函数探针，不装全局桩）。
   // 它是「空闲 N 节」那个真机 bug 的常驻回归测试 —— 当年六份测试全绿却漏了它。
   var weekFree = loadTest('week_free.test.js');
@@ -456,25 +453,12 @@ chain = chain.then(function () {
   var editBusy = loadTest('edit_busy.test.js');
   return waitFor(editBusy);
 }).then(function () {
-  // 课表截图识别（parse_image）：装全局桩 + 要往云函数里递真实报文，所以同样放在串行链里。
-  // 【必须排在这条链的最后】它会删掉 require 缓存、让 pages/ai/ai.js 在**自己的桩**下
-  // 重新注册一次（否则 ai_page.test.js 已经加载过、require 缓存命中就拿不到注册对象）。
-  // 放在最后，前面几个文件的 registered 早就拿到手了，不受影响。
-  var vision = loadTest('ai_vision.test.js');
-  return waitFor(vision);
-}).then(function () {
   // 到期提醒的小程序端（「我的」页卡片 + 任务页的降级提示）。装全局桩，所以也在这条串行链里。
   // 它钉住的红线：两层 ok / 模板 ID 不许硬编码 / ack count 恒为 1 / reject·ban 不许 ack /
   // status 失败要静默 / 「24 小时内到期」的北京时间口径。云函数那一半由
   // cloudfunctions/_selftest.js 覆盖，两边合起来才是完整的一条链。
   var remindPage = loadTest('remind_page.test.js');
   return waitFor(remindPage);
-}).then(function () {
-  // 我的页 · AI 设置：模型可填 + Key 形状与服务商匹配。
-  // 真机上用户抱怨"我用的明明是 deepseek，它硬说我用的是智谱大模型，还改不了" ——
-  // 这个文件钉住那次 UI 缺口的修复（模型输入框、不匹配提示、按钮只改选中项不自动保存）。
-  var meAi = loadTest('me_ai.test.js');
-  return waitFor(meAi);
 }).then(function () {
   // 我的页 · 节次作息：未校准标记 + 补录 / 清除。
   // 真机上用户问"第6节应该是 13:30-14:10，为什么显示 14:55-15:40"——
@@ -523,5 +507,5 @@ chain = chain.then(function () {
 chain.then(function () {
   console.log('\n已加载的测试文件：' + loaded.join(', '));
   if (skipped.length) console.log('未包含（文件不存在）：' + skipped.join(', '));
-  H.report('periods + planner + tasks + AI 契约 + AI 页入口 + 课表页空闲统计 + 我的页导入 + 订阅少点几次 + 联系与反馈');
+  H.report('periods + planner + tasks + AI 契约 + 课表页空闲统计 + 我的页导入 + 订阅少点几次 + 联系与反馈');
 });

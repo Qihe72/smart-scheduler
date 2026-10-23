@@ -92,15 +92,6 @@ const TASK_REMIND_GRACE_MS = 10 * 60 * 1000;
 /** 北京时间相对 UTC 的偏移（与云函数 BEIJING_OFFSET_MS 同值） */
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 
-/**
- * 「拆解」入口的路径（绝对路径，wx.navigateTo 要求以 / 开头）。
- * 参数契约由 pages/ai/ai.js 定：mode=decompose + id=<任务id>。
- */
-const AI_DECOMPOSE_URL = '/pages/ai/ai?mode=decompose&id=';
-
-/** AI 录入页的路径 */
-const AI_PARSE_URL = '/pages/ai/ai';
-
 /** 各筛选下的空态文案（空列表时总得告诉用户"是没数据，还是筛掉了"） */
 const EMPTY_TEXT = {
   pending: '当前没有进行中的任务',
@@ -473,43 +464,6 @@ Page({
   /** 空态里的按钮 */
   onTapAdd() {
     wx.navigateTo({ url: '/pages/edit/edit' });
-  },
-
-  // -------------------------------------------------------------------------
-  // AI 入口（两个：顶部整句录入、每条任务单独拆解）
-  // -------------------------------------------------------------------------
-
-  /** 顶部「AI 录入」→ 自然语言录入模式 */
-  onTapAiParse() {
-    // 路径必须是绝对路径（以 / 开头），否则 wx.navigateTo 会报 fail
-    wx.navigateTo({ url: AI_PARSE_URL });
-  },
-
-  /**
-   * 条目的「拆解」→ AI 页的任务拆解模式。
-   * URL 契约（由 pages/ai/ai.js 定）：mode=decompose + id=<任务id>。
-   * 用 catchtap 绑定：防止冒泡到整行，变成"先跳编辑页又跳 AI 页"。
-   */
-  onTapAiDecompose(event) {
-    const id = str(event && event.currentTarget && event.currentTarget.dataset
-      ? event.currentTarget.dataset.id
-      : '');
-    if (!id) {
-      wx.showToast({ title: '这条数据缺少 id', icon: 'none' });
-      return;
-    }
-    wx.navigateTo({ url: `${AI_DECOMPOSE_URL}${encodeURIComponent(id)}` });
-  },
-
-  /**
-   * 点了置灰的「拆解」：把不能拆的原因说清楚。
-   * 做成"能点、点了给原因"而不是"完全没反应"，是因为一个消失的按钮会让人以为是 bug。
-   */
-  onTapAiBlocked(event) {
-    const reason = str(event && event.currentTarget && event.currentTarget.dataset
-      ? event.currentTarget.dataset.reason
-      : '');
-    wx.showToast({ title: reason || '这条任务暂时不能拆解', icon: 'none' });
   },
 
   /**

@@ -3,8 +3,7 @@
     "pages/week/week",
     "pages/tasks/tasks",
     "pages/edit/edit",
-    "pages/me/me",
-    "pages/ai/ai"
+    "pages/me/me"
   ],
   "window": {
     "navigationBarBackgroundColor": "#4F7FFF",

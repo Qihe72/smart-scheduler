@@ -5,8 +5,7 @@
     1. 学期设置      → 能改（picker 选日期 + 保存按钮）
     2. 节次作息      → 能改：未校准的节次可以「设定时间」补录，已校准的可以「修改 / 清除」
                        （程序推不出"一节没有课的时间"，所以必须让用户自己补 —— 见卡片里的解释）
-    3. AI 设置       → 能改（下拉选服务商 + 填自己的 Key）
-    3.5 到期提醒     → 能开（弹一次微信订阅授权 → ack +1 次）；平台限制写在卡片正文里
+    3. 到期提醒      → 能开（弹一次微信订阅授权 → ack +1 次）；平台限制写在卡片正文里
     4. 导入课表      → 能用的完整流程；若解析器不可用则显示"当前版本不可用"并禁用按钮
     5. 导出备份      → 能用的（复制到剪贴板）
     6. 关于 / 数据说明 → 静态文案
@@ -165,136 +164,6 @@
           <view class="ghost-btn" hover-class="ghost-btn-hover" bindtap="onTapPeriodCancel">取消</view>
         </view>
       </view>
-    </view>
-
-    <!-- ================= 三、AI 设置 ================= -->
-    <view class="card">
-      <view class="card-title">AI 设置</view>
-      <view class="card-sub">填自己的 Key，AI 就用你的额度，不占别人的。</view>
-
-      <!-- 接口没就绪时明确禁用（不假装能用） -->
-      <block wx:if="{{!aiAvailable}}">
-        <view class="note note-warn">{{aiUnavailableText}}</view>
-      </block>
-
-      <block wx:else>
-        <!-- 1. 当前状态（只显示掩码，永远不显示 Key 原文） -->
-        <view class="ai-status ai-status-{{aiStatusType}}" wx:if="{{!aiLoading}}">
-          <text class="ai-status-text">{{aiStatusText}}</text>
-          <!-- 第二行：服务商 + 实际生效的模型。真机上用户抱怨"我用的明明是 deepseek，
-               它硬说我用的是智谱大模型" —— 就是因为原来只有「模型：X」，看不出服务商是哪家 -->
-          <text class="ai-status-model" wx:if="{{aiStatusDetail}}">{{aiStatusDetail}}</text>
-        </view>
-        <view class="ai-status" wx:else>
-          <text class="ai-status-text">正在读取 AI 设置…</text>
-        </view>
-
-        <!-- 没填自己的 Key 时，只把**规则**讲清楚，不断言"用不了"：
-             预置 Key 配在 aiParse / aiDecompose 的环境变量里（每个云函数的环境变量各自独立），
-             提供本接口的 tasks 云函数无从得知，所以这里不猜。
-             "到底有没有 Key"由知道答案的 AI 云函数在报错时去说。 -->
-        <view class="note" wx:if="{{aiStatusType === 'none'}}">
-          AI 优先用你自己填的 Key；没填时由程序预置的 Key 兜底（如果部署时配了）。
-          两边都没有的话，AI 页会提示不可用并引导你回到这里。
-        </view>
-
-        <!-- 2. 服务商：**只能是下拉框**（白名单）。放自定义地址等于把云函数变成
-             任意请求转发器（SSRF），所以界面上根本不给填地址的地方。 -->
-        <view class="row">
-          <text class="row-label">服务商</text>
-          <picker
-            class="row-right"
-            mode="selector"
-            range="{{providers}}"
-            range-key="label"
-            value="{{aiProviderIndex}}"
-            bindchange="onAiProviderChange"
-          >
-            <view class="picker-value">
-              <text class="picker-value-text">{{providers[aiProviderIndex].label}}</text>
-              <text class="picker-arrow">▾</text>
-            </view>
-          </picker>
-        </view>
-        <view class="note" wx:if="{{aiProviderHint}}">该服务商：{{aiProviderHint}}</view>
-
-        <!-- 3. Key 输入（password，别让旁边的人看到） -->
-        <view class="row">
-          <text class="row-label">API Key</text>
-          <input
-            class="ai-key-input"
-            type="text"
-            password="{{true}}"
-            placeholder="{{aiKeyPlaceholder}}"
-            value="{{aiKeyInput}}"
-            bindinput="onAiKeyInput"
-          />
-        </view>
-
-        <!-- 3a. Key 形状与服务商对不上 → 黄字提醒 + 一键切换。
-             服务商与 Key 必须来自同一家，否则一定报身份验证失败；
-             真机上用户就是粘了 DeepSeek 的 Key、服务商却停在智谱。
-             按钮**只改下拉选中项、不保存不提交**（绝不静默改用户配置）。 -->
-        <view class="ai-keywarn" wx:if="{{aiKeyShapeHint}}">
-          <text class="ai-keywarn-text">{{aiKeyShapeHint}}</text>
-          <view
-            class="ai-keywarn-btn"
-            wx:if="{{aiKeyShapeFixIndex >= 0}}"
-            hover-class="ai-keywarn-btn-hover"
-            bindtap="onAiFixProvider"
-          >{{aiKeyShapeFixLabel}}</view>
-        </view>
-
-        <!-- 3b. 模型（可留空）。后端一直支持用户自选模型，缺的就是这一格：
-             真机上用户说"模型改不了"，因为这里原来只有一个**只读**的「模型：X」。 -->
-        <view class="row">
-          <text class="row-label">模型</text>
-          <input
-            class="ai-key-input"
-            type="text"
-            placeholder="{{aiModelPlaceholder}}"
-            value="{{aiModelInput}}"
-            bindinput="onAiModelInput"
-          />
-        </view>
-        <view class="note" wx:if="{{aiDefaultModelText}}">{{aiDefaultModelText}}</view>
-        <!-- 模型名写错时的提示（例如填了宣传名 deepseek-V4.1-Flash，而 API 里叫 deepseek-flash）。
-             只提示、**绝不自动改用户填的值** —— 静默改配置比让他自己改一遍更糟。 -->
-        <view class="note note-warn" wx:if="{{aiModelAliasHint}}">{{aiModelAliasHint}}</view>
-        <view class="note" wx:if="{{aiModel}}">
-          当前生效：{{aiModel}}（上面留空就是继续用它；填了按你填的来）
-        </view>
-
-        <!-- 4. 保存 / 清除 -->
-        <view class="btn-row">
-          <view
-            class="primary-btn {{aiSaving ? 'btn-disabled' : ''}}"
-            hover-class="primary-btn-hover"
-            bindtap="onAiConfigSave"
-          >{{aiSaving ? '保存中…' : '保存'}}</view>
-          <view
-            class="ghost-btn {{(aiClearing || !aiHasKey) ? 'btn-disabled' : ''}}"
-            hover-class="ghost-btn-hover"
-            bindtap="onAiConfigClear"
-          >{{aiClearing ? '清除中…' : '清除'}}</view>
-        </view>
-        <view class="result-line" wx:if="{{aiResultText}}">{{aiResultText}}</view>
-
-        <!-- 5. 说明 -->
-        <view class="note">
-          你填的 Key 保存在你自己的数据里（按微信身份隔离），别人看不到；
-          界面只显示掩码 {{aiMasked || '****abcd'}}，不会回显原文。
-        </view>
-        <view class="note">
-          「程序预置的 Key」是所有人共用的，额度有限、高峰期可能失败；填自己的更稳。
-        </view>
-        <view class="note">
-          免费获取：{{aiKeyUrlLabel}}
-          <text class="link-text" selectable="{{true}}">{{aiKeyUrl}}</text>
-          （{{aiProviderHint}}），注册后在「API Keys」页面复制即可。
-        </view>
-        <view class="note">AI 页报错时也会引导你回到这里配置。</view>
-      </block>
     </view>
 
     <!-- ================= 三点五、到期提醒（微信订阅消息） ================= -->
@@ -578,15 +447,6 @@
         <text class="third-name">微信云开发</text>
         <text class="third-desc">云函数、云数据库与身份识别。</text>
       </view>
-      <view class="third-item">
-        <text class="third-name">智谱 GLM（glm-4.7-flash）</text>
-        <text class="third-desc">自然语言解析与任务拆解的默认模型（免费档）。</text>
-      </view>
-      <view class="third-item">
-        <text class="third-name">DeepSeek</text>
-        <text class="third-desc">备选模型，可在配置里切换。</text>
-      </view>
-
       <view class="row">
         <text class="row-label">云函数</text>
         <text class="row-value-plain">{{cloudFunctionName}}</text>

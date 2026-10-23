@@ -944,9 +944,10 @@ Page({
    */
   loadAll() {
     this.setData({ loading: true, errorText: '' });
-    // AI 配置独立读：它失败不该让"学期设置 / 作息表"跟着变成错误态，
-    // 反过来也一样。所以两条链路各自处理自己的错误（见 loadAiConfig）。
-    this.loadAiConfig();
+    // 【AI 设置已随 AI 页移出小程序】（个人主体没有「深度合成」类目，审核过不去）。
+    // 卡片与入口都删了，这里也就不再读 AI 配置 —— 少一次云端往返，也少一处误导。
+    // 要恢复 AI 功能：把 me.wxml 的「三、AI 设置」卡片加回来，再放开下面这行。
+    // this.loadAiConfig();
     // 任务列表也顺手拉一次：用来算"替换会删掉几门课、不碰几条手工任务"，
     // 好让用户在点确认**之前**就看到数字。失败不影响本页（下面各自兜底）。
     this.refreshImportCounts();

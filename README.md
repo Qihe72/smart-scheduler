@@ -376,15 +376,19 @@ cp .env.example .env      # Windows: copy .env.example .env
 
 最省事的做法本来是把 Streamlit 页面套一层壳塞进小程序，但个人主体的小程序不能用 `web-view`（微信官方限制），套壳这条路走不通。剩下的只有把业务规则重写一遍、后端换成微信云开发，所以小程序版不是网页版换皮，而是云函数 + 云数据库（`tasks` / `aiParse` / `aiDecompose` / `remind` 四个云函数，`tasks` / `settings` / `reminders` 三个集合），数据按微信 openid 隔离，谁也不用输空间码。
 
-五个页面各自能做什么（底部三个 tab：课表 / 任务 / 我的；添加编辑页与 AI 页是二级页）：
+四个页面各自能做什么（底部三个 tab：课表 / 任务 / 我的；添加编辑页是二级页）：
 
 | 页面 | 具体能做什么 |
 |---|---|
 | 课表（tab） | 一张表：左列是节次，右边七列是周一 ~ 周日。顶部「上一周 / 本周 / 下一周」翻页，今天那一列高亮，每列表头写着「空闲 N 节」（午休这类空档行不计入）。单双周课只在该出现的周出现，三节连堂一眼看出占三格。落不进任何一节的条目集中在表头正下方第一行的「其他时段」（原来放在表格最末尾，真机上得滑到底才看得见）；三种类型（日程 / 截止 / 子任务）的角标字与底色不同，页脚有图例；**每天重复的（打卡 / 习惯）在周一到周日七列上都出现**（含周末） |
-| 任务（tab） | DDL / 日程 / 子任务混排的列表，顶部一行统计 +「进行中 / 全部 / 已完成」筛选；子任务额外显示「↳ 属于：某任务」，点一下跳到父任务；每行可删除，未完成且有日期的任务多一个「拆解」入口 |
+| 任务（tab） | DDL / 日程 / 子任务混排的列表，顶部一行统计 +「进行中 / 全部 / 已完成」筛选；子任务额外显示「↳ 属于：某任务」，点一下跳到父任务；每行可删除 |
 | 添加 / 编辑 | 手动录一条：类型（日程 / DDL / 子任务）、优先级、重复（不重复 / 每周重复（课程）/ 每天重复（打卡 · 习惯））、节次、时长、地点；也能改、能删已有任务。时间一填好，下方会提示该时间段已被占用（红字列出是哪几条），并给一个「换到最近的空闲课节」按钮，只提醒、不阻断保存 |
-| AI 录入 / 拆解 | 一个页面两种模式。「AI 录入」是写一句话 → 解析出若干条 → 逐条改过、勾选之后再点「确认添加」才落盘；「任务拆解」是选一条任务 → 拆成若干子任务 → 同样确认后才写入，自动挂在父任务下 |
-| 我的（tab） | 学期开始日期、当前作息表（会标出哪些节次是导入时校准出来的）、AI 设置、到期提醒的开关与授权入口（另有「一次补齐 3 次」与「把截止事项写进手机日历」两条省事路径，见 8.1）、导入 `.ics` 课表（文件从微信聊天记录里选）、**从教务系统导入（复制粘贴，不需要密码）**、拍照识别课表、导出备份、关于 |
+| 我的（tab） | 学期开始日期、当前作息表（会标出哪些节次是导入时校准出来的）、到期提醒的开关与授权入口（另有「一次补齐 3 次」与「把截止事项写进手机日历」两条省事路径，见 8.1）、导入 `.ics` 课表（文件从微信聊天记录里选）、**从教务系统导入（复制粘贴，不需要密码）**、导出备份、关于 |
+
+> **AI 部分已移出小程序。** 个人主体的小程序没有「深度合成技术（AI 问答 / AI 生成）」这一类目，
+> 带 AI 页面提交审核会被驳回（实测驳回原因就是这个）。所以 AI 录入、任务拆解、课表截图识图
+> 三项整体搬到网页版（`web/ai/index.html` + `aiHttp` 转发云函数，见 `docs/H5版AI说明.md`），
+> 小程序里只留课表、任务、到期提醒与导入导出。这不是砍功能，是把它放到个人主体能发布的地方去。
 
 界面（7 张实机截图，都是这一版在真机上跑出来的样子）
 
@@ -444,25 +448,26 @@ python tools/verify_ics_cross.py
 
 它会用项目自己的 `exporter.py` 现生成一份 `.ics`、同时喂给两边、逐字段比对并打印结果（退出码 0 = 全一致）。另外 `miniprogram/utils/tests/ics.test.js` 把 Python 的实际输出抄成了期望值（文件头写明每条依据的 Python 行号），装了 node 就能单独跑，两边都能复跑，结论不必只凭这一句话。
 
-测试规模（装了 node 就能跑，零依赖、不联网；下面的数字是 2026-10-14 本机实跑的结果）：
+测试规模（装了 node 就能跑，零依赖、不联网；下面的数字是 2026-10-21 本机实跑的结果（AI 页移出小程序后重跑））：
 
 | 命令 | 结果 |
 |---|---|
-| `node miniprogram/utils/tests/run.js` | **2928 / 2928**（汇总入口，加载 13 个测试文件） |
+| `node miniprogram/utils/tests/run.js` | **2533 / 2533**（汇总入口，加载 14 个测试文件） |
 | `node miniprogram/utils/tests/planner.test.js` | 247 / 247 |
-| `node miniprogram/utils/tests/tasks.test.js` | 132 / 132 |
-| `node miniprogram/utils/tests/ics.test.js` | 196 / 196 |
-| `node miniprogram/utils/tests/ai_contract.js` | 225 / 225 |
-| `node miniprogram/utils/tests/ai_page.test.js` | 131 / 131 |
-| `node miniprogram/utils/tests/ai_vision.test.js` | 475 / 475（识图：模型三态判定、入参校验、base64 不入日志、零网络闸门） |
-| `node miniprogram/utils/tests/edit_busy.test.js` | 83 / 83（占用提示与避让） |
+| `node miniprogram/utils/tests/tasks.test.js` | 148 / 148 |
+| `node miniprogram/utils/tests/ics.test.js` | 208 / 208 |
+| `node miniprogram/utils/tests/ai_contract.js` | 237 / 237（云函数的入参出参契约，与页面无关） |
+| `node miniprogram/utils/tests/edit_busy.test.js` | 130 / 130（占用提示与避让、缺时刻拦截） |
 | `node miniprogram/utils/tests/me_import.test.js` | 142 / 142（导入与作息落库） |
-| `node miniprogram/utils/tests/me_ai.test.js` | 111 / 111（AI 设置：模型可填、Key 与服务商匹配） |
 | `node miniprogram/utils/tests/me_periods.test.js` | 217 / 217（节次作息：未校准标记、补录与清除） |
-| `node miniprogram/utils/tests/week_free.test.js` | 369 / 369（课表落点、卡片跨度与空闲统计同口径） |
-| `node miniprogram/utils/tests/remind_page.test.js` | 286 / 286（到期提醒的页面分支：授权、额度、一次补齐、写日历） |
+| `node miniprogram/utils/tests/me_contact.test.js` | 42 / 42（联系与反馈：号码只有一处、复制失败如实说） |
+| `node miniprogram/utils/tests/timetable.test.js` | 68 / 68（教务系统课表解析：按 data-week 落列、明细行定节次） |
+| `node miniprogram/utils/tests/me_timetable.test.js` | 38 / 38（从剪贴板导入的页面入口） |
+| `node miniprogram/utils/tests/ddl_time.test.js` | 24 / 24（缺时刻的截止：列表打标 + 编辑页一键补 23:59） |
+| `node miniprogram/utils/tests/week_free.test.js` | 390 / 390（课表落点、卡片跨度与空闲统计同口径） |
+| `node miniprogram/utils/tests/remind_page.test.js` | 328 / 328（到期提醒：授权、额度、一次补齐、写日历、自查扫描） |
 | `node miniprogram/utils/tests/subscribe.test.js` | 183 / 183（少点几次：静默补额度的三道闸、"不瞎猜 23:59"、写日历防重复） |
-| `node miniprogram/cloudfunctions/_selftest.js` | **1460 / 1460**（四个云函数，内存假数据库） |
+| `node miniprogram/cloudfunctions/_selftest.js` | **1491 / 1491**（四个云函数，内存假数据库） |
 | `python tools/verify_miniprogram.py` | 58 / 58（工程静态验收：重复声明、测试是否都被 `run.js` 加载、云函数是否都被自测覆盖、密钥扫描、已修 bug 的回退钉子） |
 | `python tools/verify_week_placement.py` | 用真实数据核对"任务不会被排到与它时间零重叠的那一行"（核对 3 处、0 违反） |
 | `python tools/verify_ics_cross.py` | 13 / 13（跨语言逐字段对比，见上） |
@@ -623,7 +628,7 @@ Python 侧共 11 个 `.py` 模块、7811 行（下表括号内为各文件行数
 ├── data/
 │   ├── schedules.json   任务数据（本机私有）
 │   └── settings.json    学期起点、校准后的作息（本机私有）
-├── miniprogram/         微信小程序版（微信云开发）：课表 / 任务 / AI 录入 / 我的，含 node 单测
+├── miniprogram/         微信小程序版（微信云开发）：课表 / 任务 / 我的，含 node 单测
 └── docs/                演示提纲、提交清单与个人简介、部署指南（截图待补）
 ```
 

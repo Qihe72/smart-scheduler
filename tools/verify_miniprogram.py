@@ -1,9 +1,9 @@
 """小程序工程验证脚本（我自己复跑，不只看子代理的汇报）。
 
 检查项：
-  1. 必需文件是否齐全（含五个页面的四件套）
+  1. 必需文件是否齐全（含四个页面的四件套）
   2. 所有 JSON 能否解析（app/sitemap/project.config/每页 .json/云函数 package.json）
-  3. app.json 自检：五个页面已注册、tabBar 引用的页面存在且不引用缺失图片、cloud=true
+  3. app.json 自检：四个页面已注册、tabBar 引用的页面存在且不引用缺失图片、cloud=true
   4. 每个 .js 过 node --check
   5. 跑 utils 单测与云函数自测，必须退出码 0
   6. 云函数依赖只允许 wx-server-sdk
@@ -21,7 +21,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ROOT = os.path.join(os.path.dirname(HERE), "miniprogram")
 
-PAGES = ("week", "tasks", "edit", "ai", "me")
+PAGES = ("week", "tasks", "edit", "me")
 UTILS = ("periods.js", "planner.js", "tasks.js", "ics.js", "api.js")
 FUNCS = ("tasks", "aiParse", "aiDecompose", "remind", "aiHttp")
 
@@ -85,7 +85,8 @@ def main() -> int:
         with open(app_path, encoding="utf-8") as fh:
             app = json.load(fh)
         pages_listed = app.get("pages") or []
-        check("app.json 注册了五个页面", len(pages_listed) >= 5, pages_listed)
+        check("app.json 注册了四个页面（AI 页已移出）",
+                 pages_listed == [f"pages/{page}/{page}" for page in PAGES], pages_listed)
         check("app.json 声明 cloud=true", bool(app.get("cloud")))
         tab = app.get("tabBar") or {}
         items = tab.get("list") or []

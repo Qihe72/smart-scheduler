@@ -46,14 +46,6 @@
       <text class="filter-text">{{filterText}}</text>
     </view>
 
-    <!-- AI 录入入口：整句自然语言录入（绝对路径 /pages/ai/ai） -->
-    <view class="ai-bar">
-      <view class="ai-btn" hover-class="ai-btn-hover" bindtap="onTapAiParse">
-        <text class="ai-btn-main">AI 录入</text>
-        <text class="ai-btn-sub">说一句话，自动拆成日程与截止</text>
-      </view>
-    </view>
-    <view class="ai-hint" wx:if="{{decomposeHint}}">{{decomposeHint}}</view>
   </view>
 
   <!--
@@ -144,24 +136,8 @@
         </view>
       </view>
 
-      <!-- 删除 / AI 拆解：catchtap 阻断冒泡，点它们不会同时进编辑页 -->
+      <!-- 删除按钮：catchtap 阻断冒泡，点它不会同时进编辑页 -->
       <view class="card-actions">
-        <!-- 可拆解：真能点进去，走 /pages/ai/ai?mode=decompose&id=xxx -->
-        <view
-          class="ai-mini-btn"
-          wx:if="{{item.canDecompose}}"
-          hover-class="ai-mini-btn-hover"
-          data-id="{{item.id}}"
-          catchtap="onTapAiDecompose"
-        >拆解</view>
-        <!-- 不可拆解：说明原因并置灰（比"按钮直接消失"更容易理解） -->
-        <view
-          class="ai-mini-btn ai-mini-disabled"
-          wx:elif="{{item.decomposeBlockedText}}"
-          data-reason="{{item.decomposeBlockedText}}"
-          catchtap="onTapAiBlocked"
-        >拆解</view>
-
         <view class="del-btn" data-id="{{item.id}}" catchtap="onDelete">删除</view>
       </view>
     </view>
